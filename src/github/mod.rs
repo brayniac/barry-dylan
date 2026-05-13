@@ -1,1 +1,4 @@
-//! TODO: module documentation will be added as functionality lands.
+pub mod app;
+pub mod client;
+pub mod pr;
+pub mod check_run;
