@@ -95,6 +95,153 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Lease the oldest job whose run_after <= now_ts and is not currently leased
+    /// (or whose lease has expired). Returns None if there's nothing to do.
+    pub async fn lease_next(
+        &self,
+        now_ts: i64,
+        lease_secs: i64,
+    ) -> anyhow::Result<Option<LeasedJob>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"SELECT id, installation_id, repo_owner, repo_name, pr_number,
+                      event_kind, delivery_id, attempts
+               FROM jobs
+               WHERE run_after <= ?1
+                 AND (leased_until IS NULL OR leased_until <= ?1)
+               ORDER BY run_after ASC, id ASC
+               LIMIT 1"#,
+        )
+        .bind(now_ts)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(r) = row else { tx.commit().await?; return Ok(None) };
+        let id: i64 = r.get("id");
+        sqlx::query("UPDATE jobs SET leased_until = ?1 WHERE id = ?2")
+            .bind(now_ts + lease_secs)
+            .bind(id)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+
+        Ok(Some(LeasedJob {
+            id,
+            installation_id: r.get("installation_id"),
+            repo_owner: r.get("repo_owner"),
+            repo_name: r.get("repo_name"),
+            pr_number: r.get("pr_number"),
+            event_kind: r.get("event_kind"),
+            delivery_id: r.get("delivery_id"),
+            attempts: r.get("attempts"),
+        }))
+    }
+
+    pub async fn ack(&self, job_id: i64) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM jobs WHERE id = ?1").bind(job_id).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Mark a job as failed; if attempts < max_attempts, reschedule with backoff.
+    /// Returns true if the job was rescheduled, false if it was dropped.
+    pub async fn nack(
+        &self,
+        job_id: i64,
+        now_ts: i64,
+        error: &str,
+        max_attempts: i64,
+        backoff_schedule_secs: &[i64],
+    ) -> anyhow::Result<bool> {
+        let row = sqlx::query("SELECT attempts FROM jobs WHERE id = ?1")
+            .bind(job_id).fetch_optional(&self.pool).await?;
+        let Some(r) = row else { return Ok(false) };
+        let attempts: i64 = r.get("attempts");
+        let next_attempts = attempts + 1;
+
+        if next_attempts >= max_attempts {
+            sqlx::query("DELETE FROM jobs WHERE id = ?1")
+                .bind(job_id).execute(&self.pool).await?;
+            return Ok(false);
+        }
+        let idx = (attempts as usize).min(backoff_schedule_secs.len().saturating_sub(1));
+        let delay = backoff_schedule_secs.get(idx).copied().unwrap_or(60);
+        sqlx::query(
+            r#"UPDATE jobs
+               SET attempts = ?1, leased_until = NULL, run_after = ?2, last_error = ?3
+               WHERE id = ?4"#,
+        )
+        .bind(next_attempts)
+        .bind(now_ts + delay)
+        .bind(error)
+        .bind(job_id)
+        .execute(&self.pool).await?;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    fn job(pr: i64) -> NewJob {
+        NewJob {
+            installation_id: 1, repo_owner: "o".into(), repo_name: "r".into(),
+            pr_number: pr, event_kind: "synchronize".into(), delivery_id: "d".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_returns_due_job_and_marks_leased() {
+        let s = Store::in_memory().await.unwrap();
+        s.enqueue(&job(1), 100, 100).await.unwrap();
+        let leased = s.lease_next(100, 300).await.unwrap().unwrap();
+        assert_eq!(leased.pr_number, 1);
+        // immediate second lease at same time should find nothing
+        assert!(s.lease_next(100, 300).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_lease_can_be_re_leased() {
+        let s = Store::in_memory().await.unwrap();
+        s.enqueue(&job(2), 100, 100).await.unwrap();
+        let _ = s.lease_next(100, 60).await.unwrap().unwrap();
+        // 200s later the lease has expired
+        let leased = s.lease_next(200, 60).await.unwrap();
+        assert!(leased.is_some());
+    }
+
+    #[tokio::test]
+    async fn ack_removes_job() {
+        let s = Store::in_memory().await.unwrap();
+        s.enqueue(&job(3), 100, 100).await.unwrap();
+        let l = s.lease_next(100, 60).await.unwrap().unwrap();
+        s.ack(l.id).await.unwrap();
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&s.pool).await.unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn nack_reschedules_until_max_attempts() {
+        let s = Store::in_memory().await.unwrap();
+        s.enqueue(&job(4), 100, 100).await.unwrap();
+        let l = s.lease_next(100, 60).await.unwrap().unwrap();
+        let alive = s.nack(l.id, 200, "boom", 3, &[60, 300, 1500]).await.unwrap();
+        assert!(alive);
+
+        let l = s.lease_next(300, 60).await.unwrap().unwrap();
+        let alive = s.nack(l.id, 400, "boom", 3, &[60, 300, 1500]).await.unwrap();
+        assert!(alive);
+
+        let l = s.lease_next(2000, 60).await.unwrap().unwrap();
+        let alive = s.nack(l.id, 2100, "boom", 3, &[60, 300, 1500]).await.unwrap();
+        assert!(!alive);
+
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&s.pool).await.unwrap();
+        assert_eq!(n, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
