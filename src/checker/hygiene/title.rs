@@ -64,4 +64,33 @@ mod tests {
         let out = TitleChecker.run(&ctx).await.unwrap();
         assert!(matches!(out.status, crate::checker::OutcomeStatus::Failure));
     }
+
+    #[tokio::test]
+    async fn ci_build_style_revert_pass() {
+        for title in [
+            "ci: add github actions workflow",
+            "build: bump rust edition",
+            "style: cargo fmt across codebase",
+            "revert: undo experimental change",
+        ] {
+            let ctx = ctx_with(title, TitleRule::default());
+            let out = TitleChecker.run(&ctx).await.unwrap();
+            assert!(
+                matches!(out.status, crate::checker::OutcomeStatus::Success),
+                "expected `{title}` to pass",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn breaking_change_marker_passes() {
+        for title in ["feat!: drop legacy api", "refactor(api)!: rename endpoints"] {
+            let ctx = ctx_with(title, TitleRule::default());
+            let out = TitleChecker.run(&ctx).await.unwrap();
+            assert!(
+                matches!(out.status, crate::checker::OutcomeStatus::Success),
+                "expected `{title}` to pass",
+            );
+        }
+    }
 }

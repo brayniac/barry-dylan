@@ -33,7 +33,9 @@ impl Default for TitleRule {
 }
 
 fn default_title_pattern() -> String {
-    r"^(feat|fix|chore|docs|refactor|test|perf)(\([^)]+\))?: .+".into()
+    // Conventional Commits types per https://www.conventionalcommits.org/.
+    // Optional scope in parens, optional `!` breaking-change marker, colon-space, then text.
+    r"^(feat|fix|chore|docs|refactor|test|perf|ci|build|style|revert)(\([^)]+\))?!?: .+".into()
 }
 
 #[derive(Debug, Deserialize, Clone)]
