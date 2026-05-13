@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "barry-bot", version)]
@@ -9,10 +10,9 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Cmd {
-    /// Run the bot service.
     Run {
         #[arg(long, default_value = "barry.toml")]
-        config: std::path::PathBuf,
+        config: PathBuf,
     },
 }
 
@@ -20,9 +20,6 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Run { config } => {
-            println!("would load config from {}", config.display());
-            Ok(())
-        }
+        Cmd::Run { config } => barry_bot::app_runtime::run(&config).await,
     }
 }
