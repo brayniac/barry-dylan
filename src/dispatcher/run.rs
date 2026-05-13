@@ -92,50 +92,53 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     };
 
     let checker_timeout = Duration::from_secs(deps.config.dispatcher.checker_timeout_secs);
+    let store = &deps.store;
+    let gh_ref = &gh;
+    let job_ref = job;
+    let pr_ref = &pr;
+    let ctx_ref = &ctx;
     let mut tasks = Vec::new();
     for chk in &deps.pipeline.checkers {
         if !chk.enabled(&ctx.repo_cfg) { continue; }
         let chk = chk.clone();
-        let ctx_ref = &ctx;
         tasks.push(async move {
-            tracing::debug!(checker = chk.name(), "checker starting");
+            let name = chk.name();
+            tracing::debug!(checker = name, "checker starting");
             let t = std::time::Instant::now();
             let res = tokio::time::timeout(checker_timeout, chk.run(ctx_ref)).await;
-            (chk.name(), res, t.elapsed())
+            let dur = t.elapsed();
+            let outcome = match res {
+                Ok(Ok(o)) => o,
+                Ok(Err(e)) => {
+                    tracing::error!(checker = name, error = ?e, "checker failed");
+                    CheckerOutcome::neutral(static_name(name), format!("internal error: {e}"))
+                }
+                Err(_) => {
+                    tracing::warn!(checker = name, "checker timed out");
+                    CheckerOutcome::neutral(static_name(name), "timed out")
+                }
+            };
+            tracing::info!(
+                checker = name, status = status_str(outcome.status),
+                duration_ms = dur.as_millis() as u64, "checker completed",
+            );
+            if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome).await {
+                tracing::error!(checker = name, error = ?e, "post_outcome failed");
+            }
+            let _ = store.append_audit(&crate::storage::audit::AuditEntry {
+                ts: now_ts(),
+                delivery_id: Some(&job_ref.delivery_id),
+                repo_owner: Some(&job_ref.repo_owner),
+                repo_name: Some(&job_ref.repo_name),
+                pr_number: Some(job_ref.pr_number),
+                checker_name: Some(name),
+                outcome: status_str(outcome.status),
+                duration_ms: Some(dur.as_millis() as i64),
+                details: None,
+            }).await;
         });
     }
-    let results = futures::future::join_all(tasks).await;
-
-    // Post outcomes.
-    for (name, res, dur) in results {
-        let outcome = match res {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                tracing::error!(checker = name, error = ?e, "checker failed");
-                CheckerOutcome::neutral(static_name(name), format!("internal error: {e}"))
-            }
-            Err(_) => {
-                tracing::warn!(checker = name, "checker timed out");
-                CheckerOutcome::neutral(static_name(name), "timed out")
-            }
-        };
-        tracing::info!(
-            checker = name, status = status_str(outcome.status),
-            duration_ms = dur.as_millis() as u64, "checker completed",
-        );
-        post_outcome(&gh, job, &pr, &outcome).await?;
-        let _ = deps.store.append_audit(&crate::storage::audit::AuditEntry {
-            ts: now_ts(),
-            delivery_id: Some(&job.delivery_id),
-            repo_owner: Some(&job.repo_owner),
-            repo_name: Some(&job.repo_name),
-            pr_number: Some(job.pr_number),
-            checker_name: Some(name),
-            outcome: status_str(outcome.status),
-            duration_ms: Some(dur.as_millis() as i64),
-            details: None,
-        }).await;
-    }
+    futures::future::join_all(tasks).await;
     Ok(())
 }
 
