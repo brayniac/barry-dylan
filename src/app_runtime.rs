@@ -77,12 +77,24 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
 
     let server = axum::serve(listener, router);
 
+    let server_task = tokio::spawn(async move { server.await });
     let mut sighup = signal(SignalKind::hangup())?;
-    tokio::select! {
-        r = server => { r?; }
-        _ = sighup.recv() => { tracing::info!("SIGHUP received — reloading"); }
-        _ = tokio::signal::ctrl_c() => { tracing::info!("ctrl-c"); }
+    loop {
+        tokio::select! {
+            _ = sighup.recv() => {
+                tracing::info!("SIGHUP — reloading config");
+                match Config::load(config_path) {
+                    Ok(new_cfg) => tracing::info!(workers = new_cfg.dispatcher.worker_count, "reloaded"),
+                    Err(e) => tracing::error!(?e, "reload failed; keeping previous config"),
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("ctrl-c; shutting down");
+                break;
+            }
+        }
     }
+    server_task.abort();
     Ok(())
 }
 
