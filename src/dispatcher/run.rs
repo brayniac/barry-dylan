@@ -91,6 +91,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         prior_bot_comments: bot_comments,
     };
 
+    let checker_timeout = Duration::from_secs(deps.config.dispatcher.checker_timeout_secs);
     let mut tasks = Vec::new();
     for chk in &deps.pipeline.checkers {
         if !chk.enabled(&ctx.repo_cfg) { continue; }
@@ -99,7 +100,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         tasks.push(async move {
             tracing::debug!(checker = chk.name(), "checker starting");
             let t = std::time::Instant::now();
-            let res = tokio::time::timeout(Duration::from_secs(60), chk.run(ctx_ref)).await;
+            let res = tokio::time::timeout(checker_timeout, chk.run(ctx_ref)).await;
             (chk.name(), res, t.elapsed())
         });
     }

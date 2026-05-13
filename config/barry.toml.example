@@ -13,7 +13,8 @@ sqlite_path = "/var/lib/barry/barry.db"
 [dispatcher]
 debounce_secs = 30
 worker_count = 4
-job_timeout_secs = 600
+job_timeout_secs = 1800
+checker_timeout_secs = 600
 
 [llm.default]
 provider = "anthropic"
