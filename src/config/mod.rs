@@ -60,11 +60,14 @@ pub struct DispatcherConfig {
     pub worker_count: usize,
     #[serde(default = "default_job_timeout")]
     pub job_timeout_secs: u64,
+    #[serde(default = "default_checker_timeout")]
+    pub checker_timeout_secs: u64,
 }
 
 fn default_debounce() -> u64 { 30 }
 fn default_workers() -> usize { 4 }
-fn default_job_timeout() -> u64 { 600 }
+fn default_job_timeout() -> u64 { 1800 }
+fn default_checker_timeout() -> u64 { 600 }
 
 pub mod repo;
 
