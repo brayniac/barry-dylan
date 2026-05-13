@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
-pub mod openai;
 pub mod factory;
+pub mod openai;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmMessage {
@@ -13,7 +13,11 @@ pub struct LlmMessage {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Role { System, User, Assistant }
+pub enum Role {
+    System,
+    User,
+    Assistant,
+}
 
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
@@ -32,9 +36,12 @@ pub struct LlmResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    #[error("http: {0}")] Http(#[from] reqwest::Error),
-    #[error("api {status}: {body}")] Api { status: u16, body: String },
-    #[error("unexpected response shape: {0}")] Shape(String),
+    #[error("http: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("api {status}: {body}")]
+    Api { status: u16, body: String },
+    #[error("unexpected response shape: {0}")]
+    Shape(String),
 }
 
 #[async_trait]

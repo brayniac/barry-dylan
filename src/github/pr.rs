@@ -18,10 +18,16 @@ pub struct PullRequest {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct GitRef { pub sha: String, #[serde(rename = "ref")] pub r#ref: String }
+pub struct GitRef {
+    pub sha: String,
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+}
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct User { pub login: String }
+pub struct User {
+    pub login: String,
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ChangedFile {
@@ -62,78 +68,139 @@ struct ListedReview {
 }
 
 impl GitHub {
-    pub async fn get_pr(&self, owner: &str, repo: &str, number: i64) -> Result<PullRequest, GhError> {
-        self.get_json(&format!("/repos/{owner}/{repo}/pulls/{number}")).await
+    pub async fn get_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<PullRequest, GhError> {
+        self.get_json(&format!("/repos/{owner}/{repo}/pulls/{number}"))
+            .await
     }
 
-    pub async fn list_pr_files(&self, owner: &str, repo: &str, number: i64) -> Result<Vec<ChangedFile>, GhError> {
+    pub async fn list_pr_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<Vec<ChangedFile>, GhError> {
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
-            let page_files: Vec<ChangedFile> =
-                self.get_json(&format!("/repos/{owner}/{repo}/pulls/{number}/files?per_page=100&page={page}")).await?;
-            if page_files.is_empty() { break; }
+            let page_files: Vec<ChangedFile> = self
+                .get_json(&format!(
+                    "/repos/{owner}/{repo}/pulls/{number}/files?per_page=100&page={page}"
+                ))
+                .await?;
+            if page_files.is_empty() {
+                break;
+            }
             let last_full = page_files.len() == 100;
             out.extend(page_files);
-            if !last_full { break; }
+            if !last_full {
+                break;
+            }
             page += 1;
-            if page > 30 { break; } // safety cap (3000 files)
+            if page > 30 {
+                break;
+            } // safety cap (3000 files)
         }
         Ok(out)
     }
 
-    pub async fn author_permission(&self, owner: &str, repo: &str, login: &str)
-        -> Result<String, GhError>
-    {
+    pub async fn author_permission(
+        &self,
+        owner: &str,
+        repo: &str,
+        login: &str,
+    ) -> Result<String, GhError> {
         let r: PermissionResp = self
-            .get_json(&format!("/repos/{owner}/{repo}/collaborators/{login}/permission")).await?;
+            .get_json(&format!(
+                "/repos/{owner}/{repo}/collaborators/{login}/permission"
+            ))
+            .await?;
         Ok(r.permission)
     }
 
     /// Fetch the .barry.toml at the repo's default branch; returns None if 404.
-    pub async fn get_repo_config_text(&self, owner: &str, repo: &str, branch: &str)
-        -> Result<Option<String>, GhError>
-    {
+    pub async fn get_repo_config_text(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<String>, GhError> {
         let path = format!("/repos/{owner}/{repo}/contents/.barry.toml?ref={branch}");
         match self.get_json::<ContentResp>(&path).await {
             Ok(c) => {
                 use base64::Engine;
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(c.content.replace('\n', ""))
-                    .map_err(|e| GhError::Api { status: 500, body: e.to_string() })?;
-                Ok(Some(String::from_utf8(bytes)
-                    .map_err(|e| GhError::Api { status: 500, body: e.to_string() })?))
+                    .map_err(|e| GhError::Api {
+                        status: 500,
+                        body: e.to_string(),
+                    })?;
+                Ok(Some(String::from_utf8(bytes).map_err(|e| {
+                    GhError::Api {
+                        status: 500,
+                        body: e.to_string(),
+                    }
+                })?))
             }
             Err(GhError::Api { status: 404, .. }) => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    pub async fn list_pr_comments(&self, owner: &str, repo: &str, number: i64)
-        -> Result<Vec<BotComment>, GhError>
-    {
+    pub async fn list_pr_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<Vec<BotComment>, GhError> {
         let v: Vec<ListedComment> = self
-            .get_json(&format!("/repos/{owner}/{repo}/issues/{number}/comments?per_page=100")).await?;
-        Ok(v.into_iter().map(|c| BotComment {
-            id: c.id, node_id: c.node_id, body: c.body, author: c.user.login,
-        }).collect())
+            .get_json(&format!(
+                "/repos/{owner}/{repo}/issues/{number}/comments?per_page=100"
+            ))
+            .await?;
+        Ok(v.into_iter()
+            .map(|c| BotComment {
+                id: c.id,
+                node_id: c.node_id,
+                body: c.body,
+                author: c.user.login,
+            })
+            .collect())
     }
 
-    pub async fn list_pr_reviews(&self, owner: &str, repo: &str, number: i64)
-        -> Result<Vec<BotComment>, GhError>
-    {
+    pub async fn list_pr_reviews(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<Vec<BotComment>, GhError> {
         let v: Vec<ListedReview> = self
-            .get_json(&format!("/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100")).await?;
-        Ok(v.into_iter().map(|r| BotComment {
-            id: r.id, node_id: r.node_id, body: r.body.unwrap_or_default(), author: r.user.login,
-        }).collect())
+            .get_json(&format!(
+                "/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100"
+            ))
+            .await?;
+        Ok(v.into_iter()
+            .map(|r| BotComment {
+                id: r.id,
+                node_id: r.node_id,
+                body: r.body.unwrap_or_default(),
+                author: r.user.login,
+            })
+            .collect())
     }
 
     /// One GraphQL round trip for PR metadata, the last 100 comments and reviews, and
     /// the `.barry.toml` blob at HEAD. Replaces four separate REST calls in setup.
-    pub async fn fetch_pr_context(&self, owner: &str, repo: &str, number: i64)
-        -> Result<PrContext, GhError>
-    {
+    pub async fn fetch_pr_context(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+    ) -> Result<PrContext, GhError> {
         let q = r#"
             query($owner: String!, $name: String!, $number: Int!) {
               repository(owner: $owner, name: $name) {
@@ -155,9 +222,14 @@ impl GitHub {
               }
             }
         "#;
-        let body: PrCtxResponse = self.graphql(q, serde_json::json!({
-            "owner": owner, "name": repo, "number": number,
-        })).await?;
+        let body: PrCtxResponse = self
+            .graphql(
+                q,
+                serde_json::json!({
+                    "owner": owner, "name": repo, "number": number,
+                }),
+            )
+            .await?;
         Ok(body.into_context())
     }
 }
@@ -173,10 +245,14 @@ pub struct PrContext {
 }
 
 #[derive(Deserialize)]
-struct PrCtxResponse { data: PrCtxData }
+struct PrCtxResponse {
+    data: PrCtxData,
+}
 
 #[derive(Deserialize)]
-struct PrCtxData { repository: PrCtxRepository }
+struct PrCtxData {
+    repository: PrCtxRepository,
+}
 
 #[derive(Deserialize)]
 struct PrCtxRepository {
@@ -186,7 +262,10 @@ struct PrCtxRepository {
 }
 
 #[derive(Deserialize)]
-struct PrCtxConfig { #[serde(default)] text: Option<String> }
+struct PrCtxConfig {
+    #[serde(default)]
+    text: Option<String>,
+}
 
 #[derive(Deserialize)]
 struct PrCtxPullRequest {
@@ -194,28 +273,39 @@ struct PrCtxPullRequest {
     title: String,
     body: Option<String>,
     state: String,
-    #[serde(rename = "isDraft")] is_draft: bool,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
     additions: i64,
     deletions: i64,
-    #[serde(rename = "changedFiles")] changed_files: i64,
+    #[serde(rename = "changedFiles")]
+    changed_files: i64,
     author: Option<PrCtxActor>,
-    #[serde(rename = "headRefOid")] head_ref_oid: String,
-    #[serde(rename = "headRefName")] head_ref_name: String,
-    #[serde(rename = "baseRefOid")] base_ref_oid: String,
-    #[serde(rename = "baseRefName")] base_ref_name: String,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: String,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(rename = "baseRefOid")]
+    base_ref_oid: String,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
     comments: PrCtxConnection<PrCtxComment>,
     reviews: PrCtxConnection<PrCtxReview>,
 }
 
 #[derive(Deserialize)]
-struct PrCtxConnection<T> { nodes: Vec<T> }
+struct PrCtxConnection<T> {
+    nodes: Vec<T>,
+}
 
 #[derive(Deserialize)]
-struct PrCtxActor { login: String }
+struct PrCtxActor {
+    login: String,
+}
 
 #[derive(Deserialize)]
 struct PrCtxComment {
-    #[serde(rename = "databaseId")] database_id: i64,
+    #[serde(rename = "databaseId")]
+    database_id: i64,
     id: String,
     author: Option<PrCtxActor>,
     // GitHub's schema declares this `String!`, but we accept null defensively:
@@ -225,7 +315,8 @@ struct PrCtxComment {
 
 #[derive(Deserialize)]
 struct PrCtxReview {
-    #[serde(rename = "databaseId")] database_id: i64,
+    #[serde(rename = "databaseId")]
+    database_id: i64,
     id: String,
     author: Option<PrCtxActor>,
     body: Option<String>,
@@ -239,25 +330,52 @@ impl PrCtxResponse {
             number: p.number,
             title: p.title,
             body: p.body,
-            user: User { login: author_login },
+            user: User {
+                login: author_login,
+            },
             draft: p.is_draft,
             state: p.state.to_lowercase(),
-            head: GitRef { sha: p.head_ref_oid, r#ref: p.head_ref_name },
-            base: GitRef { sha: p.base_ref_oid, r#ref: p.base_ref_name },
+            head: GitRef {
+                sha: p.head_ref_oid,
+                r#ref: p.head_ref_name,
+            },
+            base: GitRef {
+                sha: p.base_ref_oid,
+                r#ref: p.base_ref_name,
+            },
             additions: p.additions,
             deletions: p.deletions,
             changed_files: p.changed_files,
         };
-        let comments = p.comments.nodes.into_iter().map(|c| BotComment {
-            id: c.database_id, node_id: c.id, body: c.body.unwrap_or_default(),
-            author: c.author.map(|a| a.login).unwrap_or_default(),
-        }).collect();
-        let reviews = p.reviews.nodes.into_iter().map(|r| BotComment {
-            id: r.database_id, node_id: r.id, body: r.body.unwrap_or_default(),
-            author: r.author.map(|a| a.login).unwrap_or_default(),
-        }).collect();
+        let comments = p
+            .comments
+            .nodes
+            .into_iter()
+            .map(|c| BotComment {
+                id: c.database_id,
+                node_id: c.id,
+                body: c.body.unwrap_or_default(),
+                author: c.author.map(|a| a.login).unwrap_or_default(),
+            })
+            .collect();
+        let reviews = p
+            .reviews
+            .nodes
+            .into_iter()
+            .map(|r| BotComment {
+                id: r.database_id,
+                node_id: r.id,
+                body: r.body.unwrap_or_default(),
+                author: r.author.map(|a| a.login).unwrap_or_default(),
+            })
+            .collect();
         let config_text = self.data.repository.config.and_then(|c| c.text);
-        PrContext { pr, comments, reviews, config_text }
+        PrContext {
+            pr,
+            comments,
+            reviews,
+            config_text,
+        }
     }
 }
 
@@ -288,36 +406,66 @@ pub struct ReviewInput<'a> {
 
 impl GitHub {
     pub async fn create_review(
-        &self, owner: &str, repo: &str, number: i64, input: &ReviewInput<'_>,
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+        input: &ReviewInput<'_>,
     ) -> Result<i64, GhError> {
-        #[derive(Deserialize)] struct R { id: i64 }
+        #[derive(Deserialize)]
+        struct R {
+            id: i64,
+        }
         let path = format!("/repos/{owner}/{repo}/pulls/{number}/reviews");
-        let r: R = self.post_json(&path, serde_json::to_value(input).unwrap()).await?;
+        let r: R = self
+            .post_json(&path, serde_json::to_value(input).unwrap())
+            .await?;
         Ok(r.id)
     }
 
     pub async fn create_issue_comment(
-        &self, owner: &str, repo: &str, number: i64, body: &str,
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+        body: &str,
     ) -> Result<i64, GhError> {
-        #[derive(Deserialize)] struct R { id: i64 }
+        #[derive(Deserialize)]
+        struct R {
+            id: i64,
+        }
         let path = format!("/repos/{owner}/{repo}/issues/{number}/comments");
-        let r: R = self.post_json(&path, serde_json::json!({ "body": body })).await?;
+        let r: R = self
+            .post_json(&path, serde_json::json!({ "body": body }))
+            .await?;
         Ok(r.id)
     }
 
     pub async fn react(
-        &self, owner: &str, repo: &str, comment_id: i64, content: &str,
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: i64,
+        content: &str,
     ) -> Result<(), GhError> {
         let path = format!("/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions");
-        let _: serde_json::Value = self.post_json(&path, serde_json::json!({ "content": content })).await?;
+        let _: serde_json::Value = self
+            .post_json(&path, serde_json::json!({ "content": content }))
+            .await?;
         Ok(())
     }
 
     pub async fn add_labels(
-        &self, owner: &str, repo: &str, number: i64, labels: &[String],
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+        labels: &[String],
     ) -> Result<(), GhError> {
         let path = format!("/repos/{owner}/{repo}/issues/{number}/labels");
-        let _: serde_json::Value = self.post_json(&path, serde_json::json!({ "labels": labels })).await?;
+        let _: serde_json::Value = self
+            .post_json(&path, serde_json::json!({ "labels": labels }))
+            .await?;
         Ok(())
     }
 
@@ -330,8 +478,9 @@ impl GitHub {
               }
             }
         "#;
-        let _: serde_json::Value =
-            self.graphql(q, serde_json::json!({ "id": node_id })).await?;
+        let _: serde_json::Value = self
+            .graphql(q, serde_json::json!({ "id": node_id }))
+            .await?;
         Ok(())
     }
 }
@@ -375,7 +524,10 @@ mod tests {
         assert_eq!(ctx.comments[1].author, ""); // null author
         assert_eq!(ctx.reviews.len(), 1);
         assert_eq!(ctx.reviews[0].author, "barry-dylan");
-        assert_eq!(ctx.config_text.as_deref(), Some("[hygiene]\nenabled = true\n"));
+        assert_eq!(
+            ctx.config_text.as_deref(),
+            Some("[hygiene]\nenabled = true\n")
+        );
     }
 
     #[test]
@@ -401,7 +553,9 @@ mod tests {
                 }
             }
         });
-        let ctx = serde_json::from_value::<PrCtxResponse>(raw).unwrap().into_context();
+        let ctx = serde_json::from_value::<PrCtxResponse>(raw)
+            .unwrap()
+            .into_context();
         assert_eq!(ctx.comments.len(), 1);
         assert_eq!(ctx.comments[0].body, "");
     }

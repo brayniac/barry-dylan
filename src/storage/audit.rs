@@ -42,12 +42,22 @@ mod tests {
     async fn append_and_count() {
         let s = Store::in_memory().await.unwrap();
         s.append_audit(&AuditEntry {
-            ts: 1, delivery_id: Some("d1"), repo_owner: Some("o"), repo_name: Some("r"),
-            pr_number: Some(1), checker_name: Some("hygiene.title"),
-            outcome: "success", duration_ms: Some(10), details: None,
-        }).await.unwrap();
+            ts: 1,
+            delivery_id: Some("d1"),
+            repo_owner: Some("o"),
+            repo_name: Some("r"),
+            pr_number: Some(1),
+            checker_name: Some("hygiene.title"),
+            outcome: "success",
+            duration_ms: Some(10),
+            details: None,
+        })
+        .await
+        .unwrap();
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM audit_log")
-            .fetch_one(&s.pool).await.unwrap();
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
         assert_eq!(n, 1);
     }
 }

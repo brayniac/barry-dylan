@@ -32,14 +32,27 @@ pub fn parse(text: &str) -> Result<ParsedReview, ParseError> {
     let mut esc = false;
     for (i, &b) in bytes.iter().enumerate() {
         if in_str {
-            if esc { esc = false; continue; }
-            if b == b'\\' { esc = true; continue; }
-            if b == b'"' { in_str = false; }
+            if esc {
+                esc = false;
+                continue;
+            }
+            if b == b'\\' {
+                esc = true;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
             continue;
         }
         match b {
             b'"' => in_str = true,
-            b'{' => { if depth == 0 { start = Some(i); } depth += 1; }
+            b'{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
             b'}' => {
                 depth -= 1;
                 if depth == 0
@@ -61,14 +74,16 @@ mod tests {
 
     #[test]
     fn parses_clean_json() {
-        let r = parse(r#"{"findings":[{"file":"a.rs","line":3,"message":"hi"}],"summary":"x"}"#).unwrap();
+        let r = parse(r#"{"findings":[{"file":"a.rs","line":3,"message":"hi"}],"summary":"x"}"#)
+            .unwrap();
         assert_eq!(r.findings.len(), 1);
         assert_eq!(r.summary, "x");
     }
 
     #[test]
     fn parses_json_in_fenced_block() {
-        let r = parse("Some preamble\n```json\n{\"findings\":[],\"summary\":\"ok\"}\n```\n").unwrap();
+        let r =
+            parse("Some preamble\n```json\n{\"findings\":[],\"summary\":\"ok\"}\n```\n").unwrap();
         assert_eq!(r.summary, "ok");
     }
 
@@ -80,7 +95,10 @@ mod tests {
 
     #[test]
     fn handles_quotes_inside_strings() {
-        let r = parse(r#"{"findings":[{"file":"a","line":1,"message":"he said \"hi\""}],"summary":""}"#).unwrap();
+        let r = parse(
+            r#"{"findings":[{"file":"a","line":1,"message":"he said \"hi\""}],"summary":""}"#,
+        )
+        .unwrap();
         assert_eq!(r.findings[0].message, r#"he said "hi""#);
     }
 }

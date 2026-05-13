@@ -1,11 +1,11 @@
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::path::Path;
 use std::str::FromStr;
 
+pub mod audit;
 pub mod queue;
 pub mod tokens;
-pub mod audit;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
@@ -57,9 +57,11 @@ mod tests {
     #[tokio::test]
     async fn in_memory_creates_schema() {
         let store = Store::in_memory().await.unwrap();
-        let names: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetch_all(&store.pool).await.unwrap();
+        let names: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
         let names: Vec<String> = names.into_iter().map(|t| t.0).collect();
         assert!(names.contains(&"jobs".to_string()));
         assert!(names.contains(&"installation_tokens".to_string()));

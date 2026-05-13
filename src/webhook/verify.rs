@@ -27,14 +27,20 @@ pub fn verify(secret: &[u8], body: &[u8], header_value: Option<&str>) -> Result<
     if expected.len() != sig_bytes.len() {
         return Err(VerifyError::Mismatch);
     }
-    if expected.ct_eq(&sig_bytes).into() { Ok(()) } else { Err(VerifyError::Mismatch) }
+    if expected.ct_eq(&sig_bytes).into() {
+        Ok(())
+    } else {
+        Err(VerifyError::Mismatch)
+    }
 }
 
 fn hex_decode(s: &str, out: &mut [u8]) -> Result<(), ()> {
-    if s.len() != out.len() * 2 { return Err(()); }
+    if s.len() != out.len() * 2 {
+        return Err(());
+    }
     for (i, byte) in out.iter_mut().enumerate() {
-        let hi = u8::from_str_radix(&s[i*2..i*2+1], 16).map_err(|_| ())?;
-        let lo = u8::from_str_radix(&s[i*2+1..i*2+2], 16).map_err(|_| ())?;
+        let hi = u8::from_str_radix(&s[i * 2..i * 2 + 1], 16).map_err(|_| ())?;
+        let lo = u8::from_str_radix(&s[i * 2 + 1..i * 2 + 2], 16).map_err(|_| ())?;
         *byte = (hi << 4) | lo;
     }
     Ok(())
@@ -51,7 +57,9 @@ mod tests {
         let bytes = mac.finalize().into_bytes();
         let mut out = String::with_capacity(7 + bytes.len() * 2);
         out.push_str("sha256=");
-        for b in bytes { out.push_str(&format!("{b:02x}")); }
+        for b in bytes {
+            out.push_str(&format!("{b:02x}"));
+        }
         out
     }
 
@@ -64,22 +72,34 @@ mod tests {
     #[test]
     fn tampered_body_rejected() {
         let h = sign(b"secret", b"hello");
-        assert!(matches!(verify(b"secret", b"hello!", Some(&h)), Err(VerifyError::Mismatch)));
+        assert!(matches!(
+            verify(b"secret", b"hello!", Some(&h)),
+            Err(VerifyError::Mismatch)
+        ));
     }
 
     #[test]
     fn wrong_secret_rejected() {
         let h = sign(b"secret", b"hello");
-        assert!(matches!(verify(b"other", b"hello", Some(&h)), Err(VerifyError::Mismatch)));
+        assert!(matches!(
+            verify(b"other", b"hello", Some(&h)),
+            Err(VerifyError::Mismatch)
+        ));
     }
 
     #[test]
     fn missing_header_rejected() {
-        assert!(matches!(verify(b"secret", b"hello", None), Err(VerifyError::MissingHeader)));
+        assert!(matches!(
+            verify(b"secret", b"hello", None),
+            Err(VerifyError::MissingHeader)
+        ));
     }
 
     #[test]
     fn malformed_header_rejected() {
-        assert!(matches!(verify(b"secret", b"hello", Some("nope")), Err(VerifyError::Malformed)));
+        assert!(matches!(
+            verify(b"secret", b"hello", Some("nope")),
+            Err(VerifyError::Malformed)
+        ));
     }
 }

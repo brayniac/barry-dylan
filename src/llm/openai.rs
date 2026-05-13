@@ -10,8 +10,18 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
-    pub fn new(http: reqwest::Client, endpoint: String, api_key: Option<String>, model: String) -> Self {
-        Self { http, endpoint, api_key, model }
+    pub fn new(
+        http: reqwest::Client,
+        endpoint: String,
+        api_key: Option<String>,
+        model: String,
+    ) -> Self {
+        Self {
+            http,
+            endpoint,
+            api_key,
+            model,
+        }
     }
 }
 
@@ -21,11 +31,18 @@ struct Resp {
     usage: Option<Usage>,
 }
 #[derive(Deserialize)]
-struct Choice { message: Msg }
+struct Choice {
+    message: Msg,
+}
 #[derive(Deserialize)]
-struct Msg { content: String }
+struct Msg {
+    content: String,
+}
 #[derive(Deserialize)]
-struct Usage { prompt_tokens: Option<u32>, completion_tokens: Option<u32> }
+struct Usage {
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+}
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
@@ -51,18 +68,28 @@ impl LlmClient for OpenAiClient {
             "messages": messages,
         });
         let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
-        let mut rb = self.http.post(&url)
+        let mut rb = self
+            .http
+            .post(&url)
             .header("content-type", "application/json")
             .json(&body);
-        if let Some(k) = &self.api_key { rb = rb.bearer_auth(k); }
+        if let Some(k) = &self.api_key {
+            rb = rb.bearer_auth(k);
+        }
         let resp = rb.send().await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Api { status: status.as_u16(), body });
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                body,
+            });
         }
         let r: Resp = resp.json().await?;
-        let text = r.choices.into_iter().next()
+        let text = r
+            .choices
+            .into_iter()
+            .next()
             .map(|c| c.message.content)
             .ok_or_else(|| LlmError::Shape("no choices".into()))?;
         Ok(LlmResponse {
@@ -83,17 +110,26 @@ mod tests {
     #[tokio::test]
     async fn unauthed_local_endpoint() {
         let server = MockServer::start().await;
-        Mock::given(method("POST")).and(path("/chat/completions"))
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "choices": [ { "message": { "content": "ok" } } ]
             })))
-            .mount(&server).await;
+            .mount(&server)
+            .await;
         let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
-        let r = c.complete(&LlmRequest {
-            system: None,
-            messages: vec![LlmMessage { role: Role::User, content: "q".into() }],
-            max_tokens: 32, temperature: 0.0,
-        }).await.unwrap();
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "q".into(),
+                }],
+                max_tokens: 32,
+                temperature: 0.0,
+            })
+            .await
+            .unwrap();
         assert_eq!(r.text, "ok");
     }
 }

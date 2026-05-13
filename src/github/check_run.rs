@@ -13,11 +13,23 @@ pub struct CheckRunInput {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CheckStatus { Queued, InProgress, Completed }
+pub enum CheckStatus {
+    Queued,
+    InProgress,
+    Completed,
+}
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CheckConclusion { Success, Failure, Neutral, Cancelled, TimedOut, ActionRequired, Skipped }
+pub enum CheckConclusion {
+    Success,
+    Failure,
+    Neutral,
+    Cancelled,
+    TimedOut,
+    ActionRequired,
+    Skipped,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckOutput {
@@ -28,14 +40,20 @@ pub struct CheckOutput {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CheckRunResp { pub id: i64 }
+pub struct CheckRunResp {
+    pub id: i64,
+}
 
 impl GitHub {
     /// Create a Check Run. Re-using the same `name` for the same head_sha replaces the previous one.
     pub async fn create_check_run(
-        &self, owner: &str, repo: &str, input: &CheckRunInput,
+        &self,
+        owner: &str,
+        repo: &str,
+        input: &CheckRunInput,
     ) -> Result<CheckRunResp, GhError> {
         let path = format!("/repos/{owner}/{repo}/check-runs");
-        self.post_json(&path, serde_json::to_value(input).unwrap()).await
+        self.post_json(&path, serde_json::to_value(input).unwrap())
+            .await
     }
 }

@@ -4,8 +4,8 @@ use crate::dispatcher::trust::{self, BarryCommand, Trust};
 use crate::github::check_run::{CheckConclusion, CheckOutput, CheckRunInput, CheckStatus};
 use crate::github::client::{GhError, GitHub};
 use crate::github::pr::{BotComment, PullRequest, ReviewInput};
-use crate::storage::queue::LeasedJob;
 use crate::storage::Store;
+use crate::storage::queue::LeasedJob;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -43,7 +43,10 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         owner = %job.repo_owner, repo = %job.repo_name, pr = job.pr_number,
         event_kind = %job.event_kind, "running job",
     );
-    let gh = deps.gh_factory.for_installation(job.installation_id).await?;
+    let gh = deps
+        .gh_factory
+        .for_installation(job.installation_id)
+        .await?;
 
     if let Some(cmd) = parse_command_event(&job.event_kind) {
         tracing::info!(?cmd, owner = %job.repo_owner, repo = %job.repo_name, pr = job.pr_number, "handling /barry command");
@@ -64,12 +67,20 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let prior_comments = pr_ctx.comments;
     let prior_reviews = pr_ctx.reviews;
 
-    let perm = gh.author_permission(&job.repo_owner, &job.repo_name, &pr.user.login).await
+    let perm = gh
+        .author_permission(&job.repo_owner, &job.repo_name, &pr.user.login)
+        .await
         .unwrap_or_else(|_| "read".into());
-    let bot_comments: Vec<BotComment> = prior_comments.iter()
-        .filter(|c| c.author.starts_with("barry-dylan")).cloned().collect();
-    let bot_reviews: Vec<BotComment> = prior_reviews.iter()
-        .filter(|c| c.author.starts_with("barry-dylan")).cloned().collect();
+    let bot_comments: Vec<BotComment> = prior_comments
+        .iter()
+        .filter(|c| c.author.starts_with("barry-dylan"))
+        .cloned()
+        .collect();
+    let bot_reviews: Vec<BotComment> = prior_reviews
+        .iter()
+        .filter(|c| c.author.starts_with("barry-dylan"))
+        .cloned()
+        .collect();
 
     // Trust gate.
     let trust_decision = trust::evaluate_trust(&perm, &bot_comments);
@@ -104,7 +115,9 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let rate_limit: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
     let mut tasks = Vec::new();
     for chk in &deps.pipeline.checkers {
-        if !chk.enabled(&ctx.repo_cfg) { continue; }
+        if !chk.enabled(&ctx.repo_cfg) {
+            continue;
+        }
         let chk = chk.clone();
         let rate_limit = rate_limit.clone();
         tasks.push(async move {
@@ -125,8 +138,10 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 }
             };
             tracing::info!(
-                checker = name, status = status_str(outcome.status),
-                duration_ms = dur.as_millis() as u64, "checker completed",
+                checker = name,
+                status = status_str(outcome.status),
+                duration_ms = dur.as_millis() as u64,
+                "checker completed",
             );
             if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome).await {
                 if let Some(GhError::RateLimited { reset_in_secs }) = e.downcast_ref::<GhError>() {
@@ -137,17 +152,19 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                     tracing::error!(checker = name, error = ?e, "post_outcome failed");
                 }
             }
-            let _ = store.append_audit(&crate::storage::audit::AuditEntry {
-                ts: now_ts(),
-                delivery_id: Some(&job_ref.delivery_id),
-                repo_owner: Some(&job_ref.repo_owner),
-                repo_name: Some(&job_ref.repo_name),
-                pr_number: Some(job_ref.pr_number),
-                checker_name: Some(name),
-                outcome: status_str(outcome.status),
-                duration_ms: Some(dur.as_millis() as i64),
-                details: None,
-            }).await;
+            let _ = store
+                .append_audit(&crate::storage::audit::AuditEntry {
+                    ts: now_ts(),
+                    delivery_id: Some(&job_ref.delivery_id),
+                    repo_owner: Some(&job_ref.repo_owner),
+                    repo_name: Some(&job_ref.repo_name),
+                    pr_number: Some(job_ref.pr_number),
+                    checker_name: Some(name),
+                    outcome: status_str(outcome.status),
+                    duration_ms: Some(dur.as_millis() as i64),
+                    details: None,
+                })
+                .await;
         });
     }
     futures::future::join_all(tasks).await;
@@ -167,33 +184,53 @@ fn parse_command_event(kind: &str) -> Option<BarryCommand> {
 }
 
 async fn handle_command(
-    deps: &JobDeps, gh: &Arc<GitHub>, job: &LeasedJob, cmd: BarryCommand,
+    deps: &JobDeps,
+    gh: &Arc<GitHub>,
+    job: &LeasedJob,
+    cmd: BarryCommand,
 ) -> anyhow::Result<()> {
     match cmd {
         BarryCommand::Approve => {
-            gh.create_issue_comment(&job.repo_owner, &job.repo_name, job.pr_number,
-                &trust::approve_comment_body()).await?;
+            gh.create_issue_comment(
+                &job.repo_owner,
+                &job.repo_name,
+                job.pr_number,
+                &trust::approve_comment_body(),
+            )
+            .await?;
             // Re-enqueue a normal review job for this PR.
             let now = now_ts();
-            deps.store.enqueue(&crate::storage::queue::NewJob {
-                installation_id: job.installation_id,
-                repo_owner: job.repo_owner.clone(),
-                repo_name: job.repo_name.clone(),
-                pr_number: job.pr_number,
-                event_kind: "pull_request.opened".into(),
-                delivery_id: job.delivery_id.clone(),
-            }, now, now).await?;
+            deps.store
+                .enqueue(
+                    &crate::storage::queue::NewJob {
+                        installation_id: job.installation_id,
+                        repo_owner: job.repo_owner.clone(),
+                        repo_name: job.repo_name.clone(),
+                        pr_number: job.pr_number,
+                        event_kind: "pull_request.opened".into(),
+                        delivery_id: job.delivery_id.clone(),
+                    },
+                    now,
+                    now,
+                )
+                .await?;
         }
         BarryCommand::Review => {
             let now = now_ts();
-            deps.store.enqueue(&crate::storage::queue::NewJob {
-                installation_id: job.installation_id,
-                repo_owner: job.repo_owner.clone(),
-                repo_name: job.repo_name.clone(),
-                pr_number: job.pr_number,
-                event_kind: "pull_request.opened".into(),
-                delivery_id: job.delivery_id.clone(),
-            }, now, now).await?;
+            deps.store
+                .enqueue(
+                    &crate::storage::queue::NewJob {
+                        installation_id: job.installation_id,
+                        repo_owner: job.repo_owner.clone(),
+                        repo_name: job.repo_name.clone(),
+                        pr_number: job.pr_number,
+                        event_kind: "pull_request.opened".into(),
+                        delivery_id: job.delivery_id.clone(),
+                    },
+                    now,
+                    now,
+                )
+                .await?;
         }
         BarryCommand::Unknown | BarryCommand::NotACommand => {
             // Cannot react without the comment ID stored on the job.
@@ -205,23 +242,39 @@ async fn handle_command(
 }
 
 async fn post_needs_approval_once(
-    gh: &Arc<GitHub>, job: &LeasedJob, pr: &PullRequest, bot_comments: &[BotComment],
+    gh: &Arc<GitHub>,
+    job: &LeasedJob,
+    pr: &PullRequest,
+    bot_comments: &[BotComment],
 ) -> anyhow::Result<()> {
-    if bot_comments.iter().any(|c| c.body.contains(trust::NEEDS_APPROVAL_MARKER)) {
+    if bot_comments
+        .iter()
+        .any(|c| c.body.contains(trust::NEEDS_APPROVAL_MARKER))
+    {
         return Ok(());
     }
     gh.create_issue_comment(
-        &job.repo_owner, &job.repo_name, job.pr_number,
+        &job.repo_owner,
+        &job.repo_name,
+        job.pr_number,
         &trust::needs_approval_body(&pr.user.login),
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
 async fn parse_repo_config_with_check(
-    deps: &JobDeps, gh: &Arc<GitHub>, job: &LeasedJob, pr: &PullRequest, text: Option<String>,
+    deps: &JobDeps,
+    gh: &Arc<GitHub>,
+    job: &LeasedJob,
+    pr: &PullRequest,
+    text: Option<String>,
 ) -> anyhow::Result<crate::config::repo::RepoConfig> {
     let _ = deps;
-    let text = match text { Some(t) => t, None => return Ok(default_repo_config()) };
+    let text = match text {
+        Some(t) => t,
+        None => return Ok(default_repo_config()),
+    };
     match crate::config::repo::RepoConfig::parse(&text) {
         Ok(c) => Ok(c),
         Err(e) => {
@@ -236,7 +289,9 @@ async fn parse_repo_config_with_check(
                     text: None,
                 },
             };
-            let _ = gh.create_check_run(&job.repo_owner, &job.repo_name, &input).await;
+            let _ = gh
+                .create_check_run(&job.repo_owner, &job.repo_name, &input)
+                .await;
             anyhow::bail!("malformed .barry.toml; skipping other checkers")
         }
     }
@@ -247,7 +302,10 @@ fn default_repo_config() -> crate::config::repo::RepoConfig {
 }
 
 async fn post_outcome(
-    gh: &Arc<GitHub>, job: &LeasedJob, pr: &PullRequest, o: &CheckerOutcome,
+    gh: &Arc<GitHub>,
+    job: &LeasedJob,
+    pr: &PullRequest,
+    o: &CheckerOutcome,
 ) -> anyhow::Result<()> {
     let conclusion = match o.status {
         OutcomeStatus::Success => CheckConclusion::Success,
@@ -265,10 +323,18 @@ async fn post_outcome(
             text: o.text.clone(),
         },
     };
-    let _ = gh.create_check_run(&job.repo_owner, &job.repo_name, &input).await?;
+    let _ = gh
+        .create_check_run(&job.repo_owner, &job.repo_name, &input)
+        .await?;
     tracing::debug!(checker = o.checker_name, ?conclusion, "check-run posted");
     if !o.add_labels.is_empty() {
-        gh.add_labels(&job.repo_owner, &job.repo_name, job.pr_number, &o.add_labels).await?;
+        gh.add_labels(
+            &job.repo_owner,
+            &job.repo_name,
+            job.pr_number,
+            &o.add_labels,
+        )
+        .await?;
         tracing::debug!(checker = o.checker_name, labels = ?o.add_labels, "labels added");
     }
     if !o.inline_comments.is_empty() {
@@ -278,15 +344,24 @@ async fn post_outcome(
             comments: &o.inline_comments,
             commit_id: &pr.head.sha,
         };
-        let _ = gh.create_review(&job.repo_owner, &job.repo_name, job.pr_number, &review).await?;
+        let _ = gh
+            .create_review(&job.repo_owner, &job.repo_name, job.pr_number, &review)
+            .await?;
         tracing::info!(
-            checker = o.checker_name, inline_comments = o.inline_comments.len(),
+            checker = o.checker_name,
+            inline_comments = o.inline_comments.len(),
             "pr review posted",
         );
     }
     if let Some(body) = &o.issue_comment {
-        let _ = gh.create_issue_comment(&job.repo_owner, &job.repo_name, job.pr_number, body).await?;
-        tracing::debug!(checker = o.checker_name, body_chars = body.len(), "issue comment posted");
+        let _ = gh
+            .create_issue_comment(&job.repo_owner, &job.repo_name, job.pr_number, body)
+            .await?;
+        tracing::debug!(
+            checker = o.checker_name,
+            body_chars = body.len(),
+            "issue comment posted"
+        );
     }
     Ok(())
 }
@@ -305,5 +380,8 @@ fn status_str(s: OutcomeStatus) -> &'static str {
 }
 
 fn now_ts() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }

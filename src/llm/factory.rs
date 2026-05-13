@@ -1,19 +1,24 @@
 use crate::config::{LlmProfile, LlmProviderKind};
+use crate::llm::LlmClient;
 use crate::llm::anthropic::AnthropicClient;
 use crate::llm::openai::OpenAiClient;
-use crate::llm::LlmClient;
 use std::sync::Arc;
 use url::Url;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FactoryError {
-    #[error("missing required env var {0}")] MissingEnv(String),
-    #[error("invalid endpoint URL: {0}")] BadUrl(String),
+    #[error("missing required env var {0}")]
+    MissingEnv(String),
+    #[error("invalid endpoint URL: {0}")]
+    BadUrl(String),
     #[error("safety guard: provider=anthropic but endpoint host {host:?} is not api.anthropic.com")]
     EndpointMismatch { host: String },
 }
 
-pub fn build(profile: &LlmProfile, http: reqwest::Client) -> Result<Arc<dyn LlmClient>, FactoryError> {
+pub fn build(
+    profile: &LlmProfile,
+    http: reqwest::Client,
+) -> Result<Arc<dyn LlmClient>, FactoryError> {
     let api_key = match &profile.api_key_env {
         Some(name) if !name.is_empty() => {
             Some(std::env::var(name).map_err(|_| FactoryError::MissingEnv(name.clone()))?)
@@ -29,14 +34,18 @@ pub fn build(profile: &LlmProfile, http: reqwest::Client) -> Result<Arc<dyn LlmC
                 return Err(FactoryError::EndpointMismatch { host });
             }
             Ok(Arc::new(AnthropicClient::new(
-                http, profile.endpoint.clone(), api_key, profile.model.clone(),
+                http,
+                profile.endpoint.clone(),
+                api_key,
+                profile.model.clone(),
             )))
         }
-        LlmProviderKind::Openai => {
-            Ok(Arc::new(OpenAiClient::new(
-                http, profile.endpoint.clone(), api_key, profile.model.clone(),
-            )))
-        }
+        LlmProviderKind::Openai => Ok(Arc::new(OpenAiClient::new(
+            http,
+            profile.endpoint.clone(),
+            api_key,
+            profile.model.clone(),
+        ))),
     }
 }
 
@@ -47,9 +56,12 @@ mod tests {
 
     fn profile(provider: LlmProviderKind, endpoint: &str) -> LlmProfile {
         LlmProfile {
-            provider, endpoint: endpoint.into(),
-            api_key_env: None, model: "m".into(),
-            max_tokens: 1024, request_timeout_secs: 60,
+            provider,
+            endpoint: endpoint.into(),
+            api_key_env: None,
+            model: "m".into(),
+            max_tokens: 1024,
+            request_timeout_secs: 60,
         }
     }
 

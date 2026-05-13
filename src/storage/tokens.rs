@@ -14,14 +14,20 @@ impl Store {
         now_ts: i64,
     ) -> anyhow::Result<Option<CachedToken>> {
         let row = sqlx::query(
-            "SELECT token, expires_at FROM installation_tokens WHERE installation_id = ?1"
+            "SELECT token, expires_at FROM installation_tokens WHERE installation_id = ?1",
         )
-        .bind(installation_id).fetch_optional(&self.pool).await?;
+        .bind(installation_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.and_then(|r| {
             let token: String = r.get("token");
             let expires_at: i64 = r.get("expires_at");
             // 60s skew margin.
-            if expires_at - 60 > now_ts { Some(CachedToken { token, expires_at }) } else { None }
+            if expires_at - 60 > now_ts {
+                Some(CachedToken { token, expires_at })
+            } else {
+                None
+            }
         }))
     }
 
