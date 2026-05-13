@@ -218,7 +218,9 @@ struct PrCtxComment {
     #[serde(rename = "databaseId")] database_id: i64,
     id: String,
     author: Option<PrCtxActor>,
-    body: String,
+    // GitHub's schema declares this `String!`, but we accept null defensively:
+    // a single bad payload shouldn't put the worker in a retry loop for the PR.
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -247,7 +249,7 @@ impl PrCtxResponse {
             changed_files: p.changed_files,
         };
         let comments = p.comments.nodes.into_iter().map(|c| BotComment {
-            id: c.database_id, node_id: c.id, body: c.body,
+            id: c.database_id, node_id: c.id, body: c.body.unwrap_or_default(),
             author: c.author.map(|a| a.login).unwrap_or_default(),
         }).collect();
         let reviews = p.reviews.nodes.into_iter().map(|r| BotComment {
@@ -374,6 +376,34 @@ mod tests {
         assert_eq!(ctx.reviews.len(), 1);
         assert_eq!(ctx.reviews[0].author, "barry-dylan");
         assert_eq!(ctx.config_text.as_deref(), Some("[hygiene]\nenabled = true\n"));
+    }
+
+    #[test]
+    fn pr_context_handles_null_comment_body() {
+        // GitHub's schema declares IssueComment.body non-null, but we accept
+        // null defensively so a bad payload doesn't kill the job for that PR.
+        let raw = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "number": 1, "title": "t", "body": "b",
+                        "state": "OPEN", "isDraft": false,
+                        "additions": 0, "deletions": 0, "changedFiles": 0,
+                        "author": { "login": "a" },
+                        "headRefOid": "h", "headRefName": "x",
+                        "baseRefOid": "b", "baseRefName": "main",
+                        "comments": { "nodes": [
+                            {"databaseId": 9, "id": "IC_9", "author": {"login": "x"}, "body": null}
+                        ]},
+                        "reviews": { "nodes": [] }
+                    },
+                    "config": null
+                }
+            }
+        });
+        let ctx = serde_json::from_value::<PrCtxResponse>(raw).unwrap().into_context();
+        assert_eq!(ctx.comments.len(), 1);
+        assert_eq!(ctx.comments[0].body, "");
     }
 
     #[test]
