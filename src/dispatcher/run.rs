@@ -39,9 +39,14 @@ pub trait GhFactory: Send + Sync {
 }
 
 pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
+    tracing::info!(
+        owner = %job.repo_owner, repo = %job.repo_name, pr = job.pr_number,
+        event_kind = %job.event_kind, "running job",
+    );
     let gh = deps.gh_factory.for_installation(job.installation_id).await?;
 
     if let Some(cmd) = parse_command_event(&job.event_kind) {
+        tracing::info!(?cmd, owner = %job.repo_owner, repo = %job.repo_name, pr = job.pr_number, "handling /barry command");
         return handle_command(deps, &gh, job, cmd).await;
     }
 
@@ -60,6 +65,10 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
 
     // Trust gate.
     let trust_decision = trust::evaluate_trust(&perm, &bot_comments);
+    tracing::info!(
+        author = %pr.user.login, permission = %perm,
+        trust = ?trust_decision, "trust decision",
+    );
     if trust_decision == Trust::NeedsApproval {
         post_needs_approval_once(&gh, job, &pr, &bot_comments).await?;
         return Ok(());
@@ -88,6 +97,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         let chk = chk.clone();
         let ctx_ref = &ctx;
         tasks.push(async move {
+            tracing::debug!(checker = chk.name(), "checker starting");
             let t = std::time::Instant::now();
             let res = tokio::time::timeout(Duration::from_secs(60), chk.run(ctx_ref)).await;
             (chk.name(), res, t.elapsed())
@@ -103,8 +113,15 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 tracing::error!(checker = name, error = ?e, "checker failed");
                 CheckerOutcome::neutral(static_name(name), format!("internal error: {e}"))
             }
-            Err(_) => CheckerOutcome::neutral(static_name(name), "timed out"),
+            Err(_) => {
+                tracing::warn!(checker = name, "checker timed out");
+                CheckerOutcome::neutral(static_name(name), "timed out")
+            }
         };
+        tracing::info!(
+            checker = name, status = status_str(outcome.status),
+            duration_ms = dur.as_millis() as u64, "checker completed",
+        );
         post_outcome(&gh, job, &pr, &outcome).await?;
         let _ = deps.store.append_audit(&crate::storage::audit::AuditEntry {
             ts: now_ts(),
@@ -230,11 +247,12 @@ async fn post_outcome(
         },
     };
     let _ = gh.create_check_run(&job.repo_owner, &job.repo_name, &input).await?;
+    tracing::debug!(checker = o.checker_name, ?conclusion, "check-run posted");
     if !o.add_labels.is_empty() {
         gh.add_labels(&job.repo_owner, &job.repo_name, job.pr_number, &o.add_labels).await?;
+        tracing::debug!(checker = o.checker_name, labels = ?o.add_labels, "labels added");
     }
     if !o.inline_comments.is_empty() {
-        // Minimize prior LLM review (Task 33).
         let review = ReviewInput {
             body: &o.summary,
             event: "COMMENT",
@@ -242,9 +260,14 @@ async fn post_outcome(
             commit_id: &pr.head.sha,
         };
         let _ = gh.create_review(&job.repo_owner, &job.repo_name, job.pr_number, &review).await?;
+        tracing::info!(
+            checker = o.checker_name, inline_comments = o.inline_comments.len(),
+            "pr review posted",
+        );
     }
     if let Some(body) = &o.issue_comment {
         let _ = gh.create_issue_comment(&job.repo_owner, &job.repo_name, job.pr_number, body).await?;
+        tracing::debug!(checker = o.checker_name, body_chars = body.len(), "issue comment posted");
     }
     Ok(())
 }

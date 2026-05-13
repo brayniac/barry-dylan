@@ -34,38 +34,53 @@ impl Checker for LlmReviewChecker {
 
         let chunks = prompt::chunk_files(&ctx.files, rule.max_diff_tokens, &rule.exclude_paths);
         if chunks.is_empty() {
+            tracing::info!("llm review: no reviewable files");
             return Ok(CheckerOutcome::success(self.name(), "no reviewable files"));
         }
+        tracing::info!(chunks = chunks.len(), "llm review starting");
 
         let system = prompt::system_prompt(&rule.focus);
         let mut per_file_summaries: Vec<String> = Vec::new();
         let mut findings: Vec<parse::ParsedFinding> = Vec::new();
-        for chunk in &chunks {
+        for (i, chunk) in chunks.iter().enumerate() {
             let user = prompt::user_prompt(chunk, prompt::RESPONSE_FORMAT);
+            let prompt_chars = user.len() + system.len();
+            tracing::debug!(chunk = i, prompt_chars, "llm request");
             let req = LlmRequest {
                 system: Some(system.clone()),
                 messages: vec![LlmMessage { role: Role::User, content: user }],
                 max_tokens: self.max_tokens, temperature: 0.0,
             };
+            let t = std::time::Instant::now();
             let r = match self.client.complete(&req).await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(?e, "llm call failed");
+                    tracing::warn!(?e, chunk = i, "llm call failed");
                     return Ok(CheckerOutcome::neutral(self.name(),
                         format!("llm call failed: {e}")));
                 }
             };
+            tracing::debug!(
+                chunk = i, response_chars = r.text.len(),
+                latency_ms = t.elapsed().as_millis() as u64, "llm response",
+            );
             match parse::parse(&r.text) {
                 Ok(p) => {
+                    let n = p.findings.len();
                     findings.extend(p.findings);
                     if !p.summary.is_empty() { per_file_summaries.push(p.summary); }
+                    tracing::debug!(chunk = i, findings = n, "llm chunk parsed");
                 }
                 Err(e) => {
-                    tracing::warn!(?e, body = %r.text, "llm output parse failed");
+                    tracing::warn!(?e, chunk = i, body = %r.text, "llm output parse failed");
                     return Ok(CheckerOutcome::neutral(self.name(), "llm output unparseable"));
                 }
             }
         }
+        tracing::info!(
+            chunks = chunks.len(), findings = findings.len(),
+            "llm review complete",
+        );
 
         let inline_comments = to_inline_comments(&ctx.files, &findings);
         let body = format!(
