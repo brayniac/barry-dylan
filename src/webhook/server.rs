@@ -56,11 +56,12 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes)
     let parsed = match parse(evt, &body) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(?e, "webhook parse failed");
+            tracing::warn!(?e, event = evt, delivery_id = %delivery, "webhook parse failed");
             metrics::counter!("barry_webhook_rejected_total", "reason" => "parse").increment(1);
             return (StatusCode::BAD_REQUEST, "bad payload");
         }
     };
+    tracing::info!(event = evt, delivery_id = %delivery, "webhook received");
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
     let debounce = s.debounce_secs as i64;
@@ -92,12 +93,23 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes)
     };
 
     if let Some((job, run_after)) = to_enqueue {
+        let owner = job.repo_owner.clone();
+        let repo = job.repo_name.clone();
+        let pr = job.pr_number;
+        let kind = job.event_kind.clone();
         if let Err(e) = s.store.enqueue(&job, now, run_after).await {
-            tracing::error!(?e, "enqueue failed");
+            tracing::error!(?e, %owner, %repo, pr, event_kind = %kind, "enqueue failed");
             metrics::counter!("barry_webhook_rejected_total", "reason" => "enqueue").increment(1);
             return (StatusCode::INTERNAL_SERVER_ERROR, "enqueue failed");
         }
         metrics::counter!("barry_job_enqueued_total").increment(1);
+        tracing::info!(
+            %owner, %repo, pr, event_kind = %kind,
+            delivery_id = %delivery, run_after_in_secs = run_after - now,
+            "job enqueued",
+        );
+    } else {
+        tracing::debug!(event = evt, delivery_id = %delivery, "event dropped (not actionable)");
     }
     (StatusCode::OK, "ok")
 }
