@@ -20,14 +20,13 @@ impl Checker for AlwaysFail {
 async fn one_checker_error_does_not_block_others() {
     let server = MockServer::start().await;
 
-    Mock::given(method("GET")).and(path("/repos/o/r/pulls/1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "number": 1, "title": "feat: add x", "body": "Long enough body to pass checks.",
-            "user": { "login": "alice" }, "draft": false, "state": "open",
-            "head": { "sha": "sha1", "ref": "feat" },
-            "base": { "sha": "sha0", "ref": "main" },
-            "additions": 1, "deletions": 0, "changed_files": 1
-        }))).mount(&server).await;
+    Mock::given(method("POST")).and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            crate::common::graphql_pr_context(
+                1, "alice", "sha1", None,
+                serde_json::json!([]), serde_json::json!([]),
+            )
+        )).mount(&server).await;
     Mock::given(method("GET")).and(path_regex(r"^/repos/o/r/pulls/1/files"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
         .mount(&server).await;
@@ -35,14 +34,6 @@ async fn one_checker_error_does_not_block_others() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "permission": "write"
         }))).mount(&server).await;
-    Mock::given(method("GET")).and(path("/repos/o/r/contents/.barry.toml"))
-        .respond_with(ResponseTemplate::new(404)).mount(&server).await;
-    Mock::given(method("GET")).and(path("/repos/o/r/issues/1/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server).await;
-    Mock::given(method("GET")).and(path("/repos/o/r/pulls/1/reviews"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server).await;
 
     Mock::given(method("POST")).and(path("/repos/o/r/check-runs"))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({ "id": 1 })))

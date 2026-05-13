@@ -128,6 +128,137 @@ impl GitHub {
             id: r.id, node_id: r.node_id, body: r.body.unwrap_or_default(), author: r.user.login,
         }).collect())
     }
+
+    /// One GraphQL round trip for PR metadata, the last 100 comments and reviews, and
+    /// the `.barry.toml` blob at HEAD. Replaces four separate REST calls in setup.
+    pub async fn fetch_pr_context(&self, owner: &str, repo: &str, number: i64)
+        -> Result<PrContext, GhError>
+    {
+        let q = r#"
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  number title body state isDraft
+                  additions deletions changedFiles
+                  author { login }
+                  headRefOid headRefName baseRefOid baseRefName
+                  comments(last: 100) {
+                    nodes { databaseId id author { login } body }
+                  }
+                  reviews(last: 100) {
+                    nodes { databaseId id author { login } body }
+                  }
+                }
+                config: object(expression: "HEAD:.barry.toml") {
+                  ... on Blob { text }
+                }
+              }
+            }
+        "#;
+        let body: PrCtxResponse = self.graphql(q, serde_json::json!({
+            "owner": owner, "name": repo, "number": number,
+        })).await?;
+        Ok(body.into_context())
+    }
+}
+
+// --- GraphQL fetch_pr_context types ---
+
+#[derive(Debug, Clone)]
+pub struct PrContext {
+    pub pr: PullRequest,
+    pub comments: Vec<BotComment>,
+    pub reviews: Vec<BotComment>,
+    pub config_text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PrCtxResponse { data: PrCtxData }
+
+#[derive(Deserialize)]
+struct PrCtxData { repository: PrCtxRepository }
+
+#[derive(Deserialize)]
+struct PrCtxRepository {
+    #[serde(rename = "pullRequest")]
+    pull_request: PrCtxPullRequest,
+    config: Option<PrCtxConfig>,
+}
+
+#[derive(Deserialize)]
+struct PrCtxConfig { #[serde(default)] text: Option<String> }
+
+#[derive(Deserialize)]
+struct PrCtxPullRequest {
+    number: i64,
+    title: String,
+    body: Option<String>,
+    state: String,
+    #[serde(rename = "isDraft")] is_draft: bool,
+    additions: i64,
+    deletions: i64,
+    #[serde(rename = "changedFiles")] changed_files: i64,
+    author: Option<PrCtxActor>,
+    #[serde(rename = "headRefOid")] head_ref_oid: String,
+    #[serde(rename = "headRefName")] head_ref_name: String,
+    #[serde(rename = "baseRefOid")] base_ref_oid: String,
+    #[serde(rename = "baseRefName")] base_ref_name: String,
+    comments: PrCtxConnection<PrCtxComment>,
+    reviews: PrCtxConnection<PrCtxReview>,
+}
+
+#[derive(Deserialize)]
+struct PrCtxConnection<T> { nodes: Vec<T> }
+
+#[derive(Deserialize)]
+struct PrCtxActor { login: String }
+
+#[derive(Deserialize)]
+struct PrCtxComment {
+    #[serde(rename = "databaseId")] database_id: i64,
+    id: String,
+    author: Option<PrCtxActor>,
+    // GitHub's schema declares this `String!`, but we accept null defensively:
+    // a single bad payload shouldn't put the worker in a retry loop for the PR.
+    body: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PrCtxReview {
+    #[serde(rename = "databaseId")] database_id: i64,
+    id: String,
+    author: Option<PrCtxActor>,
+    body: Option<String>,
+}
+
+impl PrCtxResponse {
+    fn into_context(self) -> PrContext {
+        let p = self.data.repository.pull_request;
+        let author_login = p.author.map(|a| a.login).unwrap_or_else(|| "ghost".into());
+        let pr = PullRequest {
+            number: p.number,
+            title: p.title,
+            body: p.body,
+            user: User { login: author_login },
+            draft: p.is_draft,
+            state: p.state.to_lowercase(),
+            head: GitRef { sha: p.head_ref_oid, r#ref: p.head_ref_name },
+            base: GitRef { sha: p.base_ref_oid, r#ref: p.base_ref_name },
+            additions: p.additions,
+            deletions: p.deletions,
+            changed_files: p.changed_files,
+        };
+        let comments = p.comments.nodes.into_iter().map(|c| BotComment {
+            id: c.database_id, node_id: c.id, body: c.body.unwrap_or_default(),
+            author: c.author.map(|a| a.login).unwrap_or_default(),
+        }).collect();
+        let reviews = p.reviews.nodes.into_iter().map(|r| BotComment {
+            id: r.database_id, node_id: r.id, body: r.body.unwrap_or_default(),
+            author: r.author.map(|a| a.login).unwrap_or_default(),
+        }).collect();
+        let config_text = self.data.repository.config.and_then(|c| c.text);
+        PrContext { pr, comments, reviews, config_text }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -202,5 +333,101 @@ impl GitHub {
         let _: serde_json::Value =
             self.graphql(q, serde_json::json!({ "id": node_id })).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pr_context_parses_graphql_response() {
+        let raw = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "number": 42, "title": "feat: x", "body": "body",
+                        "state": "OPEN", "isDraft": false,
+                        "additions": 10, "deletions": 2, "changedFiles": 3,
+                        "author": { "login": "alice" },
+                        "headRefOid": "h1", "headRefName": "feat-x",
+                        "baseRefOid": "b1", "baseRefName": "main",
+                        "comments": { "nodes": [
+                            {"databaseId": 1, "id": "IC_1", "author": {"login": "bob"}, "body": "hi"},
+                            {"databaseId": 2, "id": "IC_2", "author": null, "body": "ghost"}
+                        ]},
+                        "reviews": { "nodes": [
+                            {"databaseId": 3, "id": "PR_1", "author": {"login": "barry-dylan"}, "body": "ok"}
+                        ]}
+                    },
+                    "config": { "text": "[hygiene]\nenabled = true\n" }
+                }
+            }
+        });
+        let parsed: PrCtxResponse = serde_json::from_value(raw).unwrap();
+        let ctx = parsed.into_context();
+        assert_eq!(ctx.pr.number, 42);
+        assert_eq!(ctx.pr.state, "open"); // lowercased
+        assert_eq!(ctx.pr.user.login, "alice");
+        assert_eq!(ctx.pr.head.sha, "h1");
+        assert_eq!(ctx.pr.base.r#ref, "main");
+        assert_eq!(ctx.comments.len(), 2);
+        assert_eq!(ctx.comments[1].author, ""); // null author
+        assert_eq!(ctx.reviews.len(), 1);
+        assert_eq!(ctx.reviews[0].author, "barry-dylan");
+        assert_eq!(ctx.config_text.as_deref(), Some("[hygiene]\nenabled = true\n"));
+    }
+
+    #[test]
+    fn pr_context_handles_null_comment_body() {
+        // GitHub's schema declares IssueComment.body non-null, but we accept
+        // null defensively so a bad payload doesn't kill the job for that PR.
+        let raw = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "number": 1, "title": "t", "body": "b",
+                        "state": "OPEN", "isDraft": false,
+                        "additions": 0, "deletions": 0, "changedFiles": 0,
+                        "author": { "login": "a" },
+                        "headRefOid": "h", "headRefName": "x",
+                        "baseRefOid": "b", "baseRefName": "main",
+                        "comments": { "nodes": [
+                            {"databaseId": 9, "id": "IC_9", "author": {"login": "x"}, "body": null}
+                        ]},
+                        "reviews": { "nodes": [] }
+                    },
+                    "config": null
+                }
+            }
+        });
+        let ctx = serde_json::from_value::<PrCtxResponse>(raw).unwrap().into_context();
+        assert_eq!(ctx.comments.len(), 1);
+        assert_eq!(ctx.comments[0].body, "");
+    }
+
+    #[test]
+    fn pr_context_handles_null_config_and_null_author() {
+        let raw = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "number": 1, "title": "t", "body": null,
+                        "state": "CLOSED", "isDraft": true,
+                        "additions": 0, "deletions": 0, "changedFiles": 0,
+                        "author": null,
+                        "headRefOid": "h", "headRefName": "x",
+                        "baseRefOid": "b", "baseRefName": "main",
+                        "comments": { "nodes": [] },
+                        "reviews": { "nodes": [] }
+                    },
+                    "config": null
+                }
+            }
+        });
+        let parsed: PrCtxResponse = serde_json::from_value(raw).unwrap();
+        let ctx = parsed.into_context();
+        assert_eq!(ctx.pr.user.login, "ghost");
+        assert!(ctx.config_text.is_none());
     }
 }

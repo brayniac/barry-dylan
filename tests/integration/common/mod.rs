@@ -6,6 +6,42 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use wiremock::MockServer;
 
+/// Build a GraphQL response body for `fetch_pr_context`. Comments/reviews arrays
+/// hold zero or more `{databaseId,id,author:{login},body}` nodes.
+pub fn graphql_pr_context(
+    pr_number: i64,
+    author_login: &str,
+    head_sha: &str,
+    config_text: Option<&str>,
+    comments: serde_json::Value,
+    reviews: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "number": pr_number,
+                    "title": "feat: add x",
+                    "body": "Long enough body to pass checks.",
+                    "state": "OPEN",
+                    "isDraft": false,
+                    "additions": 1,
+                    "deletions": 0,
+                    "changedFiles": 1,
+                    "author": { "login": author_login },
+                    "headRefOid": head_sha,
+                    "headRefName": "feat",
+                    "baseRefOid": "sha0",
+                    "baseRefName": "main",
+                    "comments": { "nodes": comments },
+                    "reviews": { "nodes": reviews },
+                },
+                "config": config_text.map(|t| serde_json::json!({ "text": t })),
+            }
+        }
+    })
+}
+
 pub struct StaticGh { pub gh: Arc<GitHub> }
 #[async_trait]
 impl GhFactory for StaticGh {
