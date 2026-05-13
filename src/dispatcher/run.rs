@@ -2,11 +2,11 @@ use crate::checker::{Checker, CheckerCtx, CheckerOutcome, OutcomeStatus};
 use crate::config::Config;
 use crate::dispatcher::trust::{self, BarryCommand, Trust};
 use crate::github::check_run::{CheckConclusion, CheckOutput, CheckRunInput, CheckStatus};
-use crate::github::client::GitHub;
+use crate::github::client::{GhError, GitHub};
 use crate::github::pr::{BotComment, PullRequest, ReviewInput};
 use crate::storage::queue::LeasedJob;
 use crate::storage::Store;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub struct Pipeline {
@@ -97,10 +97,12 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let job_ref = job;
     let pr_ref = &pr;
     let ctx_ref = &ctx;
+    let rate_limit: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
     let mut tasks = Vec::new();
     for chk in &deps.pipeline.checkers {
         if !chk.enabled(&ctx.repo_cfg) { continue; }
         let chk = chk.clone();
+        let rate_limit = rate_limit.clone();
         tasks.push(async move {
             let name = chk.name();
             tracing::debug!(checker = name, "checker starting");
@@ -123,7 +125,13 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 duration_ms = dur.as_millis() as u64, "checker completed",
             );
             if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome).await {
-                tracing::error!(checker = name, error = ?e, "post_outcome failed");
+                if let Some(GhError::RateLimited { reset_in_secs }) = e.downcast_ref::<GhError>() {
+                    let mut g = rate_limit.lock().unwrap();
+                    *g = Some(g.map_or(*reset_in_secs, |c| c.max(*reset_in_secs)));
+                    tracing::warn!(checker = name, reset_in_secs, "post_outcome rate limited");
+                } else {
+                    tracing::error!(checker = name, error = ?e, "post_outcome failed");
+                }
             }
             let _ = store.append_audit(&crate::storage::audit::AuditEntry {
                 ts: now_ts(),
@@ -139,6 +147,9 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         });
     }
     futures::future::join_all(tasks).await;
+    if let Some(reset_in_secs) = *rate_limit.lock().unwrap() {
+        return Err(GhError::RateLimited { reset_in_secs }.into());
+    }
     Ok(())
 }
 

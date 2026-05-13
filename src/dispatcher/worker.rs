@@ -1,4 +1,5 @@
 use crate::dispatcher::run::{run_job, JobDeps};
+use crate::github::client::GhError;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +39,20 @@ pub async fn run_worker(deps: Arc<JobDeps>, lease_secs: i64) {
                 );
             }
             Err(e) => {
+                if let Some(GhError::RateLimited { reset_in_secs }) = e.downcast_ref::<GhError>() {
+                    let reset = *reset_in_secs;
+                    let jitter = (id % 10) + 5;
+                    let run_after = now_ts() + reset.max(0) + jitter;
+                    let msg = format!("rate limited; reset_in={reset}s");
+                    let _ = deps.store.reschedule_at(id, run_after, &msg).await;
+                    metrics::counter!("barry_job_completed_total", "outcome" => "rate_limited").increment(1);
+                    tracing::warn!(
+                        job_id = id, owner = %leased.repo_owner, repo = %leased.repo_name,
+                        pr = leased.pr_number, reset_in_secs = reset, retry_at = run_after,
+                        "job deferred; rate limited",
+                    );
+                    continue;
+                }
                 tracing::error!(
                     ?e, job_id = id, owner = %leased.repo_owner, repo = %leased.repo_name,
                     pr = leased.pr_number, attempts = leased.attempts, "job failed",

@@ -141,6 +141,27 @@ impl Store {
         Ok(())
     }
 
+    /// Defer a leased job to a specific future time without consuming an attempt.
+    /// Use this when a temporary external condition (e.g. GitHub rate limit) requires
+    /// the job to wait — not when the job itself failed.
+    pub async fn reschedule_at(
+        &self,
+        job_id: i64,
+        run_after: i64,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE jobs
+               SET leased_until = NULL, run_after = ?1, last_error = ?2
+               WHERE id = ?3"#,
+        )
+        .bind(run_after)
+        .bind(reason)
+        .bind(job_id)
+        .execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Mark a job as failed; if attempts < max_attempts, reschedule with backoff.
     /// Returns true if the job was rescheduled, false if it was dropped.
     pub async fn nack(
@@ -218,6 +239,20 @@ mod lease_tests {
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
             .fetch_one(&s.pool).await.unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn reschedule_at_does_not_consume_attempt() {
+        let s = Store::in_memory().await.unwrap();
+        s.enqueue(&job(7), 100, 100).await.unwrap();
+        let l = s.lease_next(100, 60).await.unwrap().unwrap();
+        s.reschedule_at(l.id, 5000, "rate limited").await.unwrap();
+        // job is not visible until run_after
+        assert!(s.lease_next(200, 60).await.unwrap().is_none());
+        // re-leasable at run_after, attempts unchanged
+        let l2 = s.lease_next(5000, 60).await.unwrap().unwrap();
+        assert_eq!(l2.id, l.id);
+        assert_eq!(l2.attempts, 0);
     }
 
     #[tokio::test]
