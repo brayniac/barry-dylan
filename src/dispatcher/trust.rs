@@ -21,7 +21,7 @@ pub fn evaluate_trust(permission: &str, prior_bot_comments: &[BotComment]) -> Tr
 }
 
 pub fn parse_command(body: &str) -> BarryCommand {
-    let mut parts = body.trim().split_whitespace();
+    let mut parts = body.split_whitespace();
     match parts.next() {
         Some("/barry") => match parts.next() {
             Some("approve") => BarryCommand::Approve,

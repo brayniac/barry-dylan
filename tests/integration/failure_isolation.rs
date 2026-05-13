@@ -52,7 +52,7 @@ async fn one_checker_error_does_not_block_others() {
 
     let store = barry_dylan::storage::Store::in_memory().await.unwrap();
     let gh = std::sync::Arc::new(barry_dylan::github::client::GitHub::new(
-        reqwest::Client::new(), "t".into()).with_base(&server.uri()));
+        reqwest::Client::new(), "t".into()).with_base(server.uri()));
     let mut pipeline = Pipeline::hygiene_only();
     pipeline.checkers.push(Arc::new(AlwaysFail));
     let deps = Arc::new(JobDeps {
