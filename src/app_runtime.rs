@@ -86,7 +86,21 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_pipeline(_cfg: &Config) -> anyhow::Result<Pipeline> {
-    // v1: hygiene only here. Task 33 wires LlmReview in.
-    Ok(Pipeline::hygiene_only())
+fn build_pipeline(cfg: &Config) -> anyhow::Result<Pipeline> {
+    let mut p = Pipeline::hygiene_only();
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            cfg.llm.get("default").map(|d| d.request_timeout_secs).unwrap_or(300)))
+        .build()?;
+
+    let profile = cfg.llm.get("default")
+        .ok_or_else(|| anyhow::anyhow!("missing [llm.default]"))?;
+    let client = crate::llm::factory::build(profile, http)?;
+
+    p.checkers.push(Arc::new(crate::checker::llm_review::LlmReviewChecker {
+        client,
+        max_tokens: profile.max_tokens,
+    }));
+    Ok(p)
 }
