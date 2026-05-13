@@ -1,5 +1,5 @@
 [server]
-listen = "0.0.0.0:8080"
+listen = "0.0.0.0:8181"
 public_url = "https://barry.example.com"
 
 [github]
