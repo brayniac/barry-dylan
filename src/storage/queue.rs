@@ -103,29 +103,29 @@ impl Store {
         now_ts: i64,
         lease_secs: i64,
     ) -> anyhow::Result<Option<LeasedJob>> {
-        let mut tx = self.pool.begin().await?;
+        // Single atomic UPDATE ... RETURNING. SQLite serializes writers, so
+        // concurrent worker polls cannot deadlock on lock escalation the way
+        // a SELECT-then-UPDATE pair under BEGIN DEFERRED can.
         let row = sqlx::query(
-            r#"SELECT id, installation_id, repo_owner, repo_name, pr_number,
-                      event_kind, delivery_id, attempts
-               FROM jobs
-               WHERE run_after <= ?1
-                 AND (leased_until IS NULL OR leased_until <= ?1)
-               ORDER BY run_after ASC, id ASC
-               LIMIT 1"#,
+            r#"UPDATE jobs
+                  SET leased_until = ?1
+                WHERE id = (
+                  SELECT id FROM jobs
+                  WHERE run_after <= ?2
+                    AND (leased_until IS NULL OR leased_until <= ?2)
+                  ORDER BY run_after ASC, id ASC
+                  LIMIT 1
+                )
+                RETURNING id, installation_id, repo_owner, repo_name, pr_number,
+                          event_kind, delivery_id, attempts"#,
         )
+        .bind(now_ts + lease_secs)
         .bind(now_ts)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&self.pool)
         .await?;
-        let Some(r) = row else { tx.commit().await?; return Ok(None) };
-        let id: i64 = r.get("id");
-        sqlx::query("UPDATE jobs SET leased_until = ?1 WHERE id = ?2")
-            .bind(now_ts + lease_secs)
-            .bind(id)
-            .execute(&mut *tx).await?;
-        tx.commit().await?;
-
+        let Some(r) = row else { return Ok(None) };
         Ok(Some(LeasedJob {
-            id,
+            id: r.get("id"),
             installation_id: r.get("installation_id"),
             repo_owner: r.get("repo_owner"),
             repo_name: r.get("repo_name"),
