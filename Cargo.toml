@@ -1,5 +1,5 @@
 [package]
-name = "barry-bot"
+name = "barry-dylan"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,7 +7,7 @@ edition = "2024"
 path = "src/lib.rs"
 
 [[bin]]
-name = "barry-bot"
+name = "barry-dylan"
 path = "src/main.rs"
 
 [dependencies]

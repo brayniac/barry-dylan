@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-pub const REVIEW_MARKER: &str = "<!-- barry-bot:llm-review:v1 -->";
+pub const REVIEW_MARKER: &str = "<!-- barry-dylan:llm-review:v1 -->";
 
 pub struct LlmReviewChecker {
     pub client: Arc<dyn LlmClient>,
@@ -69,7 +69,7 @@ impl Checker for LlmReviewChecker {
 
         let inline_comments = to_inline_comments(&ctx.files, &findings);
         let body = format!(
-            "{REVIEW_MARKER}\n**barry-bot LLM review** ({} chunk{}, {} finding{})\n\n{}",
+            "{REVIEW_MARKER}\n**barry-dylan LLM review** ({} chunk{}, {} finding{})\n\n{}",
             chunks.len(), plural(chunks.len()),
             findings.len(), plural(findings.len()),
             per_file_summaries.join("\n\n"),

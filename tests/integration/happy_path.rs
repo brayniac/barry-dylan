@@ -1,4 +1,4 @@
-use barry_bot::dispatcher::run::run_job;
+use barry_dylan::dispatcher::run::run_job;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "barry-bot", version)]
+#[command(name = "barry-dylan", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -20,6 +20,6 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Run { config } => barry_bot::app_runtime::run(&config).await,
+        Cmd::Run { config } => barry_dylan::app_runtime::run(&config).await,
     }
 }

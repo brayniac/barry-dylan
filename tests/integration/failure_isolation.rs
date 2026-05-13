@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use barry_bot::checker::{Checker, CheckerCtx, CheckerOutcome};
-use barry_bot::config::repo::RepoConfig;
-use barry_bot::dispatcher::run::{run_job, JobDeps, Pipeline};
+use barry_dylan::checker::{Checker, CheckerCtx, CheckerOutcome};
+use barry_dylan::config::repo::RepoConfig;
+use barry_dylan::dispatcher::run::{run_job, JobDeps, Pipeline};
 use std::sync::Arc;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -50,8 +50,8 @@ async fn one_checker_error_does_not_block_others() {
         .expect(2..)
         .mount(&server).await;
 
-    let store = barry_bot::storage::Store::in_memory().await.unwrap();
-    let gh = std::sync::Arc::new(barry_bot::github::client::GitHub::new(
+    let store = barry_dylan::storage::Store::in_memory().await.unwrap();
+    let gh = std::sync::Arc::new(barry_dylan::github::client::GitHub::new(
         reqwest::Client::new(), "t".into()).with_base(&server.uri()));
     let mut pipeline = Pipeline::hygiene_only();
     pipeline.checkers.push(Arc::new(AlwaysFail));

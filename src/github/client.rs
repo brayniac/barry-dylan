@@ -33,7 +33,7 @@ impl GitHub {
         let mut req = self.http.request(method.clone(), &url)
             .bearer_auth(&self.token)
             .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "barry-bot")
+            .header("User-Agent", "barry-dylan")
             .header("X-GitHub-Api-Version", "2022-11-28");
         if let Some(b) = body { req = req.json(&b); }
 

@@ -73,7 +73,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     };
     let router = crate::webhook::server::router(app_state);
     let listener = tokio::net::TcpListener::bind(&cfg.server.listen).await?;
-    tracing::info!(addr = %cfg.server.listen, "barry-bot listening");
+    tracing::info!(addr = %cfg.server.listen, "barry-dylan listening");
 
     let server = axum::serve(listener, router);
 

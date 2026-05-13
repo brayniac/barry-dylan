@@ -1,6 +1,6 @@
 use crate::github::pr::BotComment;
 
-pub const APPROVE_MARKER: &str = "<!-- barry-bot:approved:v1 -->";
+pub const APPROVE_MARKER: &str = "<!-- barry-dylan:approved:v1 -->";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trust { Trusted, NeedsApproval }
@@ -37,11 +37,11 @@ pub fn approve_comment_body() -> String {
     format!("{APPROVE_MARKER}\nReview enabled for this PR by a maintainer.")
 }
 
-pub const NEEDS_APPROVAL_MARKER: &str = "<!-- barry-bot:needs-approval:v1 -->";
+pub const NEEDS_APPROVAL_MARKER: &str = "<!-- barry-dylan:needs-approval:v1 -->";
 
 pub fn needs_approval_body(author: &str) -> String {
     format!(
-        "{NEEDS_APPROVAL_MARKER}\nHi @{author} — automated review is gated for PRs from contributors without write access. A maintainer can comment `/barry approve` to enable barry-bot on this PR."
+        "{NEEDS_APPROVAL_MARKER}\nHi @{author} — automated review is gated for PRs from contributors without write access. A maintainer can comment `/barry approve` to enable barry-dylan on this PR."
     )
 }
 
@@ -50,7 +50,7 @@ mod tests {
     use super::*;
 
     fn cmt(body: &str) -> BotComment {
-        BotComment { id: 1, node_id: "n".into(), body: body.into(), author: "barry-bot[bot]".into() }
+        BotComment { id: 1, node_id: "n".into(), body: body.into(), author: "barry-dylan[bot]".into() }
     }
 
     #[test]

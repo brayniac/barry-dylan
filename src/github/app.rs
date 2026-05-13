@@ -45,7 +45,7 @@ pub async fn fetch_installation_token(
     let resp = http.post(&url)
         .bearer_auth(&jwt)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "barry-bot")
+        .header("User-Agent", "barry-dylan")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send().await?
         .error_for_status()?

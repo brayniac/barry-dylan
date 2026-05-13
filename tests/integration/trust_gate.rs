@@ -1,4 +1,4 @@
-use barry_bot::dispatcher::run::run_job;
+use barry_dylan::dispatcher::run::run_job;
 use wiremock::matchers::{body_string_contains, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -31,7 +31,7 @@ async fn untrusted_author_only_gets_needs_approval_comment() {
 
     // Expect the needs-approval comment.
     Mock::given(method("POST")).and(path("/repos/o/r/issues/1/comments"))
-        .and(body_string_contains("barry-bot:needs-approval:v1"))
+        .and(body_string_contains("barry-dylan:needs-approval:v1"))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({ "id": 7 })))
         .expect(1)
         .mount(&server).await;

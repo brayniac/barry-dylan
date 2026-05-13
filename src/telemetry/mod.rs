@@ -3,7 +3,7 @@ use tracing_subscriber::{prelude::*, EnvFilter};
 
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,barry_bot=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("info,barry_dylan=debug"));
     let fmt = tracing_subscriber::fmt::layer().json();
     let _ = tracing_subscriber::registry().with(filter).with(fmt).try_init();
 }

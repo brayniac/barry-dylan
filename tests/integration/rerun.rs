@@ -1,5 +1,5 @@
-use barry_bot::storage::queue::NewJob;
-use barry_bot::storage::Store;
+use barry_dylan::storage::queue::NewJob;
+use barry_dylan::storage::Store;
 
 #[tokio::test]
 async fn synchronize_events_coalesce_into_one_job() {

@@ -1,7 +1,7 @@
-use barry_bot::dispatcher::run::{GhFactory, JobDeps, Pipeline};
-use barry_bot::github::client::GitHub;
-use barry_bot::storage::Store;
-use barry_bot::storage::queue::NewJob;
+use barry_dylan::dispatcher::run::{GhFactory, JobDeps, Pipeline};
+use barry_dylan::github::client::GitHub;
+use barry_dylan::storage::Store;
+use barry_dylan::storage::queue::NewJob;
 use async_trait::async_trait;
 use std::sync::Arc;
 use wiremock::MockServer;
@@ -29,7 +29,7 @@ pub async fn fixture(server: &MockServer) -> (Store, Arc<JobDeps>) {
     (store, deps)
 }
 
-pub fn default_config() -> barry_bot::config::Config {
+pub fn default_config() -> barry_dylan::config::Config {
     let toml = r#"
         [server]
         listen = "0.0.0.0:0"

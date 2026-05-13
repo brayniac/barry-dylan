@@ -54,9 +54,9 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let prior_reviews = gh.list_pr_reviews(&job.repo_owner, &job.repo_name, job.pr_number).await
         .unwrap_or_default();
     let bot_comments: Vec<BotComment> = prior_comments.iter()
-        .filter(|c| c.author.starts_with("barry-bot")).cloned().collect();
+        .filter(|c| c.author.starts_with("barry-dylan")).cloned().collect();
     let bot_reviews: Vec<BotComment> = prior_reviews.iter()
-        .filter(|c| c.author.starts_with("barry-bot")).cloned().collect();
+        .filter(|c| c.author.starts_with("barry-dylan")).cloned().collect();
 
     // Trust gate.
     let trust_decision = trust::evaluate_trust(&perm, &bot_comments);
