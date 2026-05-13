@@ -1,5 +1,5 @@
 use crate::github::client::{GhError, GitHub};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct PullRequest {
@@ -136,4 +136,71 @@ pub struct BotComment {
     pub node_id: String,
     pub body: String,
     pub author: String,
+}
+
+// --- Task 15: write endpoints ---
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewCommentInput {
+    pub path: String,
+    pub position: i64,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewInput<'a> {
+    pub body: &'a str,
+    pub event: &'static str,
+    pub comments: &'a [ReviewCommentInput],
+    pub commit_id: &'a str,
+}
+
+impl GitHub {
+    pub async fn create_review(
+        &self, owner: &str, repo: &str, number: i64, input: &ReviewInput<'_>,
+    ) -> Result<i64, GhError> {
+        #[derive(Deserialize)] struct R { id: i64 }
+        let path = format!("/repos/{owner}/{repo}/pulls/{number}/reviews");
+        let r: R = self.post_json(&path, serde_json::to_value(input).unwrap()).await?;
+        Ok(r.id)
+    }
+
+    pub async fn create_issue_comment(
+        &self, owner: &str, repo: &str, number: i64, body: &str,
+    ) -> Result<i64, GhError> {
+        #[derive(Deserialize)] struct R { id: i64 }
+        let path = format!("/repos/{owner}/{repo}/issues/{number}/comments");
+        let r: R = self.post_json(&path, serde_json::json!({ "body": body })).await?;
+        Ok(r.id)
+    }
+
+    pub async fn react(
+        &self, owner: &str, repo: &str, comment_id: i64, content: &str,
+    ) -> Result<(), GhError> {
+        let path = format!("/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions");
+        let _: serde_json::Value = self.post_json(&path, serde_json::json!({ "content": content })).await?;
+        Ok(())
+    }
+
+    pub async fn add_labels(
+        &self, owner: &str, repo: &str, number: i64, labels: &[String],
+    ) -> Result<(), GhError> {
+        let path = format!("/repos/{owner}/{repo}/issues/{number}/labels");
+        let _: serde_json::Value = self.post_json(&path, serde_json::json!({ "labels": labels })).await?;
+        Ok(())
+    }
+
+    /// Minimize a comment/review via GraphQL `minimizeComment` mutation.
+    pub async fn minimize_comment(&self, node_id: &str) -> Result<(), GhError> {
+        let q = r#"
+            mutation($id: ID!) {
+              minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) {
+                minimizedComment { isMinimized }
+              }
+            }
+        "#;
+        let _: serde_json::Value =
+            self.graphql(q, serde_json::json!({ "id": node_id })).await?;
+        Ok(())
+    }
 }
