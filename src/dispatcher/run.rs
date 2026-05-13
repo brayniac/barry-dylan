@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::dispatcher::trust::{self, BarryCommand, Trust};
 use crate::github::check_run::{CheckConclusion, CheckOutput, CheckRunInput, CheckStatus};
 use crate::github::client::GitHub;
-use crate::github::pr::{BotComment, ChangedFile, PullRequest, ReviewCommentInput, ReviewInput};
+use crate::github::pr::{BotComment, PullRequest, ReviewInput};
 use crate::storage::queue::LeasedJob;
 use crate::storage::Store;
 use std::sync::Arc;
