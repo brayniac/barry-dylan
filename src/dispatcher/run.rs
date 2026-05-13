@@ -50,14 +50,22 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         return handle_command(deps, &gh, job, cmd).await;
     }
 
-    let pr = gh.get_pr(&job.repo_owner, &job.repo_name, job.pr_number).await?;
-    let files = gh.list_pr_files(&job.repo_owner, &job.repo_name, job.pr_number).await?;
+    // Setup phase: one GraphQL query (PR metadata + comments + reviews + .barry.toml blob)
+    // and `list_pr_files` REST fired concurrently — the GraphQL files connection doesn't
+    // expose unified-diff patches that the LLM checker needs.
+    let (ctx_res, files_res) = tokio::join!(
+        gh.fetch_pr_context(&job.repo_owner, &job.repo_name, job.pr_number),
+        gh.list_pr_files(&job.repo_owner, &job.repo_name, job.pr_number),
+    );
+    let pr_ctx = ctx_res?;
+    let files = files_res?;
+    let pr = pr_ctx.pr;
+    let cfg_text = pr_ctx.config_text;
+    let prior_comments = pr_ctx.comments;
+    let prior_reviews = pr_ctx.reviews;
+
     let perm = gh.author_permission(&job.repo_owner, &job.repo_name, &pr.user.login).await
         .unwrap_or_else(|_| "read".into());
-    let prior_comments = gh.list_pr_comments(&job.repo_owner, &job.repo_name, job.pr_number).await
-        .unwrap_or_default();
-    let prior_reviews = gh.list_pr_reviews(&job.repo_owner, &job.repo_name, job.pr_number).await
-        .unwrap_or_default();
     let bot_comments: Vec<BotComment> = prior_comments.iter()
         .filter(|c| c.author.starts_with("barry-dylan")).cloned().collect();
     let bot_reviews: Vec<BotComment> = prior_reviews.iter()
@@ -74,10 +82,6 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Repo config.
-    let default_branch = pr.base.r#ref.clone(); // PR's base ref ≈ default branch for most PRs
-    let cfg_text = gh.get_repo_config_text(&job.repo_owner, &job.repo_name, &default_branch).await
-        .unwrap_or(None);
     let repo_cfg = parse_repo_config_with_check(deps, &gh, job, &pr, cfg_text).await?;
 
     let ctx = CheckerCtx {

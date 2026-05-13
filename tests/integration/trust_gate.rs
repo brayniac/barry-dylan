@@ -6,14 +6,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 async fn untrusted_author_only_gets_needs_approval_comment() {
     let server = MockServer::start().await;
 
-    Mock::given(method("GET")).and(path("/repos/o/r/pulls/1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "number": 1, "title": "feat: add x", "body": "Long enough body to pass checks.",
-            "user": { "login": "stranger" }, "draft": false, "state": "open",
-            "head": { "sha": "sha1", "ref": "feat" },
-            "base": { "sha": "sha0", "ref": "main" },
-            "additions": 1, "deletions": 0, "changed_files": 1
-        }))).mount(&server).await;
+    Mock::given(method("POST")).and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            crate::common::graphql_pr_context(
+                1, "stranger", "sha1", None,
+                serde_json::json!([]), serde_json::json!([]),
+            )
+        )).mount(&server).await;
 
     Mock::given(method("GET")).and(path_regex(r"^/repos/o/r/pulls/1/files"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
@@ -22,12 +21,6 @@ async fn untrusted_author_only_gets_needs_approval_comment() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "permission": "read"
         }))).mount(&server).await;
-    Mock::given(method("GET")).and(path("/repos/o/r/issues/1/comments"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server).await;
-    Mock::given(method("GET")).and(path("/repos/o/r/pulls/1/reviews"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server).await;
 
     // Expect the needs-approval comment.
     Mock::given(method("POST")).and(path("/repos/o/r/issues/1/comments"))
