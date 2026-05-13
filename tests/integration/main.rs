@@ -2,3 +2,4 @@ mod common;
 mod happy_path;
 mod trust_gate;
 mod rerun;
+mod failure_isolation;
