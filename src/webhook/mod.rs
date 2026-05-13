@@ -1,1 +1,3 @@
-//! TODO: module documentation will be added as functionality lands.
+pub mod verify;
+pub mod event;
+pub mod server;
