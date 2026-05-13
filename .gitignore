@@ -1,0 +1,7 @@
+/target
+/barry.db
+/barry.db-wal
+/barry.db-shm
+*.pem
+.env
+.env.*
