@@ -71,9 +71,11 @@ mod tests {
 
     #[tokio::test]
     async fn missing_section_fails() {
-        let mut r = DescriptionRule::default();
-        r.min_length = 0;
-        r.require_template_sections = vec!["## Test plan".into()];
+        let r = DescriptionRule {
+            min_length: 0,
+            require_template_sections: vec!["## Test plan".into()],
+            ..DescriptionRule::default()
+        };
         let out = DescriptionChecker.run(&ctx(Some("body without section"), r)).await.unwrap();
         assert!(matches!(out.status, crate::checker::OutcomeStatus::Failure));
     }

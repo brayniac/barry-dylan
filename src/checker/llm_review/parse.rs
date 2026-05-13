@@ -42,11 +42,11 @@ pub fn parse(text: &str) -> Result<ParsedReview, ParseError> {
             b'{' => { if depth == 0 { start = Some(i); } depth += 1; }
             b'}' => {
                 depth -= 1;
-                if depth == 0 {
-                    if let Some(s) = start {
-                        let slice = &text[s..=i];
-                        return Ok(serde_json::from_str(slice)?);
-                    }
+                if depth == 0
+                    && let Some(s) = start
+                {
+                    let slice = &text[s..=i];
+                    return Ok(serde_json::from_str(slice)?);
                 }
             }
             _ => {}

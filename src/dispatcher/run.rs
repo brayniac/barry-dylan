@@ -231,7 +231,7 @@ async fn post_outcome(
     };
     let _ = gh.create_check_run(&job.repo_owner, &job.repo_name, &input).await?;
     if !o.add_labels.is_empty() {
-        let _ = gh.add_labels(&job.repo_owner, &job.repo_name, job.pr_number, &o.add_labels).await?;
+        gh.add_labels(&job.repo_owner, &job.repo_name, job.pr_number, &o.add_labels).await?;
     }
     if !o.inline_comments.is_empty() {
         // Minimize prior LLM review (Task 33).

@@ -53,10 +53,10 @@ impl GitHub {
                 if attempt < 2 { continue; }
             }
             // Secondary rate limit / hard limit.
-            if status.as_u16() == 403 {
-                if let Some(reset) = parse_rate_reset(resp.headers()) {
-                    return Err(GhError::RateLimited { reset_in_secs: reset });
-                }
+            if status.as_u16() == 403
+                && let Some(reset) = parse_rate_reset(resp.headers())
+            {
+                return Err(GhError::RateLimited { reset_in_secs: reset });
             }
             let body = resp.text().await.unwrap_or_default();
             return Err(GhError::Api { status: status.as_u16(), body });
@@ -115,7 +115,7 @@ mod tests {
         Mock::given(method("GET")).and(path("/x")).and(header("Authorization", "Bearer t"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": 1})))
             .mount(&server).await;
-        let gh = GitHub::new(reqwest::Client::new(), "t".into()).with_base(&server.uri());
+        let gh = GitHub::new(reqwest::Client::new(), "t".into()).with_base(server.uri());
         let v: serde_json::Value = gh.get_json("/x").await.unwrap();
         assert_eq!(v["ok"], 1);
     }
@@ -126,7 +126,7 @@ mod tests {
         Mock::given(method("GET")).and(path("/x"))
             .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
             .mount(&server).await;
-        let gh = GitHub::new(reqwest::Client::new(), "t".into()).with_base(&server.uri());
+        let gh = GitHub::new(reqwest::Client::new(), "t".into()).with_base(server.uri());
         let err = gh.get_json::<serde_json::Value>("/x").await.unwrap_err();
         assert!(matches!(err, GhError::Api { status: 404, .. }));
     }
