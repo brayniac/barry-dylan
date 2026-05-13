@@ -186,6 +186,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "clap",
  "futures",
  "globset",
