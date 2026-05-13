@@ -1,0 +1,27 @@
+[hygiene.title]
+enabled = true
+pattern = "^(feat|fix|chore|docs|refactor|test|perf)(\\([^)]+\\))?: .+"
+
+[hygiene.description]
+enabled = true
+min_length = 20
+
+[hygiene.size]
+enabled = true
+warn_lines = 500
+warn_files = 20
+
+[hygiene.autolabel]
+enabled = true
+rules = [
+  { paths = ["src/agent/samplers/bpf/**"], labels = ["area/bpf"] },
+  { paths = ["src/viewer/**"],             labels = ["area/viewer"] },
+]
+
+[llm_review]
+enabled = true
+focus = """
+Prioritize correctness, concurrency safety, and resource handling.
+"""
+exclude_paths = ["docs/**", "**/*.md"]
+max_diff_tokens = 100000

@@ -1,0 +1,24 @@
+[server]
+listen = "0.0.0.0:8080"
+public_url = "https://barry.example.com"
+
+[github]
+app_id = 123456
+private_key_path = "/etc/barry/app.pem"
+webhook_secret_env = "BARRY_WEBHOOK_SECRET"
+
+[storage]
+sqlite_path = "/var/lib/barry/barry.db"
+
+[dispatcher]
+debounce_secs = 30
+worker_count = 4
+job_timeout_secs = 600
+
+[llm.default]
+provider = "anthropic"
+endpoint = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "claude-sonnet-4-6"
+max_tokens = 8192
+request_timeout_secs = 300
