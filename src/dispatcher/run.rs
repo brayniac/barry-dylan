@@ -36,8 +36,7 @@ pub struct JobDeps {
     /// (no multi-review configured) — confer is then a no-op.
     pub clients: Option<Arc<crate::checker::multi_review::clients::IdentityClients>>,
     /// Persona definitions used by multi-review and confer. None matches clients=None.
-    pub personas:
-        Option<Arc<Vec<crate::checker::multi_review::persona::Persona>>>,
+    pub personas: Option<Arc<Vec<crate::checker::multi_review::persona::Persona>>>,
 }
 
 #[async_trait::async_trait]

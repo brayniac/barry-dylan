@@ -122,7 +122,12 @@ impl<'a> Orchestrator<'a> {
         let r2_start = std::time::Instant::now();
         let (barry_r2, ob_r2) = tokio::join!(
             self.synthesize_for(Identity::Barry, &diff, &barry_drafts, Some(&ob_r1_text)),
-            self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts, Some(&barry_r1_text)),
+            self.synthesize_for(
+                Identity::OtherBarry,
+                &diff,
+                &ob_drafts,
+                Some(&barry_r1_text)
+            ),
         );
         let barry_r2 = barry_r2.unwrap_or(barry_r1);
         let ob_r2 = ob_r2.unwrap_or(ob_r1);

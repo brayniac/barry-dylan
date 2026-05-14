@@ -10,11 +10,7 @@ use crate::github::client::GitHub;
 use crate::storage::queue::LeasedJob;
 use std::sync::Arc;
 
-pub async fn handle(
-    deps: &JobDeps,
-    barry_gh: &Arc<GitHub>,
-    job: &LeasedJob,
-) -> anyhow::Result<()> {
+pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> anyhow::Result<()> {
     let (Some(clients), Some(personas)) = (deps.clients.as_ref(), deps.personas.as_ref()) else {
         tracing::info!("confer received but multi-review not configured; ignoring");
         return Ok(());
