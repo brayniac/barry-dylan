@@ -66,6 +66,7 @@ impl LlmClient for OpenAiClient {
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
             "messages": messages,
+            "cache_prompt": true,
         });
         let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
         let mut rb = self
