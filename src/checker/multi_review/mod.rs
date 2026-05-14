@@ -8,5 +8,6 @@ pub mod identity;
 pub mod judge;
 pub(super) mod parse_util;
 pub mod persona;
+pub mod posting;
 pub mod review;
 pub mod synthesis;
