@@ -108,8 +108,8 @@ impl GitHub {
         Ok(out)
     }
 
-    /// Cached variant of `author_permission_raw`. Checks an in-memory TTL cache
-    /// (5 min) on `(owner, user)` before issuing the REST call.
+    /// Cached lookup that checks an in-memory TTL cache (5 min) on
+    /// `(owner, repo, user)` before issuing the REST call.
     pub async fn author_permission(
         &self,
         owner: &str,
@@ -117,19 +117,14 @@ impl GitHub {
         login: &str,
     ) -> Result<String, GhError> {
         // Fast path: cache hit.
-        if let Some(perm) = self.perm_cache().get(owner, login) {
+        if let Some(perm) = self.perm_cache().get(owner, repo, login) {
             return Ok(perm);
         }
 
-        // Cache miss: fetch from GitHub, then store.
-        let r: PermissionResp = self
-            .get_json(&format!(
-                "/repos/{owner}/{repo}/collaborators/{login}/permission"
-            ))
-            .await?;
-        let perm = r.permission.clone();
-        self.perm_cache().put(owner, login, perm);
-        Ok(r.permission)
+        // Cache miss: delegate to raw lookup and cache the result.
+        let perm = self.author_permission_raw(owner, repo, login).await?;
+        self.perm_cache().put(owner, repo, login, perm.clone());
+        Ok(perm)
     }
 
     /// Raw (uncached) lookup of a user's permission on a repository.

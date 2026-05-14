@@ -11,18 +11,22 @@ struct PermEntry {
     expires_at: Instant,
 }
 
-/// In-memory TTL cache for `(owner, user) -> permission` lookups.
-/// Keys are (owner, user) — not per-repo — since permissions rarely change
-/// and the 5-minute TTL bounds staleness.
+/// In-memory TTL cache for `(owner, repo, user) -> permission` lookups.
+/// Keys include repo since GitHub permissions are repository-scoped.
 #[derive(Clone, Default)]
 pub struct PermissionCache {
-    inner: Arc<Mutex<HashMap<(String, String), PermEntry>>>,
+    inner: Arc<Mutex<HashMap<(String, String, String), PermEntry>>>,
 }
 
 impl PermissionCache {
-    pub(crate) fn get(&self, owner: &str, user: &str) -> Option<String> {
+    pub(crate) fn get(
+        &self,
+        owner: &str,
+        repo: &str,
+        user: &str,
+    ) -> Option<String> {
         let mut map = self.inner.lock().unwrap();
-        let key = (owner.to_string(), user.to_string());
+        let key = (owner.to_string(), repo.to_string(), user.to_string());
         let entry = map.get(&key)?;
         if entry.expires_at <= Instant::now() {
             map.remove(&key);
@@ -31,10 +35,16 @@ impl PermissionCache {
         Some(entry.permission.clone())
     }
 
-    pub(crate) fn put(&self, owner: &str, user: &str, permission: String) {
+    pub(crate) fn put(
+        &self,
+        owner: &str,
+        repo: &str,
+        user: &str,
+        permission: String,
+    ) {
         let mut map = self.inner.lock().unwrap();
         map.insert(
-            (owner.to_string(), user.to_string()),
+            (owner.to_string(), repo.to_string(), user.to_string()),
             PermEntry {
                 permission,
                 expires_at: Instant::now() + Duration::from_secs(300),
