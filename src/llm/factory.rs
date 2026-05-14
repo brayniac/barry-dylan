@@ -19,15 +19,11 @@ pub fn build(
     profile: &LlmProfile,
     http: reqwest::Client,
 ) -> Result<Arc<dyn LlmClient>, FactoryError> {
-    build_named(profile, http, &profile_to_string(profile.provider))
-}
-
-/// Convert LlmProviderKind to a string for naming clients.
-fn profile_to_string(provider: LlmProviderKind) -> String {
-    match provider {
-        LlmProviderKind::Anthropic => "anthropic".to_string(),
-        LlmProviderKind::Openai => "openai".to_string(),
-    }
+    let name = match profile.provider {
+        LlmProviderKind::Anthropic => "anthropic",
+        LlmProviderKind::Openai => "openai",
+    };
+    build_named(profile, http, name)
 }
 
 /// Build an LLM client with a custom name for logging.
