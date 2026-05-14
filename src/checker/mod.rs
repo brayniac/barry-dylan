@@ -1,5 +1,6 @@
 pub mod hygiene;
 pub mod llm_review;
+pub mod multi_review;
 
 use crate::config::repo::RepoConfig;
 use crate::github::client::GitHub;
