@@ -1,8 +1,8 @@
+use crate::storage::actor::{ActorCommand, Reply};
 use crate::storage::Store;
-use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use tokio::sync::oneshot;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct NewJob {
     pub installation_id: i64,
     pub repo_owner: String,
@@ -33,46 +33,17 @@ impl Store {
         now_ts: i64,
         run_after_ts: i64,
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
-
-        // Try update first (coalesce); if no row affected, insert.
-        let updated = sqlx::query(
-            r#"UPDATE jobs
-               SET run_after = MAX(run_after, ?1),
-                   delivery_id = ?2
-               WHERE repo_owner = ?3 AND repo_name = ?4 AND pr_number = ?5
-                 AND event_kind = ?6 AND leased_until IS NULL"#,
-        )
-        .bind(run_after_ts)
-        .bind(&job.delivery_id)
-        .bind(&job.repo_owner)
-        .bind(&job.repo_name)
-        .bind(job.pr_number)
-        .bind(&job.event_kind)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-
-        if updated == 0 {
-            sqlx::query(
-                r#"INSERT INTO jobs
-                    (installation_id, repo_owner, repo_name, pr_number, event_kind,
-                     delivery_id, received_at, run_after)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
-            )
-            .bind(job.installation_id)
-            .bind(&job.repo_owner)
-            .bind(&job.repo_name)
-            .bind(job.pr_number)
-            .bind(&job.event_kind)
-            .bind(&job.delivery_id)
-            .bind(now_ts)
-            .bind(run_after_ts)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        tx.commit().await?;
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::Enqueue {
+                job: job.clone(),
+                now_ts,
+                run_after: run_after_ts,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 
@@ -84,18 +55,19 @@ impl Store {
         pr_number: i64,
         event_kind: &str,
     ) -> anyhow::Result<Option<i64>> {
-        let row = sqlx::query(
-            r#"SELECT run_after FROM jobs
-               WHERE repo_owner = ?1 AND repo_name = ?2 AND pr_number = ?3
-                 AND event_kind = ?4 AND leased_until IS NULL"#,
-        )
-        .bind(repo_owner)
-        .bind(repo_name)
-        .bind(pr_number)
-        .bind(event_kind)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|r| r.get::<i64, _>("run_after")))
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::PendingRunAfter {
+                repo_owner: repo_owner.to_string(),
+                repo_name: repo_name.to_string(),
+                pr: pr_number,
+                event_kind: event_kind.to_string(),
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let res: Option<i64> = rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(res)
     }
 }
 
@@ -107,44 +79,29 @@ impl Store {
         now_ts: i64,
         lease_secs: i64,
     ) -> anyhow::Result<Option<LeasedJob>> {
-        // Single atomic UPDATE ... RETURNING. SQLite serializes writers, so
-        // concurrent worker polls cannot deadlock on lock escalation the way
-        // a SELECT-then-UPDATE pair under BEGIN DEFERRED can.
-        let row = sqlx::query(
-            r#"UPDATE jobs
-                  SET leased_until = ?1
-                WHERE id = (
-                  SELECT id FROM jobs
-                  WHERE run_after <= ?2
-                    AND (leased_until IS NULL OR leased_until <= ?2)
-                  ORDER BY run_after ASC, id ASC
-                  LIMIT 1
-                )
-                RETURNING id, installation_id, repo_owner, repo_name, pr_number,
-                          event_kind, delivery_id, attempts"#,
-        )
-        .bind(now_ts + lease_secs)
-        .bind(now_ts)
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(r) = row else { return Ok(None) };
-        Ok(Some(LeasedJob {
-            id: r.get("id"),
-            installation_id: r.get("installation_id"),
-            repo_owner: r.get("repo_owner"),
-            repo_name: r.get("repo_name"),
-            pr_number: r.get("pr_number"),
-            event_kind: r.get("event_kind"),
-            delivery_id: r.get("delivery_id"),
-            attempts: r.get("attempts"),
-        }))
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::LeaseNext {
+                now_ts,
+                lease_secs,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let res: Option<LeasedJob> = rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(res)
     }
 
     pub async fn ack(&self, job_id: i64) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM jobs WHERE id = ?1")
-            .bind(job_id)
-            .execute(&self.pool)
-            .await?;
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::Ack {
+                job_id,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 
@@ -157,17 +114,18 @@ impl Store {
         run_after: i64,
         reason: &str,
     ) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"UPDATE jobs
-               SET leased_until = NULL, run_after = ?1, last_error = ?2
-               WHERE id = ?3"#,
-        )
-        .bind(run_after)
-        .bind(reason)
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::RescheduleAt {
+                job_id,
+                run_after,
+                reason: reason.to_string(),
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let res: () = rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(res)
     }
 
     /// Mark a job as failed; if attempts < max_attempts, reschedule with backoff.
@@ -180,35 +138,20 @@ impl Store {
         max_attempts: i64,
         backoff_schedule_secs: &[i64],
     ) -> anyhow::Result<bool> {
-        let row = sqlx::query("SELECT attempts FROM jobs WHERE id = ?1")
-            .bind(job_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        let Some(r) = row else { return Ok(false) };
-        let attempts: i64 = r.get("attempts");
-        let next_attempts = attempts + 1;
-
-        if next_attempts >= max_attempts {
-            sqlx::query("DELETE FROM jobs WHERE id = ?1")
-                .bind(job_id)
-                .execute(&self.pool)
-                .await?;
-            return Ok(false);
-        }
-        let idx = (attempts as usize).min(backoff_schedule_secs.len().saturating_sub(1));
-        let delay = backoff_schedule_secs.get(idx).copied().unwrap_or(60);
-        sqlx::query(
-            r#"UPDATE jobs
-               SET attempts = ?1, leased_until = NULL, run_after = ?2, last_error = ?3
-               WHERE id = ?4"#,
-        )
-        .bind(next_attempts)
-        .bind(now_ts + delay)
-        .bind(error)
-        .bind(job_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(true)
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::Nack {
+                job_id,
+                now_ts,
+                error: error.to_string(),
+                max_attempts,
+                backoff: backoff_schedule_secs.to_vec(),
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let res: bool = rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(res)
     }
 }
 
@@ -253,10 +196,7 @@ mod lease_tests {
         s.enqueue(&job(3), 100, 100).await.unwrap();
         let l = s.lease_next(100, 60).await.unwrap().unwrap();
         s.ack(l.id).await.unwrap();
-        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let n = s.count_rows("jobs").await.unwrap();
         assert_eq!(n, 0);
     }
 
@@ -299,10 +239,7 @@ mod lease_tests {
             .unwrap();
         assert!(!alive);
 
-        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let n = s.count_rows("jobs").await.unwrap();
         assert_eq!(n, 0);
     }
 }
@@ -335,7 +272,7 @@ mod tests {
         assert_eq!(after, Some(130));
     }
 
-    #[tokio::test]
+  #[tokio::test]
     async fn coalesces_pending_job() {
         let s = Store::in_memory().await.unwrap();
         s.enqueue(&job(1, "synchronize", "d1"), 100, 130)
@@ -349,10 +286,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after, Some(140));
-        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let n = s.count_rows("jobs").await.unwrap();
         assert_eq!(n, 1);
     }
 
@@ -379,10 +313,7 @@ mod tests {
             .await
             .unwrap();
         s.enqueue(&job(1, "opened", "d2"), 100, 130).await.unwrap();
-        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let n = s.count_rows("jobs").await.unwrap();
         assert_eq!(n, 2);
     }
 }

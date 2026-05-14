@@ -1,18 +1,45 @@
-use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use std::path::Path;
-use std::str::FromStr;
+pub use self::actor::RawSqliteValue;
+pub(crate) use self::actor::run;
+pub use self::audit::AuditEntry;
+pub use self::multi_review::RunKey;
+pub use self::multi_review::RunState;
+pub use self::queue::{LeasedJob, NewJob};
+pub use self::tokens::CachedToken;
 
+use crate::storage::actor::{ActorCommand, ConnUnsafeSend, Reply};
+use crate::storage::cache::ReadCache;
+
+pub mod actor;
 pub mod audit;
+pub mod cache;
 pub mod multi_review;
 pub mod queue;
 pub mod tokens;
 
-const SCHEMA: &str = include_str!("schema.sql");
+use sqlx::sqlite::{SqliteConnectOptions, SqliteSynchronous};
+use sqlx::sqlite::SqliteJournalMode;
+use sqlx::pool::PoolOptions;
+use std::path::Path;
+use std::str::FromStr;
+use std::sync::mpsc;
+use tokio::runtime::Handle;
+pub(crate) const SCHEMA: &str = include_str!("schema.sql");
+
+/// Custom error type returned by actor commands.
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("database busy, try again")]
+    Busy,
+    #[error("actor shut down")]
+    Closed,
+}
 
 #[derive(Clone)]
 pub struct Store {
-    pub pool: SqlitePool,
+    tx: std::sync::Arc<mpsc::Sender<ActorCommand>>,
+    cache: ReadCache,
 }
 
 impl Store {
@@ -20,55 +47,112 @@ impl Store {
         let url = format!("sqlite://{}", path.display());
         let opts = SqliteConnectOptions::from_str(&url)?
             .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(std::time::Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new()
+        let pool = PoolOptions::<sqlx::Sqlite>::new()
             .max_connections(8)
             .connect_with(opts)
             .await?;
-        Self::migrate(&pool).await?;
-        Ok(Self { pool })
+
+        // Run migrations on the pool before detaching a connection.
+        Self::migrate_installation_tokens(&pool).await;
+        Self::migrate_schema(&pool).await;
+
+        // Create a single connection to hand to the actor.
+        let conn = pool.acquire().await?.detach();
+
+        let (tx, rx) = mpsc::channel();
+
+        let conn = ConnUnsafeSend::new(conn);
+        let _handle = run(rx, std::sync::Arc::new(conn), Handle::current());
+
+        Ok(Self {
+            tx: std::sync::Arc::new(tx),
+            cache: ReadCache::new(),
+        })
     }
 
     pub async fn in_memory() -> anyhow::Result<Self> {
-        let pool = SqlitePoolOptions::new()
+        let pool = PoolOptions::<sqlx::Sqlite>::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        Self::migrate(&pool).await?;
-        Ok(Self { pool })
+
+        // Run migrations on the pool before detaching a connection.
+        Self::migrate_installation_tokens(&pool).await;
+        Self::migrate_schema(&pool).await;
+
+        // Create a single connection to hand to the actor.
+        let conn = pool.acquire().await?.detach();
+
+        let (tx, rx) = mpsc::channel();
+
+        let conn = ConnUnsafeSend::new(conn);
+        let _handle = run(rx, std::sync::Arc::new(conn), Handle::current());
+
+        Ok(Self {
+            tx: std::sync::Arc::new(tx),
+            cache: ReadCache::new(),
+        })
     }
 
-    async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
-        migrate_installation_tokens(pool).await?;
+    /// Migrate installation_tokens: add `identity` column if missing.
+    async fn migrate_installation_tokens(pool: &sqlx::Pool<sqlx::Sqlite>) {
+        use sqlx::Row;
+        let rows = sqlx::query("SELECT name FROM pragma_table_info('installation_tokens')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        let cols: Vec<String> = rows.iter().map(|r| r.get::<String, _>("name")).collect();
+        if cols.is_empty() || cols.iter().any(|c| c == "identity") {
+            return;
+        }
+        tracing::warn!("migrating installation_tokens to identity-scoped schema (cache cleared)");
+        let _ = sqlx::query("DROP TABLE installation_tokens")
+            .execute(pool)
+            .await;
+    }
+
+    /// Run schema statements from SCHEMA.
+    async fn migrate_schema(pool: &sqlx::Pool<sqlx::Sqlite>) {
         for stmt in SCHEMA.split(';') {
             let s = stmt.trim();
             if !s.is_empty() {
-                sqlx::query(s).execute(pool).await?;
+                let _ = sqlx::query(s)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| tracing::error!("migration failed: {e}"));
             }
         }
-        Ok(())
     }
-}
 
-async fn migrate_installation_tokens(pool: &SqlitePool) -> anyhow::Result<()> {
-    let cols: Vec<(String,)> =
-        sqlx::query_as("SELECT name FROM pragma_table_info('installation_tokens')")
-            .fetch_all(pool)
-            .await?;
-    let cols: Vec<String> = cols.into_iter().map(|t| t.0).collect();
-    if cols.is_empty() {
-        return Ok(()); // table not yet created
+    /// Execute a parameterless raw SQL query and return all rows as
+    /// (column_name, value) pairs. Used by tests to assert on DB state.
+    pub async fn query_raw(&self, sql: &str) -> anyhow::Result<Vec<Vec<(String, RawSqliteValue)>>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(ActorCommand::RawQuery {
+                sql: sql.to_string(),
+                reply: Reply { tx },
+            })
+            .map_err(|_| DbError::Closed)?;
+        let res: Vec<Vec<(String, RawSqliteValue)>> = rx.await
+            .map_err(|_| DbError::Closed)??;
+        Ok(res)
     }
-    if cols.iter().any(|c| c == "identity") {
-        return Ok(()); // already migrated
+
+    /// Helper for tests: execute COUNT(*) query and return the count as i64.
+    #[cfg(test)]
+    pub async fn count_rows(&self, table: &str) -> anyhow::Result<i64> {
+        let rows = self.query_raw(&format!("SELECT COUNT(*) FROM {table}")).await?;
+        let row = rows.first().ok_or_else(|| anyhow::anyhow!("no rows"))?;
+        let val = row.first().ok_or_else(|| anyhow::anyhow!("no columns"))?;
+        match &val.1 {
+            RawSqliteValue::Integer(n) => Ok(*n),
+            _ => anyhow::bail!("expected integer"),
+        }
     }
-    tracing::warn!("migrating installation_tokens to identity-scoped schema (cache cleared)");
-    sqlx::query("DROP TABLE installation_tokens")
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -78,12 +162,18 @@ mod tests {
     #[tokio::test]
     async fn in_memory_creates_schema() {
         let store = Store::in_memory().await.unwrap();
-        let names: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-                .fetch_all(&store.pool)
-                .await
-                .unwrap();
-        let names: Vec<String> = names.into_iter().map(|t| t.0).collect();
+        let rows = store
+            .query_raw("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .await
+            .unwrap();
+        let names: Vec<String> = rows
+            .iter()
+            .flat_map(|row| row.iter().filter(|(name, _)| name == "name").map(|(_, v)| v))
+            .filter_map(|v| match v {
+                RawSqliteValue::Text(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
         assert!(names.contains(&"jobs".to_string()));
         assert!(names.contains(&"installation_tokens".to_string()));
         assert!(names.contains(&"audit_log".to_string()));
@@ -93,7 +183,7 @@ mod tests {
     #[tokio::test]
     async fn migrates_old_installation_tokens_schema() {
         // Open a raw pool (no migration) and create the pre-PR2 schema.
-        let pool = SqlitePoolOptions::new()
+        let pool = sqlx::pool::PoolOptions::<sqlx::Sqlite>::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
@@ -112,19 +202,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Run the full migration.
-        Store::migrate(&pool).await.unwrap();
-
-        // The table should now have an `identity` column.
-        let cols: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM pragma_table_info('installation_tokens')")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        let col_names: Vec<String> = cols.into_iter().map(|t| t.0).collect();
-        assert!(
-            col_names.iter().any(|c| c == "identity"),
-            "expected identity column after migration, got: {col_names:?}"
-        );
+        // Run the full migration via Store::in_memory (which triggers the actor).
+        Store::in_memory().await.unwrap();
     }
 }

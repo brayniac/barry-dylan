@@ -104,10 +104,10 @@ async fn disagreement_posts_two_reviews_and_neutral_check() {
 
     // Verify both identities are recorded as posted in the storage layer.
     let key = RunKey {
-        owner: "o",
-        repo: "r",
+        owner: "o".to_string(),
+        repo: "r".to_string(),
         pr: 1,
-        head_sha: "sha1",
+        head_sha: "sha1".to_string(),
     };
     let st = store.run_state(key).await.unwrap().unwrap();
     assert!(st.barry_posted, "Barry should be recorded as posted");

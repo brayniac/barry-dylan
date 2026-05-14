@@ -195,7 +195,7 @@ dependencies = [
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
- "once_cell",
+ "parking_lot",
  "pretty_assertions",
  "regex",
  "reqwest",

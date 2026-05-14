@@ -29,7 +29,7 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn healthz(State(s): State<AppState>) -> impl IntoResponse {
-    match sqlx::query("SELECT 1").execute(&s.store.pool).await {
+    match s.store.query_raw("SELECT 1").await {
         Ok(_) => (StatusCode::OK, "ok"),
         Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "db unavailable"),
     }
@@ -230,10 +230,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&store.pool)
-            .await
-            .unwrap();
+        let n = store.count_rows("jobs").await.unwrap();
         assert_eq!(n, 1);
     }
 }

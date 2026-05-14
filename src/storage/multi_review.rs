@@ -1,13 +1,15 @@
 use crate::checker::multi_review::identity::Identity;
+use crate::storage::actor::{ActorCommand, Reply};
 use crate::storage::Store;
-use sqlx::Row;
+use tokio::sync::oneshot;
 
-#[derive(Debug, Clone, Copy)]
-pub struct RunKey<'a> {
-    pub owner: &'a str,
-    pub repo: &'a str,
+/// Key for multi-review run state, owned to cross the actor boundary.
+#[derive(Debug, Clone)]
+pub struct RunKey {
+    pub owner: String,
+    pub repo: String,
     pub pr: i64,
-    pub head_sha: &'a str,
+    pub head_sha: String,
 }
 
 #[derive(Debug, Clone)]
@@ -22,73 +24,51 @@ pub struct RunState {
 impl Store {
     pub async fn record_post(
         &self,
-        key: RunKey<'_>,
+        key: RunKey,
         identity: Identity,
         outcome: &str,
         now_ts: i64,
     ) -> anyhow::Result<()> {
-        let col = match identity {
-            Identity::Barry => "barry_posted",
-            Identity::OtherBarry => "other_barry_posted",
-            Identity::OtherOtherBarry => "other_other_barry_posted",
-        };
-        let sql = format!(
-            "INSERT INTO multi_review_runs
-              (repo_owner, repo_name, pr_number, head_sha, {col}, last_outcome, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
-             ON CONFLICT(repo_owner, repo_name, pr_number, head_sha) DO UPDATE SET
-               {col} = 1, last_outcome = excluded.last_outcome, updated_at = excluded.updated_at"
-        );
-        sqlx::query(&sql)
-            .bind(key.owner)
-            .bind(key.repo)
-            .bind(key.pr)
-            .bind(key.head_sha)
-            .bind(outcome)
-            .bind(now_ts)
-            .execute(&self.pool)
-            .await?;
+        let (tx, rx) = oneshot::channel();
+        self.tx
+ .send(ActorCommand::RecordPost {
+                key,
+                identity: identity.slug().to_string(),
+                outcome: outcome.to_string(),
+                now_ts,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 
-    pub async fn record_confer_used(&self, key: RunKey<'_>, now_ts: i64) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"INSERT INTO multi_review_runs
-                (repo_owner, repo_name, pr_number, head_sha, confers_used, updated_at)
-               VALUES (?1, ?2, ?3, ?4, 1, ?5)
-               ON CONFLICT(repo_owner, repo_name, pr_number, head_sha) DO UPDATE SET
-                 confers_used = confers_used + 1, updated_at = excluded.updated_at"#,
-        )
-        .bind(key.owner)
-        .bind(key.repo)
-        .bind(key.pr)
-        .bind(key.head_sha)
-        .bind(now_ts)
-        .execute(&self.pool)
-        .await?;
+    pub async fn record_confer_used(&self, key: RunKey, now_ts: i64) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::RecordConferUsed {
+                key,
+                now_ts,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 
-    pub async fn run_state(&self, key: RunKey<'_>) -> anyhow::Result<Option<RunState>> {
-        let row = sqlx::query(
-            r#"SELECT barry_posted, other_barry_posted, other_other_barry_posted,
-                      confers_used, last_outcome
-               FROM multi_review_runs
-               WHERE repo_owner=?1 AND repo_name=?2 AND pr_number=?3 AND head_sha=?4"#,
-        )
-        .bind(key.owner)
-        .bind(key.repo)
-        .bind(key.pr)
-        .bind(key.head_sha)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|r| RunState {
-            barry_posted: r.get::<i64, _>("barry_posted") != 0,
-            other_barry_posted: r.get::<i64, _>("other_barry_posted") != 0,
-            other_other_barry_posted: r.get::<i64, _>("other_other_barry_posted") != 0,
-            confers_used: r.get::<i64, _>("confers_used") as u32,
-            last_outcome: r.get("last_outcome"),
-        }))
+    pub async fn run_state(&self, key: RunKey) -> anyhow::Result<Option<RunState>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::RunState {
+                key,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let res: Option<RunState> = rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(res)
     }
 }
 
@@ -96,12 +76,12 @@ impl Store {
 mod tests {
     use super::*;
 
-    fn key<'a>() -> RunKey<'a> {
+    fn key() -> RunKey {
         RunKey {
-            owner: "o",
-            repo: "r",
+            owner: "o".to_string(),
+            repo: "r".to_string(),
             pr: 1,
-            head_sha: "sha",
+            head_sha: "sha".to_string(),
         }
     }
 
@@ -132,20 +112,20 @@ mod tests {
         assert_eq!(st.last_outcome.as_deref(), Some("comment"));
     }
 
-    #[tokio::test]
+  #[tokio::test]
     async fn no_row_for_unknown_sha() {
         let s = Store::in_memory().await.unwrap();
         let old = RunKey {
-            owner: "o",
-            repo: "r",
+            owner: "o".to_string(),
+            repo: "r".to_string(),
             pr: 1,
-            head_sha: "sha-old",
+            head_sha: "sha-old".to_string(),
         };
         let new = RunKey {
-            owner: "o",
-            repo: "r",
+            owner: "o".to_string(),
+            repo: "r".to_string(),
             pr: 1,
-            head_sha: "sha-new",
+            head_sha: "sha-new".to_string(),
         };
         s.record_post(old, Identity::Barry, "approve", 100)
             .await

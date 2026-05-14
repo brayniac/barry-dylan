@@ -39,7 +39,7 @@ regex = "1"
 globset = "0.4"
 url = "2"
 futures = "0.3"
-once_cell = "1"
+parking_lot = "0.12"
 base64 = "0.22"
 
 [dev-dependencies]

@@ -108,13 +108,13 @@ async fn confer_summons_other_barry_after_barry_posted() {
 
     // Pre-populate: Barry already posted approve on sha1.
     let key = RunKey {
-        owner: "o",
-        repo: "r",
+        owner: "o".to_string(),
+        repo: "r".to_string(),
         pr: 1,
-        head_sha: "sha1",
+        head_sha: "sha1".to_string(),
     };
     store
-        .record_post(key, Identity::Barry, "approve", 100)
+        .record_post(key.clone(), Identity::Barry, "approve", 100)
         .await
         .unwrap();
 
@@ -188,17 +188,17 @@ async fn confer_rejected_when_max_per_pr_reached() {
 
     // Pre-populate confers_used = 2 (= max_per_pr in the test config).
     let key = RunKey {
-        owner: "o",
-        repo: "r",
+        owner: "o".to_string(),
+        repo: "r".to_string(),
         pr: 1,
-        head_sha: "sha1",
+        head_sha: "sha1".to_string(),
     };
     store
-        .record_post(key, Identity::Barry, "approve", 100)
+        .record_post(key.clone(), Identity::Barry, "approve", 100)
         .await
         .unwrap();
-    store.record_confer_used(key, 101).await.unwrap();
-    store.record_confer_used(key, 102).await.unwrap();
+    store.record_confer_used(key.clone(), 101).await.unwrap();
+    store.record_confer_used(key.clone(), 102).await.unwrap();
 
     let job = NewJob {
         installation_id: 1,
