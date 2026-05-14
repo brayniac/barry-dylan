@@ -55,7 +55,7 @@ mod tests {
     use crate::github::pr::{ChangedFile, GitRef, PullRequest, User};
     use std::sync::Arc;
 
-    fn ctx(files: Vec<&str>, rules: Vec<AutolabelRule>) -> CheckerCtx {
+    async fn ctx(files: Vec<&str>, rules: Vec<AutolabelRule>) -> CheckerCtx {
         let mut cfg = RepoConfig::default();
         cfg.hygiene.autolabel = Autolabel {
             enabled: true,
@@ -99,6 +99,8 @@ mod tests {
             files,
             prior_bot_reviews: vec![],
             prior_bot_comments: vec![],
+            store: crate::storage::Store::in_memory().await.unwrap(),
+            installation_id: None,
         }
     }
 
@@ -110,7 +112,8 @@ mod tests {
                 paths: vec!["src/x/**".into()],
                 labels: vec!["area/x".into()],
             }],
-        );
+        )
+        .await;
         let out = AutolabelChecker.run(&c).await.unwrap();
         assert_eq!(out.add_labels, vec!["area/x"]);
     }
@@ -123,7 +126,8 @@ mod tests {
                 paths: vec!["src/**".into()],
                 labels: vec!["area/src".into()],
             }],
-        );
+        )
+        .await;
         let out = AutolabelChecker.run(&c).await.unwrap();
         assert!(out.add_labels.is_empty());
     }

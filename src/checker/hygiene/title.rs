@@ -37,7 +37,7 @@ mod tests {
     use crate::github::pr::{GitRef, PullRequest, User};
     use std::sync::Arc;
 
-    fn ctx_with(title: &str, rule: TitleRule) -> CheckerCtx {
+    async fn ctx_with(title: &str, rule: TitleRule) -> CheckerCtx {
         let mut cfg = RepoConfig::default();
         cfg.hygiene.title = rule;
         CheckerCtx {
@@ -67,19 +67,21 @@ mod tests {
             files: vec![],
             prior_bot_reviews: vec![],
             prior_bot_comments: vec![],
+            store: crate::storage::Store::in_memory().await.unwrap(),
+            installation_id: None,
         }
     }
 
     #[tokio::test]
     async fn good_title_passes() {
-        let ctx = ctx_with("feat: add foo", TitleRule::default());
+        let ctx = ctx_with("feat: add foo", TitleRule::default()).await;
         let out = TitleChecker.run(&ctx).await.unwrap();
         assert!(matches!(out.status, crate::checker::OutcomeStatus::Success));
     }
 
     #[tokio::test]
     async fn bad_title_fails() {
-        let ctx = ctx_with("untyped change", TitleRule::default());
+        let ctx = ctx_with("untyped change", TitleRule::default()).await;
         let out = TitleChecker.run(&ctx).await.unwrap();
         assert!(matches!(out.status, crate::checker::OutcomeStatus::Failure));
     }
@@ -92,7 +94,7 @@ mod tests {
             "style: cargo fmt across codebase",
             "revert: undo experimental change",
         ] {
-            let ctx = ctx_with(title, TitleRule::default());
+            let ctx = ctx_with(title, TitleRule::default()).await;
             let out = TitleChecker.run(&ctx).await.unwrap();
             assert!(
                 matches!(out.status, crate::checker::OutcomeStatus::Success),
@@ -104,7 +106,7 @@ mod tests {
     #[tokio::test]
     async fn breaking_change_marker_passes() {
         for title in ["feat!: drop legacy api", "refactor(api)!: rename endpoints"] {
-            let ctx = ctx_with(title, TitleRule::default());
+            let ctx = ctx_with(title, TitleRule::default()).await;
             let out = TitleChecker.run(&ctx).await.unwrap();
             assert!(
                 matches!(out.status, crate::checker::OutcomeStatus::Success),

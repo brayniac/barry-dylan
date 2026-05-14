@@ -21,9 +21,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_pending_unique
 CREATE INDEX IF NOT EXISTS jobs_due_idx ON jobs(run_after) WHERE leased_until IS NULL;
 
 CREATE TABLE IF NOT EXISTS installation_tokens (
-    installation_id INTEGER PRIMARY KEY,
+    installation_id INTEGER NOT NULL,
+    identity TEXT NOT NULL DEFAULT 'barry',
     token TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (installation_id, identity)
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (

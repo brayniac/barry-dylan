@@ -1,5 +1,6 @@
+use crate::checker::multi_review::identity::Identity;
 use crate::config::Config;
-use crate::dispatcher::run::{GhFactory, JobDeps, Pipeline};
+use crate::dispatcher::run::{GhFactory, JobDeps, MultiGhFactory, Pipeline};
 use crate::github::app::AppCreds;
 use crate::github::client::GitHub;
 use crate::storage::Store;
@@ -10,21 +11,46 @@ use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 
 pub struct AppGhFactory {
-    pub creds: Arc<AppCreds>,
+    pub barry: Arc<AppCreds>,
+    pub other_barry: Arc<AppCreds>,
+    pub other_other_barry: Arc<AppCreds>,
     pub http: reqwest::Client,
     pub store: Store,
+}
+
+impl AppGhFactory {
+    fn creds_for(&self, identity: Identity) -> &Arc<AppCreds> {
+        match identity {
+            Identity::Barry => &self.barry,
+            Identity::OtherBarry => &self.other_barry,
+            Identity::OtherOtherBarry => &self.other_other_barry,
+        }
+    }
 }
 
 #[async_trait]
 impl GhFactory for AppGhFactory {
     async fn for_installation(&self, installation_id: i64) -> anyhow::Result<Arc<GitHub>> {
+        // Default identity for the legacy path is Barry.
+        self.for_identity(Identity::Barry, installation_id).await
+    }
+}
+
+#[async_trait]
+impl MultiGhFactory for AppGhFactory {
+    async fn for_identity(
+        &self,
+        identity: Identity,
+        installation_id: i64,
+    ) -> anyhow::Result<Arc<GitHub>> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
-        let token = crate::github::app::get_or_mint(
+        let token = crate::github::app::get_or_mint_for(
             &self.store,
             &self.http,
-            &self.creds,
+            self.creds_for(identity),
+            identity,
             installation_id,
             now,
         )
@@ -38,12 +64,30 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let cfg = Arc::new(Config::load(config_path)?);
 
     // Read secrets.
-    let webhook_secret = std::env::var(&cfg.github.webhook_secret_env)
-        .map_err(|_| anyhow::anyhow!("env var {} not set", cfg.github.webhook_secret_env))?;
-    crate::github::app::ensure_key_mode_strict(&cfg.github.private_key_path)?;
-    let creds = Arc::new(AppCreds::load(
-        cfg.github.app_id,
-        &cfg.github.private_key_path,
+    let webhook_env = cfg
+        .github
+        .barry
+        .webhook_secret_env
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("[github.barry].webhook_secret_env required"))?;
+    let webhook_secret = std::env::var(webhook_env)
+        .map_err(|_| anyhow::anyhow!("env var {} not set", webhook_env))?;
+
+    crate::github::app::ensure_key_mode_strict(&cfg.github.barry.private_key_path)?;
+    crate::github::app::ensure_key_mode_strict(&cfg.github.other_barry.private_key_path)?;
+    crate::github::app::ensure_key_mode_strict(&cfg.github.other_other_barry.private_key_path)?;
+
+    let barry = Arc::new(AppCreds::load(
+        cfg.github.barry.app_id,
+        &cfg.github.barry.private_key_path,
+    )?);
+    let ob = Arc::new(AppCreds::load(
+        cfg.github.other_barry.app_id,
+        &cfg.github.other_barry.private_key_path,
+    )?);
+    let oob = Arc::new(AppCreds::load(
+        cfg.github.other_other_barry.app_id,
+        &cfg.github.other_other_barry.private_key_path,
     )?);
 
     let store = Store::open(&cfg.storage.sqlite_path).await?;
@@ -52,13 +96,15 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let gh_factory: Arc<dyn GhFactory> = Arc::new(AppGhFactory {
-        creds: creds.clone(),
+    let gh_factory: Arc<dyn MultiGhFactory> = Arc::new(AppGhFactory {
+        barry,
+        other_barry: ob,
+        other_other_barry: oob,
         http: http.clone(),
         store: store.clone(),
     });
 
-    let pipeline = Arc::new(build_pipeline(&cfg)?);
+    let pipeline = Arc::new(build_pipeline(&cfg, gh_factory.clone())?);
     let deps = Arc::new(JobDeps {
         store: store.clone(),
         config: cfg.clone(),
@@ -107,28 +153,28 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_pipeline(cfg: &Config) -> anyhow::Result<Pipeline> {
+fn build_pipeline(cfg: &Config, gh_factory: Arc<dyn MultiGhFactory>) -> anyhow::Result<Pipeline> {
     let mut p = Pipeline::hygiene_only();
 
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            cfg.llm
-                .get("default")
-                .map(|d| d.request_timeout_secs)
-                .unwrap_or(300),
-        ))
-        .build()?;
-
-    let profile = cfg
-        .llm
-        .get("default")
-        .ok_or_else(|| anyhow::anyhow!("missing [llm.default]"))?;
-    let client = crate::llm::factory::build(profile, http)?;
+    let clients = Arc::new(crate::checker::multi_review::clients::build(cfg)?);
+    let overrides = personas_from_cfg(&cfg.personas);
+    let personas = Arc::new(crate::checker::multi_review::persona::resolve(&overrides)?);
 
     p.checkers
-        .push(Arc::new(crate::checker::llm_review::LlmReviewChecker {
-            client,
-            max_tokens: profile.max_tokens,
+        .push(Arc::new(crate::checker::multi_review::MultiReviewChecker {
+            clients,
+            personas,
+            gh_factory,
         }));
     Ok(p)
+}
+
+fn personas_from_cfg(
+    p: &crate::config::PersonaOverridesConfig,
+) -> crate::checker::multi_review::persona::PersonaOverrides {
+    crate::checker::multi_review::persona::PersonaOverrides {
+        security: p.security.as_ref().and_then(|x| x.prompt_path.clone()),
+        correctness: p.correctness.as_ref().and_then(|x| x.prompt_path.clone()),
+        style: p.style.as_ref().and_then(|x| x.prompt_path.clone()),
+    }
 }
