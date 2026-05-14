@@ -73,59 +73,118 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
     let debounce = s.debounce_secs as i64;
 
     let to_enqueue: Option<(NewJob, i64)> = match parsed {
-        InboundEvent::PullRequest(e) if pull_request_action_is_actionable(&e.action) => Some((
-            NewJob {
-                installation_id: e.installation.id,
-                repo_owner: e.repository.owner.login,
-                repo_name: e.repository.name,
-                pr_number: e.number,
-                event_kind: format!("pull_request.{}", e.action),
-                delivery_id: delivery.clone(),
-            },
-            if e.action == "synchronize" {
-                now + debounce
-            } else {
-                now
-            },
-        )),
+        InboundEvent::PullRequest(e) if pull_request_action_is_actionable(&e.action) => {
+            let pr = e.number;
+            let owner = e.repository.owner.login.clone();
+            let repo = e.repository.name.clone();
+            let head_sha = e.pull_request.head.sha.clone();
+
+            let span = tracing::info_span!(
+                "webhook.pr",
+                delivery_id = %delivery,
+                owner = %owner,
+                repo = %repo,
+                pr = pr,
+                head_sha = %head_sha,
+                event_kind = %format!("pull_request.{}", e.action)
+            );
+            let _enter = span.enter();
+
+            tracing::info!(
+                owner = %owner,
+                repo = %repo,
+                pr = pr,
+                action = %e.action,
+                "processing pull request webhook"
+            );
+
+            Some((
+                NewJob {
+                    installation_id: e.installation.id,
+                    repo_owner: owner,
+                    repo_name: repo,
+                    pr_number: pr,
+                    event_kind: format!("pull_request.{}", e.action),
+                    delivery_id: delivery.clone(),
+                },
+                if e.action == "synchronize" {
+                    now + debounce
+                } else {
+                    now
+                },
+            ))
+        }
         InboundEvent::IssueComment(e)
             if e.action == "created"
                 && e.issue.pull_request.is_some()
                 && e.comment.body.starts_with("/barry") =>
         {
+            let pr = e.issue.number;
+            let owner = e.repository.owner.login.clone();
+            let repo = e.repository.name.clone();
+
+            let span = tracing::info_span!(
+                "webhook.command",
+                delivery_id = %delivery,
+                owner = %owner,
+                repo = %repo,
+                pr = pr,
+                command = %short_command(&e.comment.body)
+            );
+            let _enter = span.enter();
+
+            tracing::info!(
+                owner = %owner,
+                repo = %repo,
+                pr = pr,
+                "processing /barry command"
+            );
+
             Some((
                 NewJob {
                     installation_id: e.installation.id,
-                    repo_owner: e.repository.owner.login,
-                    repo_name: e.repository.name,
-                    pr_number: e.issue.number,
+                    repo_owner: owner,
+                    repo_name: repo,
+                    pr_number: pr,
                     event_kind: format!("issue_comment.{}", short_command(&e.comment.body)),
                     delivery_id: delivery.clone(),
                 },
                 now,
             ))
         }
-        _ => None,
+        _ => {
+            tracing::debug!(event = evt, delivery_id = %delivery, "event dropped (not actionable)");
+            None
+        }
     };
 
     if let Some((job, run_after)) = to_enqueue {
-        let owner = job.repo_owner.clone();
-        let repo = job.repo_name.clone();
+        let owner = &job.repo_owner;
+        let repo = &job.repo_name;
         let pr = job.pr_number;
-        let kind = job.event_kind.clone();
+        let kind = &job.event_kind;
         if let Err(e) = s.store.enqueue(&job, now, run_after).await {
-            tracing::error!(?e, %owner, %repo, pr, event_kind = %kind, "enqueue failed");
+            tracing::error!(
+                ?e,
+                %owner,
+                %repo,
+                pr,
+                event_kind = %kind,
+                "enqueue failed"
+            );
             metrics::counter!("barry_webhook_rejected_total", "reason" => "enqueue").increment(1);
             return (StatusCode::INTERNAL_SERVER_ERROR, "enqueue failed");
         }
         metrics::counter!("barry_job_enqueued_total").increment(1);
         tracing::info!(
-            %owner, %repo, pr, event_kind = %kind,
-            delivery_id = %delivery, run_after_in_secs = run_after - now,
-            "job enqueued",
+            %owner,
+            %repo,
+            pr,
+            event_kind = %kind,
+            delivery_id = %delivery,
+            run_after_in_secs = run_after - now,
+            "job enqueued"
         );
-    } else {
-        tracing::debug!(event = evt, delivery_id = %delivery, "event dropped (not actionable)");
     }
     (StatusCode::OK, "ok")
 }
@@ -170,8 +229,6 @@ mod tests {
     async fn fresh() -> (Router, Store) {
         let store = Store::in_memory().await.unwrap();
         let _ = crate::telemetry::init_tracing;
-        // Use build_recorder() + handle() instead of install_recorder() to avoid
-        // SetRecorderError when multiple tests run in parallel (the recorder is global).
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let metrics = recorder.handle();
         let state = AppState {

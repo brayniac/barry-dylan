@@ -55,17 +55,26 @@ pub trait MultiGhFactory: GhFactory {
 }
 
 pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
-    tracing::info!(
-        owner = %job.repo_owner, repo = %job.repo_name, pr = job.pr_number,
-        event_kind = %job.event_kind, "running job",
+    let span = tracing::info_span!(
+        "job.run",
+        owner = %job.repo_owner,
+        repo = %job.repo_name,
+        pr = job.pr_number,
+        event_kind = %job.event_kind,
+        delivery_id = %job.delivery_id,
+        installation_id = job.installation_id
     );
+    let _enter = span.enter();
+
+    tracing::info!("starting job processing");
+
     let gh = deps
         .gh_factory
         .for_installation(job.installation_id)
         .await?;
 
     if let Some(cmd) = parse_command_event(&job.event_kind) {
-        tracing::info!(?cmd, owner = %job.repo_owner, repo = %job.repo_name, pr = job.pr_number, "handling /barry command");
+        tracing::info!(?cmd, "handling /barry command");
         return handle_command(deps, &gh, job, cmd).await;
     }
 
@@ -101,8 +110,10 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     // Trust gate.
     let trust_decision = trust::evaluate_trust(&perm, &bot_comments);
     tracing::info!(
-        author = %pr.user.login, permission = %perm,
-        trust = ?trust_decision, "trust decision",
+        author = %pr.user.login,
+        permission = %perm,
+        trust = ?trust_decision,
+        "trust decision made"
     );
     if trust_decision == Trust::NeedsApproval {
         post_needs_approval_once(&gh, job, &pr, &bot_comments).await?;
@@ -138,36 +149,46 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         }
         let chk = chk.clone();
         let rate_limit = rate_limit.clone();
+        let checker_name = chk.name().to_string();
         tasks.push(async move {
-            let name = chk.name();
-            tracing::debug!(checker = name, "checker starting");
+            let span = tracing::info_span!(
+                "checker.run",
+                checker = checker_name,
+                pr = job_ref.pr_number,
+                owner = %job_ref.repo_owner,
+                repo = %job_ref.repo_name
+            );
+            let _enter = span.enter();
+
+            tracing::debug!("checker starting");
             let t = std::time::Instant::now();
             let res = tokio::time::timeout(checker_timeout, chk.run(ctx_ref)).await;
             let dur = t.elapsed();
             let outcome = match res {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
-                    tracing::error!(checker = name, error = ?e, "checker failed");
-                    CheckerOutcome::neutral(static_name(name), "internal error (see logs)")
+                    tracing::error!(error = ?e, "checker failed");
+                    CheckerOutcome::neutral(static_name(&checker_name), "internal error (see logs)")
                 }
                 Err(_) => {
-                    tracing::warn!(checker = name, "checker timed out");
-                    CheckerOutcome::neutral(static_name(name), "timed out")
+                    let timeout_msg = format!("timed out after {}s", checker_timeout.as_secs());
+                    tracing::warn!(timeout_msg, "checker timed out");
+                    CheckerOutcome::neutral(static_name(&checker_name), &timeout_msg)
                 }
             };
             tracing::info!(
-                checker = name,
+                checker = checker_name,
                 status = status_str(outcome.status),
                 duration_ms = dur.as_millis() as u64,
-                "checker completed",
+                "checker completed"
             );
             if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome).await {
                 if let Some(GhError::RateLimited { reset_in_secs }) = e.downcast_ref::<GhError>() {
                     let mut g = rate_limit.lock().unwrap();
                     *g = Some(g.map_or(*reset_in_secs, |c| c.max(*reset_in_secs)));
-                    tracing::warn!(checker = name, reset_in_secs, "post_outcome rate limited");
+                    tracing::warn!(reset_in_secs, "post_outcome rate limited");
                 } else {
-                    tracing::error!(checker = name, error = ?e, "post_outcome failed");
+                    tracing::error!(error = ?e, "post_outcome failed");
                 }
             }
             let _ = store
@@ -177,7 +198,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                     repo_owner: Some(job_ref.repo_owner.clone()),
                     repo_name: Some(job_ref.repo_name.clone()),
                     pr_number: Some(job_ref.pr_number),
-                    checker_name: Some(name.to_string()),
+                    checker_name: Some(checker_name),
                     outcome: status_str(outcome.status).to_string(),
                     duration_ms: Some(dur.as_millis() as i64),
                     details: None,
@@ -208,8 +229,18 @@ async fn handle_command(
     job: &LeasedJob,
     cmd: BarryCommand,
 ) -> anyhow::Result<()> {
+    let span = tracing::info_span!(
+        "job.command",
+        command = ?cmd,
+        pr = job.pr_number,
+        owner = %job.repo_owner,
+        repo = %job.repo_name
+    );
+    let _enter = span.enter();
+
     match cmd {
         BarryCommand::Approve => {
+            tracing::info!("approving PR for review");
             gh.create_issue_comment(
                 &job.repo_owner,
                 &job.repo_name,
@@ -235,6 +266,7 @@ async fn handle_command(
                 .await?;
         }
         BarryCommand::Review => {
+            tracing::info!("re-running review on current head");
             let now = now_ts();
             deps.store
                 .enqueue(
@@ -273,6 +305,7 @@ async fn post_needs_approval_once(
         .iter()
         .any(|c| c.body.contains(trust::NEEDS_APPROVAL_MARKER))
     {
+        tracing::debug!("needs-approval comment already posted");
         return Ok(());
     }
     gh.create_issue_comment(
@@ -282,6 +315,7 @@ async fn post_needs_approval_once(
         &trust::needs_approval_body(&pr.user.login),
     )
     .await?;
+    tracing::info!("posted needs-approval comment for untrusted author");
     Ok(())
 }
 
@@ -329,6 +363,20 @@ async fn post_outcome(
     pr: &PullRequest,
     o: &CheckerOutcome,
 ) -> anyhow::Result<()> {
+    let span = tracing::info_span!(
+        "checker.post_outcome",
+        checker = o.checker_name,
+        pr = job.pr_number,
+        owner = %job.repo_owner,
+        repo = %job.repo_name,
+        status = ?match o.status {
+            OutcomeStatus::Success => CheckConclusion::Success,
+            OutcomeStatus::Neutral => CheckConclusion::Neutral,
+            OutcomeStatus::Failure => CheckConclusion::Failure,
+        }
+    );
+    let _enter = span.enter();
+
     let conclusion = match o.status {
         OutcomeStatus::Success => CheckConclusion::Success,
         OutcomeStatus::Neutral => CheckConclusion::Neutral,
@@ -348,7 +396,7 @@ async fn post_outcome(
     let _ = gh
         .create_check_run(&job.repo_owner, &job.repo_name, &input)
         .await?;
-    tracing::debug!(checker = o.checker_name, ?conclusion, "check-run posted");
+    tracing::debug!(checker = o.checker_name, conclusion = ?conclusion, "check-run posted");
     if !o.add_labels.is_empty() {
         gh.add_labels(
             &job.repo_owner,
@@ -370,9 +418,8 @@ async fn post_outcome(
             .create_review(&job.repo_owner, &job.repo_name, job.pr_number, &review)
             .await?;
         tracing::info!(
-            checker = o.checker_name,
             inline_comments = o.inline_comments.len(),
-            "pr review posted",
+            "pr review posted"
         );
     }
     if let Some(body) = &o.issue_comment {

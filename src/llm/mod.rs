@@ -127,6 +127,11 @@ pub enum LlmError {
 pub trait LlmClient: Send + Sync {
     /// Complete the given LLM request and return the response.
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError>;
+
+    /// Optional: name of the client for logging purposes.
+    fn name(&self) -> &'static str {
+        "llm_client"
+    }
 }
 
 fn is_transient(e: &LlmError) -> bool {
