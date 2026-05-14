@@ -118,6 +118,7 @@ impl LlmClient for TimedClient {
             }
             Err(e) => {
                 tracing::warn!(
+                    client = self.name,
                     duration_ms,
                     error = ?e,
                     "llm call failed"

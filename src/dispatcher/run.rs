@@ -395,7 +395,7 @@ async fn post_outcome(
     let _ = gh
         .create_check_run(&job.repo_owner, &job.repo_name, &input)
         .await?;
-    tracing::debug!(conclusion = ?conclusion, "check-run posted");
+    tracing::debug!(checker = o.checker_name, conclusion = ?conclusion, "check-run posted");
     if !o.add_labels.is_empty() {
         gh.add_labels(
             &job.repo_owner,
@@ -404,7 +404,7 @@ async fn post_outcome(
             &o.add_labels,
         )
         .await?;
-        tracing::debug!(labels = ?o.add_labels, "labels added");
+        tracing::debug!(checker = o.checker_name, labels = ?o.add_labels, "labels added");
     }
     if !o.inline_comments.is_empty() {
         let review = ReviewInput {
@@ -425,10 +425,7 @@ async fn post_outcome(
         let _ = gh
             .create_issue_comment(&job.repo_owner, &job.repo_name, job.pr_number, body)
             .await?;
-        tracing::debug!(
-            body_chars = body.len(),
-            "issue comment posted"
-        );
+        tracing::debug!(checker = o.checker_name, body_chars = body.len(), "issue comment posted");
     }
     Ok(())
 }
