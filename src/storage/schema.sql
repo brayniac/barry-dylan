@@ -39,4 +39,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
     details TEXT
 );
 
-CREATE INDEX IF NOT EXISTS audit_ts_idx ON audit_log(ts)
+CREATE INDEX IF NOT EXISTS audit_ts_idx ON audit_log(ts);
+
+CREATE TABLE IF NOT EXISTS multi_review_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_owner TEXT NOT NULL,
+    repo_name TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    barry_posted INTEGER NOT NULL DEFAULT 0,
+    other_barry_posted INTEGER NOT NULL DEFAULT 0,
+    other_other_barry_posted INTEGER NOT NULL DEFAULT 0,
+    confers_used INTEGER NOT NULL DEFAULT 0,
+    last_outcome TEXT,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS multi_review_runs_unique
+    ON multi_review_runs(repo_owner, repo_name, pr_number, head_sha)

@@ -4,6 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 pub mod audit;
+pub mod multi_review;
 pub mod queue;
 pub mod tokens;
 
@@ -66,5 +67,6 @@ mod tests {
         assert!(names.contains(&"jobs".to_string()));
         assert!(names.contains(&"installation_tokens".to_string()));
         assert!(names.contains(&"audit_log".to_string()));
+        assert!(names.contains(&"multi_review_runs".to_string()));
     }
 }
