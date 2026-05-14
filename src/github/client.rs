@@ -19,12 +19,7 @@ pub struct PermissionCache {
 }
 
 impl PermissionCache {
-    pub(crate) fn get(
-        &self,
-        owner: &str,
-        repo: &str,
-        user: &str,
-    ) -> Option<String> {
+    pub(crate) fn get(&self, owner: &str, repo: &str, user: &str) -> Option<String> {
         let mut map = self.inner.lock().unwrap();
         let key = (owner.to_string(), repo.to_string(), user.to_string());
         let entry = map.get(&key)?;
@@ -35,13 +30,7 @@ impl PermissionCache {
         Some(entry.permission.clone())
     }
 
-    pub(crate) fn put(
-        &self,
-        owner: &str,
-        repo: &str,
-        user: &str,
-        permission: String,
-    ) {
+    pub(crate) fn put(&self, owner: &str, repo: &str, user: &str, permission: String) {
         let mut map = self.inner.lock().unwrap();
         map.insert(
             (owner.to_string(), repo.to_string(), user.to_string()),
