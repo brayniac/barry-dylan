@@ -6,6 +6,7 @@
 pub mod clients;
 pub mod identity;
 pub mod judge;
+pub mod orchestrator;
 pub(super) mod parse_util;
 pub mod persona;
 pub mod posting;
