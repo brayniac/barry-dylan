@@ -6,3 +6,4 @@
 .env
 .env.*
 barry.toml
+.superpowers/
