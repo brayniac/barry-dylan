@@ -38,12 +38,18 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let cfg = Arc::new(Config::load(config_path)?);
 
     // Read secrets.
-    let webhook_secret = std::env::var(&cfg.github.webhook_secret_env)
-        .map_err(|_| anyhow::anyhow!("env var {} not set", cfg.github.webhook_secret_env))?;
-    crate::github::app::ensure_key_mode_strict(&cfg.github.private_key_path)?;
+    let webhook_secret_env = cfg
+        .github
+        .barry
+        .webhook_secret_env
+        .as_deref()
+        .expect("validate() requires barry.webhook_secret_env");
+    let webhook_secret = std::env::var(webhook_secret_env)
+        .map_err(|_| anyhow::anyhow!("env var {} not set", webhook_secret_env))?;
+    crate::github::app::ensure_key_mode_strict(&cfg.github.barry.private_key_path)?;
     let creds = Arc::new(AppCreds::load(
-        cfg.github.app_id,
-        &cfg.github.private_key_path,
+        cfg.github.barry.app_id,
+        &cfg.github.barry.private_key_path,
     )?);
 
     let store = Store::open(&cfg.storage.sqlite_path).await?;
@@ -113,7 +119,7 @@ fn build_pipeline(cfg: &Config) -> anyhow::Result<Pipeline> {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             cfg.llm
-                .get("default")
+                .get("barry")
                 .map(|d| d.request_timeout_secs)
                 .unwrap_or(300),
         ))
@@ -121,8 +127,8 @@ fn build_pipeline(cfg: &Config) -> anyhow::Result<Pipeline> {
 
     let profile = cfg
         .llm
-        .get("default")
-        .ok_or_else(|| anyhow::anyhow!("missing [llm.default]"))?;
+        .get("barry")
+        .ok_or_else(|| anyhow::anyhow!("missing [llm.barry]"))?;
     let client = crate::llm::factory::build(profile, http)?;
 
     p.checkers

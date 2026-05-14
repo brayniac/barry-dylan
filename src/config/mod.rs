@@ -10,6 +10,10 @@ pub struct Config {
     pub llm: std::collections::BTreeMap<String, LlmProfile>,
     pub dispatcher: DispatcherConfig,
     #[serde(default)]
+    pub confer: ConferConfig,
+    #[serde(default)]
+    pub personas: PersonaOverridesConfig,
+    #[serde(default)]
     pub defaults: Option<crate::config::repo::RepoConfig>,
 }
 
@@ -22,9 +26,19 @@ pub struct ServerConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct GitHubConfig {
+    pub barry: IdentityCreds,
+    pub other_barry: IdentityCreds,
+    pub other_other_barry: IdentityCreds,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct IdentityCreds {
     pub app_id: u64,
     pub private_key_path: PathBuf,
-    pub webhook_secret_env: String,
+    /// Webhook secret env var. Only Barry's identity needs this populated;
+    /// OB/OOB do not receive webhooks.
+    #[serde(default)]
+    pub webhook_secret_env: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -84,6 +98,51 @@ fn default_checker_timeout() -> u64 {
     600
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct ConferConfig {
+    #[serde(default = "default_allowed_roles")]
+    pub allowed: Vec<String>,
+    #[serde(default = "default_max_confers")]
+    pub max_per_pr: u32,
+}
+
+impl Default for ConferConfig {
+    fn default() -> Self {
+        Self {
+            allowed: default_allowed_roles(),
+            max_per_pr: default_max_confers(),
+        }
+    }
+}
+
+fn default_allowed_roles() -> Vec<String> {
+    vec![
+        "author".into(),
+        "write".into(),
+        "maintain".into(),
+        "admin".into(),
+    ]
+}
+fn default_max_confers() -> u32 {
+    2
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct PersonaOverridesConfig {
+    #[serde(default)]
+    pub security: Option<PersonaOverride>,
+    #[serde(default)]
+    pub correctness: Option<PersonaOverride>,
+    #[serde(default)]
+    pub style: Option<PersonaOverride>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PersonaOverride {
+    #[serde(default)]
+    pub prompt_path: Option<PathBuf>,
+}
+
 pub mod repo;
 
 #[derive(Debug, thiserror::Error)]
@@ -119,19 +178,21 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.llm.is_empty() {
-            return Err(ConfigError::Validate(
-                "at least one [llm.<name>] profile required".into(),
-            ));
-        }
-        if !self.llm.contains_key("default") {
-            return Err(ConfigError::Validate(
-                "an [llm.default] profile is required".into(),
-            ));
+        for required in ["barry", "other_barry", "other_other_barry", "judge"] {
+            if !self.llm.contains_key(required) {
+                return Err(ConfigError::Validate(format!(
+                    "an [llm.{required}] profile is required"
+                )));
+            }
         }
         if self.dispatcher.worker_count == 0 {
             return Err(ConfigError::Validate(
                 "dispatcher.worker_count must be > 0".into(),
+            ));
+        }
+        if self.github.barry.webhook_secret_env.is_none() {
+            return Err(ConfigError::Validate(
+                "[github.barry].webhook_secret_env is required (Barry receives webhooks)".into(),
             ));
         }
         Ok(())
@@ -156,25 +217,45 @@ mod tests {
             [server]
             listen = "0.0.0.0:8080"
 
-            [github]
+            [github.barry]
             app_id = 1
-            private_key_path = "/tmp/k.pem"
+            private_key_path = "/tmp/b.pem"
             webhook_secret_env = "WS"
+            [github.other_barry]
+            app_id = 2
+            private_key_path = "/tmp/ob.pem"
+            [github.other_other_barry]
+            app_id = 3
+            private_key_path = "/tmp/oob.pem"
 
             [storage]
             sqlite_path = "/tmp/b.db"
 
             [dispatcher]
 
-            [llm.default]
+            [llm.barry]
             provider = "anthropic"
             endpoint = "https://api.anthropic.com"
-            model = "claude-sonnet-4-6"
+            model = "x"
+            [llm.other_barry]
+            provider = "openai"
+            endpoint = "http://localhost:1/v1"
+            model = "x"
+            [llm.other_other_barry]
+            provider = "openai"
+            endpoint = "https://api.openai.com/v1"
+            model = "x"
+            [llm.judge]
+            provider = "anthropic"
+            endpoint = "https://api.anthropic.com"
+            model = "x"
+
+            [confer]
+            allowed = ["author", "write", "admin"]
         "#,
         );
         let cfg = Config::load(f.path()).expect("should load");
         assert_eq!(cfg.dispatcher.worker_count, 4);
-        assert_eq!(cfg.llm["default"].provider, LlmProviderKind::Anthropic);
     }
 
     #[test]
@@ -183,10 +264,16 @@ mod tests {
             r#"
             [server]
             listen = "0.0.0.0:8080"
-            [github]
+            [github.barry]
             app_id = 1
-            private_key_path = "/tmp/k.pem"
+            private_key_path = "/tmp/b.pem"
             webhook_secret_env = "WS"
+            [github.other_barry]
+            app_id = 2
+            private_key_path = "/tmp/ob.pem"
+            [github.other_other_barry]
+            app_id = 3
+            private_key_path = "/tmp/oob.pem"
             [storage]
             sqlite_path = "/tmp/b.db"
             [dispatcher]
@@ -196,6 +283,7 @@ mod tests {
             model = "local"
         "#,
         );
+        // Missing [llm.barry] → validation error
         let err = Config::load(f.path()).unwrap_err();
         assert!(matches!(err, ConfigError::Validate(_)));
     }
@@ -206,20 +294,128 @@ mod tests {
             r#"
             [server]
             listen = "0.0.0.0:8080"
-            [github]
+            [github.barry]
             app_id = 1
-            private_key_path = "/tmp/k.pem"
+            private_key_path = "/tmp/b.pem"
             webhook_secret_env = "WS"
+            [github.other_barry]
+            app_id = 2
+            private_key_path = "/tmp/ob.pem"
+            [github.other_other_barry]
+            app_id = 3
+            private_key_path = "/tmp/oob.pem"
             [storage]
             sqlite_path = "/tmp/b.db"
             [dispatcher]
             worker_count = 0
-            [llm.default]
+            [llm.barry]
+            provider = "anthropic"
+            endpoint = "https://api.anthropic.com"
+            model = "x"
+            [llm.other_barry]
+            provider = "openai"
+            endpoint = "http://localhost:1/v1"
+            model = "x"
+            [llm.other_other_barry]
+            provider = "openai"
+            endpoint = "https://api.openai.com/v1"
+            model = "x"
+            [llm.judge]
             provider = "anthropic"
             endpoint = "https://api.anthropic.com"
             model = "x"
         "#,
         );
         assert!(Config::load(f.path()).is_err());
+    }
+
+    #[test]
+    fn loads_three_identity_config() {
+        let f = write_tmp(
+            r#"
+            [server]
+            listen = "0.0.0.0:8080"
+
+            [github.barry]
+            app_id = 1
+            private_key_path = "/tmp/b.pem"
+            webhook_secret_env = "WS"
+
+            [github.other_barry]
+            app_id = 2
+            private_key_path = "/tmp/ob.pem"
+
+            [github.other_other_barry]
+            app_id = 3
+            private_key_path = "/tmp/oob.pem"
+
+            [storage]
+            sqlite_path = "/tmp/b.db"
+
+            [dispatcher]
+
+            [llm.barry]
+            provider = "anthropic"
+            endpoint = "https://api.anthropic.com"
+            model = "claude-opus-4-7"
+
+            [llm.other_barry]
+            provider = "openai"
+            endpoint = "http://localhost:11434/v1"
+            model = "qwen"
+
+            [llm.other_other_barry]
+            provider = "openai"
+            endpoint = "https://api.openai.com/v1"
+            model = "gpt-5"
+
+            [llm.judge]
+            provider = "anthropic"
+            endpoint = "https://api.anthropic.com"
+            model = "claude-haiku-4-5-20251001"
+
+            [confer]
+            allowed = ["author", "write", "admin"]
+            max_per_pr = 2
+        "#,
+        );
+        let cfg = Config::load(f.path()).expect("should load");
+        assert_eq!(cfg.github.barry.app_id, 1);
+        assert_eq!(cfg.github.other_barry.app_id, 2);
+        assert_eq!(cfg.github.other_other_barry.app_id, 3);
+        assert_eq!(cfg.confer.max_per_pr, 2);
+        assert!(cfg.confer.allowed.iter().any(|r| r == "write"));
+        assert!(cfg.llm.contains_key("judge"));
+    }
+
+    #[test]
+    fn rejects_missing_other_barry_when_multi_review_used() {
+        // Compatibility: the legacy single-Barry shape is NOT supported.
+        // All three [github.*] blocks are required.
+        let f = write_tmp(
+            r#"
+            [server]
+            listen = "0.0.0.0:8080"
+
+            [github.barry]
+            app_id = 1
+            private_key_path = "/tmp/b.pem"
+            webhook_secret_env = "WS"
+
+            [storage]
+            sqlite_path = "/tmp/b.db"
+            [dispatcher]
+            [llm.barry]
+            provider = "anthropic"
+            endpoint = "https://api.anthropic.com"
+            model = "x"
+        "#,
+        );
+        // Missing other_barry / other_other_barry → parse error from required field.
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Parse { .. } | ConfigError::Validate(_)
+        ));
     }
 }
