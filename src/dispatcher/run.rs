@@ -170,15 +170,15 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                     tracing::error!(checker = name, error = ?e, "post_outcome failed");
                 }
             }
-            let _ = store
+ let _ = store
                 .append_audit(&crate::storage::audit::AuditEntry {
                     ts: now_ts(),
-                    delivery_id: Some(&job_ref.delivery_id),
-                    repo_owner: Some(&job_ref.repo_owner),
-                    repo_name: Some(&job_ref.repo_name),
+                    delivery_id: Some(job_ref.delivery_id.clone()),
+                    repo_owner: Some(job_ref.repo_owner.clone()),
+                    repo_name: Some(job_ref.repo_name.clone()),
                     pr_number: Some(job_ref.pr_number),
-                    checker_name: Some(name),
-                    outcome: status_str(outcome.status),
+                    checker_name: Some(name.to_string()),
+                    outcome: status_str(outcome.status).to_string(),
                     duration_ms: Some(dur.as_millis() as i64),
                     details: None,
                 })
