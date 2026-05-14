@@ -115,10 +115,10 @@ impl Checker for MultiReviewChecker {
         // Persist run state. Recorded under Barry's installation.
         let now = now_ts();
         let key = crate::storage::multi_review::RunKey {
-            owner: &ctx.owner,
-            repo: &ctx.repo,
+            owner: ctx.owner.clone(),
+            repo: ctx.repo.clone(),
             pr: ctx.pr.number,
-            head_sha: &ctx.pr.head.sha,
+            head_sha: ctx.pr.head.sha.clone(),
         };
         match &verdict {
             Verdict::Agree { barry } | Verdict::BarryAlone { barry, .. } => {
@@ -132,7 +132,12 @@ impl Checker for MultiReviewChecker {
             } => {
                 let _ = ctx
                     .store
-                    .record_post(key, Identity::Barry, outcome_str(barry.outcome), now)
+                    .record_post(
+                        key.clone(),
+                        Identity::Barry,
+                        outcome_str(barry.outcome),
+                        now,
+                    )
                     .await;
                 let _ = ctx
                     .store

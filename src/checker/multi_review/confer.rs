@@ -49,12 +49,12 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
     }
 
     let key = crate::storage::multi_review::RunKey {
-        owner: &job.repo_owner,
-        repo: &job.repo_name,
+        owner: job.repo_owner.clone(),
+        repo: job.repo_name.clone(),
         pr: job.pr_number,
-        head_sha: &head_sha,
+        head_sha: head_sha.clone(),
     };
-    let st = match deps.store.run_state(key).await? {
+    let st = match deps.store.run_state(key.clone()).await? {
         Some(s) => s,
         None => {
             tracing::info!(%head_sha, "confer with no prior run; replying");
@@ -135,7 +135,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         .unwrap()
         .as_secs() as i64;
     deps.store
-        .record_post(key, summon, outcome_str(review.outcome), now)
+        .record_post(key.clone(), summon, outcome_str(review.outcome), now)
         .await?;
     deps.store.record_confer_used(key, now).await?;
     let label = match summon {
