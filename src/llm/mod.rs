@@ -1,3 +1,76 @@
+//! LLM client abstraction for Anthropic and OpenAI.
+//!
+//! # Overview
+//!
+//! Barry Dylan uses LLMs for multi-reviewer functionality:
+//! - Two visible reviewers (Barry, Other Barry) with different providers/personas
+//! - A hidden judge to determine if reviews materially agree
+//!
+//! # Architecture
+//!
+//! ## The `LlmClient` Trait
+//!
+//! ```ignore
+//! pub trait LlmClient: Send + Sync {
+//!     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError>;
+//! }
+//! ```
+//!
+//! ## Message Format
+//!
+//! ```ignore
+//! pub struct LlmMessage {
+//!     pub role: Role,    // System, User, or Assistant
+//!     pub content: String,
+//! }
+//!
+//! pub struct LlmRequest {
+//!     pub system: Option<String>,  // System prompt
+//!     pub messages: Vec<LlmMessage>,
+//!     pub max_tokens: u32,
+//!     pub temperature: f32,
+//! }
+//! ```
+//!
+//! ## Provider Implementations
+//!
+//! - `anthropic`: Claude models via Anthropic API
+//! - `openai`: GPT models via OpenAI API
+//!
+//! Both implement the `LlmClient` trait with provider-specific request/response
+//! shape handling.
+//!
+//! # Error Handling
+//!
+//! `LlmError` variants:
+//! - `Http(reqwest::Error)`: Network errors
+//! - `Api { status, body }`: API errors (4xx/5xx)
+//! - `Shape(String)`: Unexpected response format
+//!
+//! # Retry Logic
+//!
+//! The `retry_transient` helper handles transient errors with exponential
+//! backoff:
+//! - Connection errors
+//! - Timeout errors
+//! - 502-504 status codes
+//!
+//! Retry policy:
+//! - Max 3 attempts
+//! - Starting delay: 250ms
+//! - Multiplier: 2x
+//!
+//! ```ignore
+//! let result = retry_transient(|| client.complete(&request)).await?;
+//! ```
+//!
+//! # Provider/Endpoint Validation
+//!
+//! The `factory` module validates that:
+//! - Anthropic provider uses Anthropic endpoint
+//! - OpenAI provider uses OpenAI-compatible endpoint
+//! - Misconfigurations are rejected at startup
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -5,12 +78,14 @@ pub mod anthropic;
 pub mod factory;
 pub mod openai;
 
+/// An LLM message with role and content.
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmMessage {
     pub role: Role,
     pub content: String,
 }
 
+/// Message roles supported by LLMs.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -19,6 +94,7 @@ pub enum Role {
     Assistant,
 }
 
+/// A request to complete an LLM conversation.
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
     pub system: Option<String>,
@@ -27,6 +103,7 @@ pub struct LlmRequest {
     pub temperature: f32,
 }
 
+/// Response from an LLM.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmResponse {
     pub text: String,
@@ -34,6 +111,7 @@ pub struct LlmResponse {
     pub output_tokens: Option<u32>,
 }
 
+/// Error from LLM operations.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("http: {0}")]
@@ -44,8 +122,10 @@ pub enum LlmError {
     Shape(String),
 }
 
+/// Trait implemented by all LLM clients.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
+    /// Complete the given LLM request and return the response.
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError>;
 }
 
@@ -57,6 +137,7 @@ fn is_transient(e: &LlmError) -> bool {
     }
 }
 
+/// Retry a closure with exponential backoff on transient errors.
 pub(crate) async fn retry_transient<F, Fut>(mut f: F) -> Result<LlmResponse, LlmError>
 where
     F: FnMut() -> Fut,

@@ -1,3 +1,89 @@
+//! SQLite storage with single-actor pattern.
+//!
+//! # Architecture
+//!
+//! Barry Dylan uses a **single-actor SQLite** pattern for database access:
+//!
+//! - A single Tokio task owns the SQLite connection
+//! - All database operations are sent as commands over an mpsc channel
+//! - Serialized writes at the Rust level eliminate the need for hand-crafted
+//!   single-statement workarounds for multi-step operations
+//! - Easier to add metrics/timing around DB work in one place
+//!
+//! # Key Components
+//!
+//! ## The `Store` Struct
+//!
+//! The `Store` is a thread-safe handle to the actor:
+//! ```ignore
+//! pub struct Store {
+//!     tx: mpsc::Sender<ActorCommand>,  // Send commands to the actor
+//!     cache: ReadCache,                // In-memory read cache
+//! }
+//! ```
+//!
+//! All methods on `Store` are async and return `Result<T, DbError>`.
+//!
+//! ## The Actor Command Pattern
+//!
+//! Commands are sent to the actor via `ActorCommand`:
+//! ```ignore
+//! pub enum ActorCommand {
+//!     LeaseNext { ... },      // Atomically lease the next due job
+//!     Ack { job_id },         // Acknowledge successful job completion
+//!     RescheduleAt { ... },   // Reschedule a job for later
+//!     Enqueue { ... },        // Add a new job to the queue
+//!     GetToken { ... },       // Get cached installation token
+//!     PutToken { ... },       // Cache an installation token
+//!     RecordPost { ... },     // Record a review was posted
+//!     AppendAudit { ... },    // Append to audit log
+//!     RawQuery { ... },       // Execute raw SQL (tests only)
+//! }
+//! ```
+//!
+//! Each command expects a reply via `tokio::sync::oneshot`.
+//!
+//! ## Database Schema
+//!
+//! Tables:
+//! - `jobs`: Job queue with coalescing (partial unique index)
+//! - `installation_tokens`: Cached GitHub installation tokens
+//! - `audit_log`: Audit trail for checker outcomes
+//! - `multi_review_runs`: Deduplication state for multi-review runs
+//!
+//! # Usage
+//!
+//! ```ignore
+//! let store = Store::open(Path::new("/path/to/db")).await?;
+//!
+//! // Enqueue a job
+//! let job = NewJob {
+//!     installation_id: 123,
+//!     repo_owner: "owner".into(),
+//!     repo_name: "repo".into(),
+//!     pr_number: 42,
+//!     event_kind: "pull_request".into(),
+//!     delivery_id: "delivery-id".into(),
+//! };
+//! store.enqueue(&job, now, run_after).await?;
+//!
+//! // Lease and process jobs
+//! loop {
+//!     let leased = store.lease_next(now, lease_secs).await?;
+//!     if let Some(job) = leased {
+//!         // Process job...
+//!         store.ack(job.id).await?;
+//!     }
+//! }
+//! ```
+//!
+//! # Error Handling
+//!
+//! `DbError` variants:
+//! - `Database(sqlx::Error)`: General database error
+//! - `Busy`: SQLITE_BUSY after max retries (100ms-800ms exponential backoff)
+//! - `Closed`: Actor has shut down
+
 pub use self::actor::RawSqliteValue;
 pub(crate) use self::actor::run;
 pub use self::audit::AuditEntry;
@@ -36,6 +122,7 @@ pub enum DbError {
     Closed,
 }
 
+/// Thread-safe handle to the SQLite actor.
 #[derive(Clone)]
 pub struct Store {
     tx: std::sync::Arc<mpsc::Sender<ActorCommand>>,
@@ -43,6 +130,7 @@ pub struct Store {
 }
 
 impl Store {
+    /// Open the database at the given path, running migrations.
     pub async fn open(path: &Path) -> anyhow::Result<Self> {
         let url = format!("sqlite://{}", path.display());
         let opts = SqliteConnectOptions::from_str(&url)?
@@ -73,17 +161,16 @@ impl Store {
         })
     }
 
+    /// Open an in-memory database for testing.
     pub async fn in_memory() -> anyhow::Result<Self> {
         let pool = PoolOptions::<sqlx::Sqlite>::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
 
-        // Run migrations on the pool before detaching a connection.
         Self::migrate_installation_tokens(&pool).await;
         Self::migrate_schema(&pool).await;
 
-        // Create a single connection to hand to the actor.
         let conn = pool.acquire().await?.detach();
 
         let (tx, rx) = mpsc::channel();
