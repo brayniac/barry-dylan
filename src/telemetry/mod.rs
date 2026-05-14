@@ -1,11 +1,14 @@
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use tracing_subscriber::{prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,barry_dylan=debug"));
     let fmt = tracing_subscriber::fmt::layer().json();
-    let _ = tracing_subscriber::registry().with(filter).with(fmt).try_init();
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt)
+        .try_init();
 }
 
 pub fn install_metrics() -> PrometheusHandle {

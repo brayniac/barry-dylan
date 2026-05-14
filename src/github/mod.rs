@@ -1,4 +1,4 @@
 pub mod app;
+pub mod check_run;
 pub mod client;
 pub mod pr;
-pub mod check_run;

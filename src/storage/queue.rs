@@ -89,8 +89,12 @@ impl Store {
                WHERE repo_owner = ?1 AND repo_name = ?2 AND pr_number = ?3
                  AND event_kind = ?4 AND leased_until IS NULL"#,
         )
-        .bind(repo_owner).bind(repo_name).bind(pr_number).bind(event_kind)
-        .fetch_optional(&self.pool).await?;
+        .bind(repo_owner)
+        .bind(repo_name)
+        .bind(pr_number)
+        .bind(event_kind)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| r.get::<i64, _>("run_after")))
     }
 }
@@ -137,7 +141,10 @@ impl Store {
     }
 
     pub async fn ack(&self, job_id: i64) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM jobs WHERE id = ?1").bind(job_id).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM jobs WHERE id = ?1")
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -158,7 +165,8 @@ impl Store {
         .bind(run_after)
         .bind(reason)
         .bind(job_id)
-        .execute(&self.pool).await?;
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -173,14 +181,18 @@ impl Store {
         backoff_schedule_secs: &[i64],
     ) -> anyhow::Result<bool> {
         let row = sqlx::query("SELECT attempts FROM jobs WHERE id = ?1")
-            .bind(job_id).fetch_optional(&self.pool).await?;
+            .bind(job_id)
+            .fetch_optional(&self.pool)
+            .await?;
         let Some(r) = row else { return Ok(false) };
         let attempts: i64 = r.get("attempts");
         let next_attempts = attempts + 1;
 
         if next_attempts >= max_attempts {
             sqlx::query("DELETE FROM jobs WHERE id = ?1")
-                .bind(job_id).execute(&self.pool).await?;
+                .bind(job_id)
+                .execute(&self.pool)
+                .await?;
             return Ok(false);
         }
         let idx = (attempts as usize).min(backoff_schedule_secs.len().saturating_sub(1));
@@ -194,7 +206,8 @@ impl Store {
         .bind(now_ts + delay)
         .bind(error)
         .bind(job_id)
-        .execute(&self.pool).await?;
+        .execute(&self.pool)
+        .await?;
         Ok(true)
     }
 }
@@ -205,8 +218,12 @@ mod lease_tests {
 
     fn job(pr: i64) -> NewJob {
         NewJob {
-            installation_id: 1, repo_owner: "o".into(), repo_name: "r".into(),
-            pr_number: pr, event_kind: "synchronize".into(), delivery_id: "d".into(),
+            installation_id: 1,
+            repo_owner: "o".into(),
+            repo_name: "r".into(),
+            pr_number: pr,
+            event_kind: "synchronize".into(),
+            delivery_id: "d".into(),
         }
     }
 
@@ -237,7 +254,9 @@ mod lease_tests {
         let l = s.lease_next(100, 60).await.unwrap().unwrap();
         s.ack(l.id).await.unwrap();
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&s.pool).await.unwrap();
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -260,19 +279,30 @@ mod lease_tests {
         let s = Store::in_memory().await.unwrap();
         s.enqueue(&job(4), 100, 100).await.unwrap();
         let l = s.lease_next(100, 60).await.unwrap().unwrap();
-        let alive = s.nack(l.id, 200, "boom", 3, &[60, 300, 1500]).await.unwrap();
+        let alive = s
+            .nack(l.id, 200, "boom", 3, &[60, 300, 1500])
+            .await
+            .unwrap();
         assert!(alive);
 
         let l = s.lease_next(300, 60).await.unwrap().unwrap();
-        let alive = s.nack(l.id, 400, "boom", 3, &[60, 300, 1500]).await.unwrap();
+        let alive = s
+            .nack(l.id, 400, "boom", 3, &[60, 300, 1500])
+            .await
+            .unwrap();
         assert!(alive);
 
         let l = s.lease_next(2000, 60).await.unwrap().unwrap();
-        let alive = s.nack(l.id, 2100, "boom", 3, &[60, 300, 1500]).await.unwrap();
+        let alive = s
+            .nack(l.id, 2100, "boom", 3, &[60, 300, 1500])
+            .await
+            .unwrap();
         assert!(!alive);
 
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&s.pool).await.unwrap();
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
     }
 }
@@ -295,39 +325,64 @@ mod tests {
     #[tokio::test]
     async fn enqueue_inserts_new_job() {
         let s = Store::in_memory().await.unwrap();
-        s.enqueue(&job(1, "synchronize", "d1"), 100, 130).await.unwrap();
-        let after = s.pending_run_after("o", "r", 1, "synchronize").await.unwrap();
+        s.enqueue(&job(1, "synchronize", "d1"), 100, 130)
+            .await
+            .unwrap();
+        let after = s
+            .pending_run_after("o", "r", 1, "synchronize")
+            .await
+            .unwrap();
         assert_eq!(after, Some(130));
     }
 
     #[tokio::test]
     async fn coalesces_pending_job() {
         let s = Store::in_memory().await.unwrap();
-        s.enqueue(&job(1, "synchronize", "d1"), 100, 130).await.unwrap();
-        s.enqueue(&job(1, "synchronize", "d2"), 110, 140).await.unwrap();
-        let after = s.pending_run_after("o", "r", 1, "synchronize").await.unwrap();
+        s.enqueue(&job(1, "synchronize", "d1"), 100, 130)
+            .await
+            .unwrap();
+        s.enqueue(&job(1, "synchronize", "d2"), 110, 140)
+            .await
+            .unwrap();
+        let after = s
+            .pending_run_after("o", "r", 1, "synchronize")
+            .await
+            .unwrap();
         assert_eq!(after, Some(140));
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&s.pool).await.unwrap();
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
         assert_eq!(n, 1);
     }
 
     #[tokio::test]
     async fn does_not_lower_run_after_on_coalesce() {
         let s = Store::in_memory().await.unwrap();
-        s.enqueue(&job(1, "synchronize", "d1"), 100, 200).await.unwrap();
-        s.enqueue(&job(1, "synchronize", "d2"), 110, 150).await.unwrap();
-        let after = s.pending_run_after("o", "r", 1, "synchronize").await.unwrap();
+        s.enqueue(&job(1, "synchronize", "d1"), 100, 200)
+            .await
+            .unwrap();
+        s.enqueue(&job(1, "synchronize", "d2"), 110, 150)
+            .await
+            .unwrap();
+        let after = s
+            .pending_run_after("o", "r", 1, "synchronize")
+            .await
+            .unwrap();
         assert_eq!(after, Some(200));
     }
 
     #[tokio::test]
     async fn different_event_kinds_are_independent() {
         let s = Store::in_memory().await.unwrap();
-        s.enqueue(&job(1, "synchronize", "d1"), 100, 130).await.unwrap();
+        s.enqueue(&job(1, "synchronize", "d1"), 100, 130)
+            .await
+            .unwrap();
         s.enqueue(&job(1, "opened", "d2"), 100, 130).await.unwrap();
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jobs")
-            .fetch_one(&s.pool).await.unwrap();
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
         assert_eq!(n, 2);
     }
 }

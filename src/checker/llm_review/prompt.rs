@@ -2,7 +2,9 @@ use crate::github::pr::ChangedFile;
 
 /// Rough estimate of tokens for a string (chars/4). Cheap and good enough
 /// for budgeting chunk boundaries.
-pub fn est_tokens(s: &str) -> u32 { (s.chars().count() as u32) / 4 + 1 }
+pub fn est_tokens(s: &str) -> u32 {
+    (s.chars().count() as u32) / 4 + 1
+}
 
 #[derive(Debug, Clone)]
 pub struct FileChunk<'a> {
@@ -13,37 +15,63 @@ pub struct FileChunk<'a> {
 /// Group changed files into chunks each <= max_chunk_tokens (estimated).
 /// Files larger than max_chunk_tokens land in their own chunk (the LLM call
 /// will skip or summarize per the checker's logic).
-pub fn chunk_files<'a>(files: &'a [ChangedFile], max_chunk_tokens: u32, excludes: &[String])
-    -> Vec<FileChunk<'a>>
-{
+pub fn chunk_files<'a>(
+    files: &'a [ChangedFile],
+    max_chunk_tokens: u32,
+    excludes: &[String],
+) -> Vec<FileChunk<'a>> {
     let exc = build_globs(excludes);
-    let included: Vec<&ChangedFile> = files.iter()
+    let included: Vec<&ChangedFile> = files
+        .iter()
         .filter(|f| !exc.iter().any(|g| g.is_match(&f.filename)))
         .filter(|f| f.patch.is_some())
         .collect();
     let mut chunks: Vec<FileChunk> = Vec::new();
-    let mut cur = FileChunk { files: vec![], est_tokens: 0 };
+    let mut cur = FileChunk {
+        files: vec![],
+        est_tokens: 0,
+    };
     for f in included {
         let t = est_tokens(f.patch.as_deref().unwrap_or(""));
         if t >= max_chunk_tokens {
-            if !cur.files.is_empty() { chunks.push(std::mem::replace(&mut cur,
-                FileChunk { files: vec![], est_tokens: 0 })); }
-            chunks.push(FileChunk { files: vec![f], est_tokens: t });
+            if !cur.files.is_empty() {
+                chunks.push(std::mem::replace(
+                    &mut cur,
+                    FileChunk {
+                        files: vec![],
+                        est_tokens: 0,
+                    },
+                ));
+            }
+            chunks.push(FileChunk {
+                files: vec![f],
+                est_tokens: t,
+            });
             continue;
         }
         if cur.est_tokens + t > max_chunk_tokens && !cur.files.is_empty() {
-            chunks.push(std::mem::replace(&mut cur,
-                FileChunk { files: vec![], est_tokens: 0 }));
+            chunks.push(std::mem::replace(
+                &mut cur,
+                FileChunk {
+                    files: vec![],
+                    est_tokens: 0,
+                },
+            ));
         }
         cur.files.push(f);
         cur.est_tokens += t;
     }
-    if !cur.files.is_empty() { chunks.push(cur); }
+    if !cur.files.is_empty() {
+        chunks.push(cur);
+    }
     chunks
 }
 
 fn build_globs(patterns: &[String]) -> Vec<globset::GlobMatcher> {
-    patterns.iter().filter_map(|p| globset::Glob::new(p).ok().map(|g| g.compile_matcher())).collect()
+    patterns
+        .iter()
+        .filter_map(|p| globset::Glob::new(p).ok().map(|g| g.compile_matcher()))
+        .collect()
 }
 
 pub fn system_prompt(focus: &str) -> String {
@@ -61,7 +89,9 @@ pub fn user_prompt(chunk: &FileChunk<'_>, format_spec: &str) -> String {
     for f in &chunk.files {
         s.push_str(&format!("File: {}\n", f.filename));
         s.push_str("```\n");
-        if let Some(p) = &f.patch { s.push_str(p); }
+        if let Some(p) = &f.patch {
+            s.push_str(p);
+        }
         s.push_str("\n```\n");
     }
     s.push_str("=== untrusted diff ends ===\n\n");
@@ -87,8 +117,11 @@ mod tests {
 
     fn file(name: &str, patch_len: usize) -> ChangedFile {
         ChangedFile {
-            filename: name.into(), status: "modified".into(),
-            additions: 1, deletions: 0, changes: 1,
+            filename: name.into(),
+            status: "modified".into(),
+            additions: 1,
+            deletions: 0,
+            changes: 1,
             patch: Some("x".repeat(patch_len)),
         }
     }

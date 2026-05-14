@@ -1,4 +1,4 @@
-pub mod title;
+pub mod autolabel;
 pub mod description;
 pub mod size;
-pub mod autolabel;
+pub mod title;

@@ -26,7 +26,9 @@ pub struct IssueCommentEvent {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Installation { pub id: i64 }
+pub struct Installation {
+    pub id: i64,
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Repository {
@@ -36,7 +38,9 @@ pub struct Repository {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct User { pub login: String }
+pub struct User {
+    pub login: String,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct PullRequestRef {
@@ -52,7 +56,10 @@ pub struct PullRequestRef {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct GitRef { pub sha: String, pub r#ref: String }
+pub struct GitRef {
+    pub sha: String,
+    pub r#ref: String,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Issue {

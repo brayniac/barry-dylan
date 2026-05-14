@@ -1,8 +1,8 @@
+use async_trait::async_trait;
 use barry_dylan::dispatcher::run::{GhFactory, JobDeps, Pipeline};
 use barry_dylan::github::client::GitHub;
 use barry_dylan::storage::Store;
 use barry_dylan::storage::queue::NewJob;
-use async_trait::async_trait;
 use std::sync::Arc;
 use wiremock::MockServer;
 
@@ -42,7 +42,9 @@ pub fn graphql_pr_context(
     })
 }
 
-pub struct StaticGh { pub gh: Arc<GitHub> }
+pub struct StaticGh {
+    pub gh: Arc<GitHub>,
+}
 #[async_trait]
 impl GhFactory for StaticGh {
     async fn for_installation(&self, _id: i64) -> anyhow::Result<Arc<GitHub>> {
@@ -52,8 +54,7 @@ impl GhFactory for StaticGh {
 
 pub async fn fixture(server: &MockServer) -> (Store, Arc<JobDeps>) {
     let store = Store::in_memory().await.unwrap();
-    let gh = Arc::new(GitHub::new(reqwest::Client::new(), "tok".into())
-        .with_base(server.uri()));
+    let gh = Arc::new(GitHub::new(reqwest::Client::new(), "tok".into()).with_base(server.uri()));
     let pipeline = Arc::new(Pipeline::hygiene_only());
     let cfg = Arc::new(default_config());
     let deps = Arc::new(JobDeps {
@@ -84,7 +85,12 @@ pub fn default_config() -> barry_dylan::config::Config {
     toml::from_str(toml).unwrap()
 }
 
-pub fn enqueue_opened<'a>(store: &'a Store, owner: &'a str, repo: &'a str, pr: i64) -> impl std::future::Future<Output = ()> + 'a {
+pub fn enqueue_opened<'a>(
+    store: &'a Store,
+    owner: &'a str,
+    repo: &'a str,
+    pr: i64,
+) -> impl std::future::Future<Output = ()> + 'a {
     let job = NewJob {
         installation_id: 1,
         repo_owner: owner.into(),

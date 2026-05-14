@@ -7,7 +7,7 @@ use crate::webhook::server::AppState;
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 
 pub struct AppGhFactory {
     pub creds: Arc<AppCreds>,
@@ -19,10 +19,16 @@ pub struct AppGhFactory {
 impl GhFactory for AppGhFactory {
     async fn for_installation(&self, installation_id: i64) -> anyhow::Result<Arc<GitHub>> {
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
         let token = crate::github::app::get_or_mint(
-            &self.store, &self.http, &self.creds, installation_id, now,
-        ).await?;
+            &self.store,
+            &self.http,
+            &self.creds,
+            installation_id,
+            now,
+        )
+        .await?;
         Ok(Arc::new(GitHub::new(self.http.clone(), token)))
     }
 }
@@ -35,7 +41,10 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let webhook_secret = std::env::var(&cfg.github.webhook_secret_env)
         .map_err(|_| anyhow::anyhow!("env var {} not set", cfg.github.webhook_secret_env))?;
     crate::github::app::ensure_key_mode_strict(&cfg.github.private_key_path)?;
-    let creds = Arc::new(AppCreds::load(cfg.github.app_id, &cfg.github.private_key_path)?);
+    let creds = Arc::new(AppCreds::load(
+        cfg.github.app_id,
+        &cfg.github.private_key_path,
+    )?);
 
     let store = Store::open(&cfg.storage.sqlite_path).await?;
     let metrics = crate::telemetry::install_metrics();
@@ -103,16 +112,23 @@ fn build_pipeline(cfg: &Config) -> anyhow::Result<Pipeline> {
 
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
-            cfg.llm.get("default").map(|d| d.request_timeout_secs).unwrap_or(300)))
+            cfg.llm
+                .get("default")
+                .map(|d| d.request_timeout_secs)
+                .unwrap_or(300),
+        ))
         .build()?;
 
-    let profile = cfg.llm.get("default")
+    let profile = cfg
+        .llm
+        .get("default")
         .ok_or_else(|| anyhow::anyhow!("missing [llm.default]"))?;
     let client = crate::llm::factory::build(profile, http)?;
 
-    p.checkers.push(Arc::new(crate::checker::llm_review::LlmReviewChecker {
-        client,
-        max_tokens: profile.max_tokens,
-    }));
+    p.checkers
+        .push(Arc::new(crate::checker::llm_review::LlmReviewChecker {
+            client,
+            max_tokens: profile.max_tokens,
+        }));
     Ok(p)
 }

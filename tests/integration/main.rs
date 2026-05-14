@@ -1,5 +1,5 @@
 mod common;
-mod happy_path;
-mod trust_gate;
-mod rerun;
 mod failure_isolation;
+mod happy_path;
+mod rerun;
+mod trust_gate;

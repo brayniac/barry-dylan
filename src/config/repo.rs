@@ -29,7 +29,12 @@ pub struct TitleRule {
 }
 
 impl Default for TitleRule {
-    fn default() -> Self { Self { enabled: true, pattern: default_title_pattern() } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pattern: default_title_pattern(),
+        }
+    }
 }
 
 fn default_title_pattern() -> String {
@@ -50,11 +55,17 @@ pub struct DescriptionRule {
 
 impl Default for DescriptionRule {
     fn default() -> Self {
-        Self { enabled: true, min_length: default_min_len(), require_template_sections: vec![] }
+        Self {
+            enabled: true,
+            min_length: default_min_len(),
+            require_template_sections: vec![],
+        }
     }
 }
 
-fn default_min_len() -> usize { 20 }
+fn default_min_len() -> usize {
+    20
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SizeRule {
@@ -68,12 +79,20 @@ pub struct SizeRule {
 
 impl Default for SizeRule {
     fn default() -> Self {
-        Self { enabled: true, warn_lines: default_warn_lines(), warn_files: default_warn_files() }
+        Self {
+            enabled: true,
+            warn_lines: default_warn_lines(),
+            warn_files: default_warn_files(),
+        }
     }
 }
 
-fn default_warn_lines() -> u32 { 500 }
-fn default_warn_files() -> u32 { 20 }
+fn default_warn_lines() -> u32 {
+    500
+}
+fn default_warn_files() -> u32 {
+    20
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Autolabel {
@@ -84,7 +103,12 @@ pub struct Autolabel {
 }
 
 impl Default for Autolabel {
-    fn default() -> Self { Self { enabled: true, rules: vec![] } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rules: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -119,9 +143,15 @@ impl Default for LlmReview {
     }
 }
 
-fn default_profile() -> String { "default".into() }
-fn default_max_diff_tokens() -> u32 { 100_000 }
-fn yes() -> bool { true }
+fn default_profile() -> String {
+    "default".into()
+}
+fn default_max_diff_tokens() -> u32 {
+    100_000
+}
+fn yes() -> bool {
+    true
+}
 
 impl RepoConfig {
     pub fn parse(text: &str) -> Result<Self, toml::de::Error> {
@@ -143,22 +173,28 @@ mod tests {
 
     #[test]
     fn disables_what_is_set_false() {
-        let r = RepoConfig::parse(r#"
+        let r = RepoConfig::parse(
+            r#"
             [hygiene.title]
             enabled = false
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(!r.hygiene.title.enabled);
         assert!(r.hygiene.description.enabled);
     }
 
     #[test]
     fn autolabel_rules_parse() {
-        let r = RepoConfig::parse(r#"
+        let r = RepoConfig::parse(
+            r#"
             [hygiene.autolabel]
             rules = [
                 { paths = ["src/x/**"], labels = ["area/x"] },
             ]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(r.hygiene.autolabel.rules.len(), 1);
         assert_eq!(r.hygiene.autolabel.rules[0].labels[0], "area/x");
     }

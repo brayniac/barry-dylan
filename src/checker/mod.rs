@@ -15,7 +15,11 @@ pub struct Finding {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum OutcomeStatus { Success, Neutral, Failure }
+pub enum OutcomeStatus {
+    Success,
+    Neutral,
+    Failure,
+}
 
 #[derive(Debug, Clone)]
 pub struct CheckerOutcome {
@@ -34,16 +38,26 @@ pub struct CheckerOutcome {
 impl CheckerOutcome {
     pub fn neutral(name: &'static str, summary: impl Into<String>) -> Self {
         Self {
-            checker_name: name, status: OutcomeStatus::Neutral,
-            summary: summary.into(), text: None,
-            inline_comments: vec![], issue_comment: None, add_labels: vec![],
+            checker_name: name,
+            status: OutcomeStatus::Neutral,
+            summary: summary.into(),
+            text: None,
+            inline_comments: vec![],
+            issue_comment: None,
+            add_labels: vec![],
         }
     }
     pub fn success(name: &'static str, summary: impl Into<String>) -> Self {
-        Self { status: OutcomeStatus::Success, ..Self::neutral(name, summary) }
+        Self {
+            status: OutcomeStatus::Success,
+            ..Self::neutral(name, summary)
+        }
     }
     pub fn failure(name: &'static str, summary: impl Into<String>) -> Self {
-        Self { status: OutcomeStatus::Failure, ..Self::neutral(name, summary) }
+        Self {
+            status: OutcomeStatus::Failure,
+            ..Self::neutral(name, summary)
+        }
     }
 }
 

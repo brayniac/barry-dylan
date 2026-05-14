@@ -1,11 +1,15 @@
 use crate::storage::Store;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize)]
-struct Claims { iat: u64, exp: u64, iss: String }
+struct Claims {
+    iat: u64,
+    exp: u64,
+    iss: String,
+}
 
 #[derive(Clone)]
 pub struct AppCreds {
@@ -16,7 +20,10 @@ pub struct AppCreds {
 impl AppCreds {
     pub fn load(app_id: u64, path: &Path) -> anyhow::Result<Self> {
         let pem = std::fs::read(path)?;
-        Ok(Self { app_id, private_key_pem: pem })
+        Ok(Self {
+            app_id,
+            private_key_pem: pem,
+        })
     }
 
     /// Mint a short-lived (10 minute) JWT signed with the App private key.
@@ -32,7 +39,10 @@ impl AppCreds {
 }
 
 #[derive(Debug, Deserialize)]
-struct TokenResponse { token: String, expires_at: String }
+struct TokenResponse {
+    token: String,
+    expires_at: String,
+}
 
 pub async fn fetch_installation_token(
     http: &reqwest::Client,
@@ -42,15 +52,21 @@ pub async fn fetch_installation_token(
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let jwt = creds.mint_jwt(now)?;
     let url = format!("https://api.github.com/app/installations/{installation_id}/access_tokens");
-    let resp = http.post(&url)
+    let resp = http
+        .post(&url)
         .bearer_auth(&jwt)
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "barry-dylan")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .send().await?
+        .send()
+        .await?
         .error_for_status()?
-        .json::<TokenResponse>().await?;
-    let dt = time::OffsetDateTime::parse(&resp.expires_at, &time::format_description::well_known::Rfc3339)?;
+        .json::<TokenResponse>()
+        .await?;
+    let dt = time::OffsetDateTime::parse(
+        &resp.expires_at,
+        &time::format_description::well_known::Rfc3339,
+    )?;
     Ok((resp.token, dt.unix_timestamp()))
 }
 
@@ -61,11 +77,16 @@ pub async fn get_or_mint(
     installation_id: i64,
     now_ts: i64,
 ) -> anyhow::Result<String> {
-    if let Some(t) = store.get_installation_token(installation_id, now_ts).await? {
+    if let Some(t) = store
+        .get_installation_token(installation_id, now_ts)
+        .await?
+    {
         return Ok(t.token);
     }
     let (token, exp) = fetch_installation_token(http, creds, installation_id).await?;
-    store.put_installation_token(installation_id, &token, exp).await?;
+    store
+        .put_installation_token(installation_id, &token, exp)
+        .await?;
     Ok(token)
 }
 
@@ -76,8 +97,11 @@ pub fn ensure_key_mode_strict(path: &Path) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
         if mode & 0o077 != 0 {
-            anyhow::bail!("private key {:?} has permissive mode {:o}; require 0600 or stricter",
-                path, mode);
+            anyhow::bail!(
+                "private key {:?} has permissive mode {:o}; require 0600 or stricter",
+                path,
+                mode
+            );
         }
     }
     let _ = path; // suppress warning on non-unix
@@ -96,7 +120,10 @@ mod tests {
 
     #[test]
     fn mints_jwt_that_decodes() {
-        let creds = AppCreds { app_id: 12345, private_key_pem: test_key_pem() };
+        let creds = AppCreds {
+            app_id: 12345,
+            private_key_pem: test_key_pem(),
+        };
         let token = creds.mint_jwt(1_700_000_000).unwrap();
         // Decode using the public key embedded by stripping the private parts.
         // Just confirm it has 3 base64url segments.

@@ -1,7 +1,7 @@
 //! LLM-driven PR review checker.
 
-pub mod prompt;
 pub mod parse;
+pub mod prompt;
 
 use crate::checker::{Checker, CheckerCtx, CheckerOutcome, OutcomeStatus};
 use crate::config::repo::RepoConfig;
@@ -20,8 +20,12 @@ pub struct LlmReviewChecker {
 
 #[async_trait]
 impl Checker for LlmReviewChecker {
-    fn name(&self) -> &'static str { "barry/llm-review" }
-    fn enabled(&self, cfg: &RepoConfig) -> bool { cfg.llm_review.enabled }
+    fn name(&self) -> &'static str {
+        "barry/llm-review"
+    }
+    fn enabled(&self, cfg: &RepoConfig) -> bool {
+        cfg.llm_review.enabled
+    }
 
     async fn run(&self, ctx: &CheckerCtx) -> anyhow::Result<CheckerOutcome> {
         let rule = &ctx.repo_cfg.llm_review;
@@ -48,51 +52,71 @@ impl Checker for LlmReviewChecker {
             tracing::debug!(chunk = i, prompt_chars, "llm request");
             let req = LlmRequest {
                 system: Some(system.clone()),
-                messages: vec![LlmMessage { role: Role::User, content: user }],
-                max_tokens: self.max_tokens, temperature: 0.0,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: user,
+                }],
+                max_tokens: self.max_tokens,
+                temperature: 0.0,
             };
             let t = std::time::Instant::now();
             let r = match self.client.complete(&req).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(?e, chunk = i, "llm call failed");
-                    return Ok(CheckerOutcome::neutral(self.name(),
-                        format!("llm call failed: {e}")));
+                    return Ok(CheckerOutcome::neutral(
+                        self.name(),
+                        format!("llm call failed: {e}"),
+                    ));
                 }
             };
             tracing::debug!(
-                chunk = i, response_chars = r.text.len(),
-                latency_ms = t.elapsed().as_millis() as u64, "llm response",
+                chunk = i,
+                response_chars = r.text.len(),
+                latency_ms = t.elapsed().as_millis() as u64,
+                "llm response",
             );
             match parse::parse(&r.text) {
                 Ok(p) => {
                     let n = p.findings.len();
                     findings.extend(p.findings);
-                    if !p.summary.is_empty() { per_file_summaries.push(p.summary); }
+                    if !p.summary.is_empty() {
+                        per_file_summaries.push(p.summary);
+                    }
                     tracing::debug!(chunk = i, findings = n, "llm chunk parsed");
                 }
                 Err(e) => {
                     tracing::warn!(?e, chunk = i, body = %r.text, "llm output parse failed");
-                    return Ok(CheckerOutcome::neutral(self.name(), "llm output unparseable"));
+                    return Ok(CheckerOutcome::neutral(
+                        self.name(),
+                        "llm output unparseable",
+                    ));
                 }
             }
         }
         tracing::info!(
-            chunks = chunks.len(), findings = findings.len(),
+            chunks = chunks.len(),
+            findings = findings.len(),
             "llm review complete",
         );
 
         let inline_comments = to_inline_comments(&ctx.files, &findings);
         let body = format!(
             "{REVIEW_MARKER}\n**barry-dylan LLM review** ({} chunk{}, {} finding{})\n\n{}",
-            chunks.len(), plural(chunks.len()),
-            findings.len(), plural(findings.len()),
+            chunks.len(),
+            plural(chunks.len()),
+            findings.len(),
+            plural(findings.len()),
             per_file_summaries.join("\n\n"),
         );
 
         Ok(CheckerOutcome {
             checker_name: self.name(),
-            status: if findings.is_empty() { OutcomeStatus::Success } else { OutcomeStatus::Neutral },
+            status: if findings.is_empty() {
+                OutcomeStatus::Success
+            } else {
+                OutcomeStatus::Neutral
+            },
             summary: body,
             text: None,
             inline_comments,
@@ -102,23 +126,33 @@ impl Checker for LlmReviewChecker {
     }
 }
 
-fn plural(n: usize) -> &'static str { if n == 1 { "" } else { "s" } }
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
 
 /// Convert (file, line) findings to PR-review inline comments by computing
 /// the GitHub "position" (line index within the file's unified patch).
-fn to_inline_comments(files: &[ChangedFile], findings: &[parse::ParsedFinding]) -> Vec<ReviewCommentInput> {
+fn to_inline_comments(
+    files: &[ChangedFile],
+    findings: &[parse::ParsedFinding],
+) -> Vec<ReviewCommentInput> {
     let mut by_file: BTreeMap<&str, &ChangedFile> = BTreeMap::new();
-    for f in files { by_file.insert(f.filename.as_str(), f); }
-    findings.iter().filter_map(|f| {
-        let cf = by_file.get(f.file.as_str())?;
-        let patch = cf.patch.as_deref()?;
-        let pos = patch_position_for_new_line(patch, f.line)?;
-        Some(ReviewCommentInput {
-            path: f.file.clone(),
-            position: pos as i64,
-            body: f.message.clone(),
+    for f in files {
+        by_file.insert(f.filename.as_str(), f);
+    }
+    findings
+        .iter()
+        .filter_map(|f| {
+            let cf = by_file.get(f.file.as_str())?;
+            let patch = cf.patch.as_deref()?;
+            let pos = patch_position_for_new_line(patch, f.line)?;
+            Some(ReviewCommentInput {
+                path: f.file.clone(),
+                position: pos as i64,
+                body: f.message.clone(),
+            })
         })
-    }).collect()
+        .collect()
 }
 
 /// Walk a unified diff hunk and return the 1-based "position" of the line in
@@ -139,9 +173,13 @@ fn patch_position_for_new_line(patch: &str, target_new_line: u32) -> Option<u32>
             continue;
         }
         pos += 1;
-        if line.starts_with('-') { continue; }
+        if line.starts_with('-') {
+            continue;
+        }
         new_line += 1;
-        if new_line == target_new_line { return Some(pos); }
+        if new_line == target_new_line {
+            return Some(pos);
+        }
     }
     None
 }
