@@ -129,6 +129,10 @@ impl LlmClient for TimedClient {
     }
 
     fn name(&self) -> &'static str {
+        // This is a limitation: the trait requires &'static str,
+        // but we only have a String. We must return a static string.
+        // The name is stored in the span via the span's field, so this
+        // return value is not used for logging purposes.
         "timed_llm"
     }
 }

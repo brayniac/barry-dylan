@@ -85,7 +85,7 @@ impl<'a> Orchestrator<'a> {
         };
 
         // Phase 2: R1 synthesis (no peer) in parallel.
-        tracing::info!("R1 synthesis starting");
+        tracing::debug!("R1 synthesis starting");
         let r1_start = std::time::Instant::now();
         let (barry_r1, ob_r1) = tokio::join!(
             self.synthesize_for(Identity::Barry, &diff, &barry_drafts, None),
@@ -126,7 +126,7 @@ impl<'a> Orchestrator<'a> {
             "summary": ob_r1.summary,
         }))
         .unwrap_or_default();
-        tracing::info!("R2 synthesis starting (drafts reused from R1)");
+        tracing::debug!("R2 synthesis starting (drafts reused from R1)");
         let r2_start = std::time::Instant::now();
         let (barry_r2, ob_r2) = tokio::join!(
             self.synthesize_for(Identity::Barry, &diff, &barry_drafts, Some(&ob_r1_text)),
@@ -147,7 +147,7 @@ impl<'a> Orchestrator<'a> {
         );
 
         // Judge.
-        tracing::info!("judge starting");
+        tracing::debug!("judge starting");
         let judge_start = std::time::Instant::now();
         let verdict = match judge::judge(
             self.clients.judge.as_ref(),
