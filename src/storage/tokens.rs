@@ -1,5 +1,6 @@
+use crate::storage::actor::{ActorCommand, Reply};
 use crate::storage::Store;
-use sqlx::Row;
+use tokio::sync::oneshot;
 
 #[derive(Debug, Clone)]
 pub struct CachedToken {
@@ -15,24 +16,29 @@ impl Store {
         installation_id: i64,
         now_ts: i64,
     ) -> anyhow::Result<Option<CachedToken>> {
-        let row = sqlx::query(
-            "SELECT token, expires_at FROM installation_tokens \
-             WHERE installation_id = ?1 AND identity = ?2",
-        )
-        .bind(installation_id)
-        .bind(identity)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.and_then(|r| {
-            let token: String = r.get("token");
-            let expires_at: i64 = r.get("expires_at");
-            // 60s skew margin.
-            if expires_at - 60 > now_ts {
-                Some(CachedToken { token, expires_at })
-            } else {
-                None
-            }
-        }))
+        // Check cache first.
+        if let Some(token) = self.cache.get(identity, installation_id, now_ts) {
+            return Ok(Some(token));
+        }
+
+        let (tx, rx) = oneshot::channel();
+        self.tx
+ .send(ActorCommand::GetTokenFor {
+                identity: identity.to_string(),
+                installation_id,
+                now_ts,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let result = rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
+
+        // Write-through cache on hit.
+        if let Some(token) = &result {
+            self.cache.put(identity, installation_id, token.clone());
+        }
+
+        Ok(result)
     }
 
     /// Identity-scoped token store. `identity` is the slug (e.g. `"barry"`, `"other_barry"`).
@@ -43,17 +49,22 @@ impl Store {
         token: &str,
         expires_at: i64,
     ) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"INSERT INTO installation_tokens (installation_id, identity, token, expires_at)
-               VALUES (?1, ?2, ?3, ?4)
-               ON CONFLICT(installation_id, identity) DO UPDATE SET token=excluded.token, expires_at=excluded.expires_at"#,
-        )
-        .bind(installation_id)
-        .bind(identity)
-        .bind(token)
-        .bind(expires_at)
-        .execute(&self.pool)
-        .await?;
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::PutTokenFor {
+                identity: identity.to_string(),
+                installation_id,
+                token: token.to_string(),
+                expires_at,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await
+            .map_err(|_| crate::storage::DbError::Closed)??;
+
+        // Invalidate cache on successful write.
+        self.cache.invalidate(identity, installation_id);
+
         Ok(())
     }
 
