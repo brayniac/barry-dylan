@@ -44,6 +44,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
     let allowed = &deps.config.confer.allowed;
     if !role_matches(&perm, &confer_author, &pr_ctx.pr.user.login, allowed) {
         tracing::info!(%confer_author, %perm, "confer rejected (unauthorized)");
+        metrics::counter!("barry_confer_total", "outcome" => "rejected_unauthorized").increment(1);
         return Ok(());
     }
 
@@ -57,6 +58,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         Some(s) => s,
         None => {
             tracing::info!(%head_sha, "confer with no prior run; replying");
+            metrics::counter!("barry_confer_total", "outcome" => "rejected_no_run").increment(1);
             barry_gh
                 .create_issue_comment(
                     &job.repo_owner,
@@ -70,6 +72,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
     };
 
     if st.confers_used >= deps.config.confer.max_per_pr {
+        metrics::counter!("barry_confer_total", "outcome" => "rejected_max_reached").increment(1);
         barry_gh
             .create_issue_comment(
                 &job.repo_owner,
@@ -86,6 +89,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
     } else if !st.other_other_barry_posted {
         Identity::OtherOtherBarry
     } else {
+        metrics::counter!("barry_confer_total", "outcome" => "rejected_all_posted").increment(1);
         barry_gh
             .create_issue_comment(
                 &job.repo_owner,
@@ -134,6 +138,12 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         .record_post(key, summon, outcome_str(review.outcome), now)
         .await?;
     deps.store.record_confer_used(key, now).await?;
+    let label = match summon {
+        Identity::OtherBarry => "ob",
+        Identity::OtherOtherBarry => "oob",
+        Identity::Barry => "barry",
+    };
+    metrics::counter!("barry_confer_total", "outcome" => label).increment(1);
     Ok(())
 }
 

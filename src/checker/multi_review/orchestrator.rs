@@ -70,6 +70,7 @@ impl<'a> Orchestrator<'a> {
                     .await
                     .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
                 tracing::info!(kind = "barry_alone", "verdict");
+                metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
                 return Ok(Verdict::BarryAlone {
                     barry: barry_r1,
                     reason: format!("Other Barry unavailable: {e}"),
@@ -93,6 +94,7 @@ impl<'a> Orchestrator<'a> {
             Err(e) => {
                 tracing::warn!(?e, "Other Barry R1 synthesis failed; Barry posts alone");
                 tracing::info!(kind = "barry_alone", "verdict");
+                metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
                 return Ok(Verdict::BarryAlone {
                     barry: barry_r1,
                     reason: format!("Other Barry unavailable: {e}"),
@@ -153,6 +155,8 @@ impl<'a> Orchestrator<'a> {
             Err(e) => {
                 tracing::warn!(?e, "judge failed; defaulting to disagreement");
                 tracing::info!(kind = "disagree", "verdict");
+                metrics::counter!("barry_multi_review_judge_total", "verdict" => "disagree")
+                    .increment(1);
                 return Ok(Verdict::Disagree {
                     barry: barry_r2,
                     other_barry: ob_r2,
@@ -169,9 +173,12 @@ impl<'a> Orchestrator<'a> {
 
         if verdict.agree {
             tracing::info!(kind = "agree", outcome = ?barry_r2.outcome, "verdict");
+            metrics::counter!("barry_multi_review_judge_total", "verdict" => "agree").increment(1);
             Ok(Verdict::Agree { barry: barry_r2 })
         } else {
             tracing::info!(kind = "disagree", "verdict");
+            metrics::counter!("barry_multi_review_judge_total", "verdict" => "disagree")
+                .increment(1);
             Ok(Verdict::Disagree {
                 barry: barry_r2,
                 other_barry: ob_r2,
