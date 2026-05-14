@@ -47,6 +47,12 @@ struct Usage {
 #[async_trait]
 impl LlmClient for OpenAiClient {
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        crate::llm::retry_transient(|| self.complete_once(req)).await
+    }
+}
+
+impl OpenAiClient {
+    async fn complete_once(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let mut messages = Vec::new();
         if let Some(sys) = &req.system {
             messages.push(serde_json::json!({ "role": "system", "content": sys }));
@@ -66,6 +72,7 @@ impl LlmClient for OpenAiClient {
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
             "messages": messages,
+            "cache_prompt": true,
         });
         let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
         let mut rb = self
@@ -106,6 +113,64 @@ mod tests {
     use crate::llm::{LlmMessage, Role};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn retries_after_transient_5xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [ { "message": { "content": "ok" } } ]
+            })))
+            .mount(&server)
+            .await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "q".into(),
+                }],
+                max_tokens: 32,
+                temperature: 0.0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r.text, "ok");
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_4xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let e = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "q".into(),
+                }],
+                max_tokens: 32,
+                temperature: 0.0,
+            })
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(e, LlmError::Api { status: 400, .. }));
+    }
 
     #[tokio::test]
     async fn unauthed_local_endpoint() {

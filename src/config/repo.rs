@@ -5,7 +5,7 @@ pub struct RepoConfig {
     #[serde(default)]
     pub hygiene: Hygiene,
     #[serde(default)]
-    pub llm_review: LlmReview,
+    pub multi_review: MultiReview,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -118,37 +118,17 @@ pub struct AutolabelRule {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct LlmReview {
+pub struct MultiReview {
     #[serde(default = "yes")]
     pub enabled: bool,
-    #[serde(default = "default_profile")]
-    pub provider_profile: String,
-    #[serde(default)]
-    pub focus: String,
-    #[serde(default)]
-    pub exclude_paths: Vec<String>,
-    #[serde(default = "default_max_diff_tokens")]
-    pub max_diff_tokens: u32,
 }
 
-impl Default for LlmReview {
+impl Default for MultiReview {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            provider_profile: default_profile(),
-            focus: String::new(),
-            exclude_paths: vec![],
-            max_diff_tokens: default_max_diff_tokens(),
-        }
+        Self { enabled: true }
     }
 }
 
-fn default_profile() -> String {
-    "default".into()
-}
-fn default_max_diff_tokens() -> u32 {
-    100_000
-}
 fn yes() -> bool {
     true
 }
@@ -167,8 +147,7 @@ mod tests {
     fn empty_parses_to_defaults() {
         let r = RepoConfig::parse("").unwrap();
         assert!(r.hygiene.title.enabled);
-        assert!(r.llm_review.enabled);
-        assert_eq!(r.llm_review.provider_profile, "default");
+        assert!(r.multi_review.enabled);
     }
 
     #[test]

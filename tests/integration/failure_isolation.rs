@@ -71,6 +71,8 @@ async fn one_checker_error_does_not_block_others() {
         config: Arc::new(crate::common::default_config()),
         pipeline: Arc::new(pipeline),
         gh_factory: Arc::new(crate::common::StaticGh { gh }),
+        clients: None,
+        personas: None,
     });
 
     crate::common::enqueue_opened(&store, "o", "r", 1).await;

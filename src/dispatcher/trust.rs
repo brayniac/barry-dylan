@@ -12,6 +12,7 @@ pub enum Trust {
 pub enum BarryCommand {
     Approve,
     Review,
+    Confer,
     Unknown,
     NotACommand,
 }
@@ -37,6 +38,7 @@ pub fn parse_command(body: &str) -> BarryCommand {
         Some("/barry") => match parts.next() {
             Some("approve") => BarryCommand::Approve,
             Some("review") => BarryCommand::Review,
+            Some("confer") => BarryCommand::Confer,
             Some(_) => BarryCommand::Unknown,
             None => BarryCommand::Unknown,
         },
@@ -89,6 +91,8 @@ mod tests {
     fn parse_commands() {
         assert_eq!(parse_command("/barry approve"), BarryCommand::Approve);
         assert_eq!(parse_command("/barry review please"), BarryCommand::Review);
+        assert_eq!(parse_command("/barry confer"), BarryCommand::Confer);
+        assert_eq!(parse_command("/barry confer please"), BarryCommand::Confer);
         assert_eq!(parse_command("/barry whoknows"), BarryCommand::Unknown);
         assert_eq!(parse_command("just a comment"), BarryCommand::NotACommand);
     }

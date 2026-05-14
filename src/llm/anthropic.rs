@@ -46,6 +46,12 @@ struct Usage {
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        crate::llm::retry_transient(|| self.complete_once(req)).await
+    }
+}
+
+impl AnthropicClient {
+    async fn complete_once(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let messages: Vec<_> = req
             .messages
             .iter()

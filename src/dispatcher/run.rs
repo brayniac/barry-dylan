@@ -32,6 +32,11 @@ pub struct JobDeps {
     pub config: Arc<Config>,
     pub pipeline: Arc<Pipeline>,
     pub gh_factory: Arc<dyn MultiGhFactory>,
+    /// Shared per-identity LLM clients. None when the pipeline is hygiene-only
+    /// (no multi-review configured) — confer is then a no-op.
+    pub clients: Option<Arc<crate::checker::multi_review::clients::IdentityClients>>,
+    /// Persona definitions used by multi-review and confer. None matches clients=None.
+    pub personas: Option<Arc<Vec<crate::checker::multi_review::persona::Persona>>>,
 }
 
 #[async_trait::async_trait]
@@ -143,7 +148,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
                     tracing::error!(checker = name, error = ?e, "checker failed");
-                    CheckerOutcome::neutral(static_name(name), format!("internal error: {e}"))
+                    CheckerOutcome::neutral(static_name(name), "internal error (see logs)")
                 }
                 Err(_) => {
                     tracing::warn!(checker = name, "checker timed out");
@@ -192,6 +197,7 @@ fn parse_command_event(kind: &str) -> Option<BarryCommand> {
     Some(match sub {
         "approve" => BarryCommand::Approve,
         "review" => BarryCommand::Review,
+        "confer" => BarryCommand::Confer,
         _ => BarryCommand::Unknown,
     })
 }
@@ -244,6 +250,9 @@ async fn handle_command(
                     now,
                 )
                 .await?;
+        }
+        BarryCommand::Confer => {
+            crate::checker::multi_review::confer::handle(deps, gh, job).await?;
         }
         BarryCommand::Unknown | BarryCommand::NotACommand => {
             // Cannot react without the comment ID stored on the job.

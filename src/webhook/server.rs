@@ -142,6 +142,7 @@ fn short_command(body: &str) -> &'static str {
     match first {
         "approve" => "approve",
         "review" => "review",
+        "confer" => "confer",
         _ => "unknown",
     }
 }
