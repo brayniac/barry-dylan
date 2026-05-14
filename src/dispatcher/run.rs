@@ -426,7 +426,11 @@ async fn post_outcome(
         let _ = gh
             .create_issue_comment(&job.repo_owner, &job.repo_name, job.pr_number, body)
             .await?;
-        tracing::debug!(checker = o.checker_name, body_chars = body.len(), "issue comment posted");
+        tracing::debug!(
+            checker = o.checker_name,
+            body_chars = body.len(),
+            "issue comment posted"
+        );
     }
     Ok(())
 }

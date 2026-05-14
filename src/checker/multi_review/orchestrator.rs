@@ -41,10 +41,7 @@ pub struct Orchestrator<'a> {
 
 impl<'a> Orchestrator<'a> {
     pub async fn run(&self, files: &[ChangedFile]) -> anyhow::Result<Verdict> {
-        let span = tracing::info_span!(
-            "orchestrator.run",
-            files = files.len()
-        );
+        let span = tracing::info_span!("orchestrator.run", files = files.len());
         let _enter = span.enter();
 
         tracing::info!("multi-review orchestration starting");

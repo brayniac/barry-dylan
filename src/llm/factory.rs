@@ -1,7 +1,7 @@
-use crate::config::{LlmProviderKind, LlmProfile};
-use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse};
+use crate::config::{LlmProfile, LlmProviderKind};
 use crate::llm::anthropic::AnthropicClient;
 use crate::llm::openai::OpenAiClient;
+use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse};
 use std::sync::Arc;
 use url::Url;
 
