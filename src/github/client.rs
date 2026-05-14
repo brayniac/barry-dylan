@@ -11,11 +11,14 @@ struct PermEntry {
     expires_at: Instant,
 }
 
+type PermKey = (String, String, String);
+type PermMap = HashMap<PermKey, PermEntry>;
+
 /// In-memory TTL cache for `(owner, repo, user) -> permission` lookups.
 /// Keys include repo since GitHub permissions are repository-scoped.
 #[derive(Clone, Default)]
 pub struct PermissionCache {
-    inner: Arc<Mutex<HashMap<(String, String, String), PermEntry>>>,
+    inner: Arc<Mutex<PermMap>>,
 }
 
 impl PermissionCache {
