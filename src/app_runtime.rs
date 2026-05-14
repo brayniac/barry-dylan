@@ -1,5 +1,6 @@
+use crate::checker::multi_review::identity::Identity;
 use crate::config::Config;
-use crate::dispatcher::run::{GhFactory, JobDeps, Pipeline};
+use crate::dispatcher::run::{GhFactory, JobDeps, MultiGhFactory, Pipeline};
 use crate::github::app::AppCreds;
 use crate::github::client::GitHub;
 use crate::storage::Store;
@@ -10,21 +11,46 @@ use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 
 pub struct AppGhFactory {
-    pub creds: Arc<AppCreds>,
+    pub barry: Arc<AppCreds>,
+    pub other_barry: Arc<AppCreds>,
+    pub other_other_barry: Arc<AppCreds>,
     pub http: reqwest::Client,
     pub store: Store,
+}
+
+impl AppGhFactory {
+    fn creds_for(&self, identity: Identity) -> &Arc<AppCreds> {
+        match identity {
+            Identity::Barry => &self.barry,
+            Identity::OtherBarry => &self.other_barry,
+            Identity::OtherOtherBarry => &self.other_other_barry,
+        }
+    }
 }
 
 #[async_trait]
 impl GhFactory for AppGhFactory {
     async fn for_installation(&self, installation_id: i64) -> anyhow::Result<Arc<GitHub>> {
+        // Default identity for the legacy path is Barry.
+        self.for_identity(Identity::Barry, installation_id).await
+    }
+}
+
+#[async_trait]
+impl MultiGhFactory for AppGhFactory {
+    async fn for_identity(
+        &self,
+        identity: Identity,
+        installation_id: i64,
+    ) -> anyhow::Result<Arc<GitHub>> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
-        let token = crate::github::app::get_or_mint(
+        let token = crate::github::app::get_or_mint_for(
             &self.store,
             &self.http,
-            &self.creds,
+            self.creds_for(identity),
+            identity,
             installation_id,
             now,
         )
@@ -38,18 +64,30 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let cfg = Arc::new(Config::load(config_path)?);
 
     // Read secrets.
-    let webhook_secret_env = cfg
+    let webhook_env = cfg
         .github
         .barry
         .webhook_secret_env
         .as_deref()
-        .expect("validate() requires barry.webhook_secret_env");
-    let webhook_secret = std::env::var(webhook_secret_env)
-        .map_err(|_| anyhow::anyhow!("env var {} not set", webhook_secret_env))?;
+        .ok_or_else(|| anyhow::anyhow!("[github.barry].webhook_secret_env required"))?;
+    let webhook_secret = std::env::var(webhook_env)
+        .map_err(|_| anyhow::anyhow!("env var {} not set", webhook_env))?;
+
     crate::github::app::ensure_key_mode_strict(&cfg.github.barry.private_key_path)?;
-    let creds = Arc::new(AppCreds::load(
+    crate::github::app::ensure_key_mode_strict(&cfg.github.other_barry.private_key_path)?;
+    crate::github::app::ensure_key_mode_strict(&cfg.github.other_other_barry.private_key_path)?;
+
+    let barry = Arc::new(AppCreds::load(
         cfg.github.barry.app_id,
         &cfg.github.barry.private_key_path,
+    )?);
+    let ob = Arc::new(AppCreds::load(
+        cfg.github.other_barry.app_id,
+        &cfg.github.other_barry.private_key_path,
+    )?);
+    let oob = Arc::new(AppCreds::load(
+        cfg.github.other_other_barry.app_id,
+        &cfg.github.other_other_barry.private_key_path,
     )?);
 
     let store = Store::open(&cfg.storage.sqlite_path).await?;
@@ -58,8 +96,10 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let gh_factory: Arc<dyn GhFactory> = Arc::new(AppGhFactory {
-        creds: creds.clone(),
+    let gh_factory: Arc<dyn MultiGhFactory> = Arc::new(AppGhFactory {
+        barry,
+        other_barry: ob,
+        other_other_barry: oob,
         http: http.clone(),
         store: store.clone(),
     });

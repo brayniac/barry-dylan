@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use barry_dylan::dispatcher::run::{GhFactory, JobDeps, Pipeline};
+use barry_dylan::checker::multi_review::identity::Identity;
+use barry_dylan::dispatcher::run::{GhFactory, JobDeps, MultiGhFactory, Pipeline};
 use barry_dylan::github::client::GitHub;
 use barry_dylan::storage::Store;
 use barry_dylan::storage::queue::NewJob;
@@ -45,9 +46,18 @@ pub fn graphql_pr_context(
 pub struct StaticGh {
     pub gh: Arc<GitHub>,
 }
+
 #[async_trait]
 impl GhFactory for StaticGh {
     async fn for_installation(&self, _id: i64) -> anyhow::Result<Arc<GitHub>> {
+        Ok(self.gh.clone())
+    }
+}
+
+#[async_trait]
+impl MultiGhFactory for StaticGh {
+    async fn for_identity(&self, _identity: Identity, _inst: i64) -> anyhow::Result<Arc<GitHub>> {
+        // All identities share one mock GitHub in tests.
         Ok(self.gh.clone())
     }
 }
@@ -70,14 +80,41 @@ pub fn default_config() -> barry_dylan::config::Config {
     let toml = r#"
         [server]
         listen = "0.0.0.0:0"
-        [github]
+
+        [github.barry]
         app_id = 1
         private_key_path = "/dev/null"
         webhook_secret_env = "X"
+
+        [github.other_barry]
+        app_id = 2
+        private_key_path = "/dev/null"
+
+        [github.other_other_barry]
+        app_id = 3
+        private_key_path = "/dev/null"
+
         [storage]
         sqlite_path = "/tmp/x.db"
+
         [dispatcher]
-        [llm.default]
+
+        [llm.barry]
+        provider = "anthropic"
+        endpoint = "https://api.anthropic.com"
+        model = "m"
+
+        [llm.other_barry]
+        provider = "openai"
+        endpoint = "http://localhost:1/v1"
+        model = "m"
+
+        [llm.other_other_barry]
+        provider = "openai"
+        endpoint = "https://api.openai.com/v1"
+        model = "m"
+
+        [llm.judge]
         provider = "anthropic"
         endpoint = "https://api.anthropic.com"
         model = "m"

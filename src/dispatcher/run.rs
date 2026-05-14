@@ -1,3 +1,4 @@
+use crate::checker::multi_review::identity::Identity;
 use crate::checker::{Checker, CheckerCtx, CheckerOutcome, OutcomeStatus};
 use crate::config::Config;
 use crate::dispatcher::trust::{self, BarryCommand, Trust};
@@ -30,12 +31,22 @@ pub struct JobDeps {
     pub store: Store,
     pub config: Arc<Config>,
     pub pipeline: Arc<Pipeline>,
-    pub gh_factory: Arc<dyn GhFactory>,
+    pub gh_factory: Arc<dyn MultiGhFactory>,
 }
 
 #[async_trait::async_trait]
 pub trait GhFactory: Send + Sync {
     async fn for_installation(&self, installation_id: i64) -> anyhow::Result<Arc<GitHub>>;
+}
+
+#[async_trait::async_trait]
+pub trait MultiGhFactory: GhFactory {
+    /// Mint a GitHub client authenticated as the given identity for this installation.
+    async fn for_identity(
+        &self,
+        identity: Identity,
+        installation_id: i64,
+    ) -> anyhow::Result<Arc<GitHub>>;
 }
 
 pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {

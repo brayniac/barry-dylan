@@ -70,6 +70,30 @@ pub async fn fetch_installation_token(
     Ok((resp.token, dt.unix_timestamp()))
 }
 
+/// Identity-scoped token cache lookup/mint. Uses `identity.slug()` as the cache key.
+pub async fn get_or_mint_for(
+    store: &Store,
+    http: &reqwest::Client,
+    creds: &AppCreds,
+    identity: crate::checker::multi_review::identity::Identity,
+    installation_id: i64,
+    now_ts: i64,
+) -> anyhow::Result<String> {
+    if let Some(t) = store
+        .get_installation_token_for(identity.slug(), installation_id, now_ts)
+        .await?
+    {
+        return Ok(t.token);
+    }
+    let (token, exp) = fetch_installation_token(http, creds, installation_id).await?;
+    store
+        .put_installation_token_for(identity.slug(), installation_id, &token, exp)
+        .await?;
+    Ok(token)
+}
+
+/// Legacy single-identity wrapper around `get_or_mint_for` (identity = Barry).
+/// Preserved for existing call sites; Task 13 removes this.
 pub async fn get_or_mint(
     store: &Store,
     http: &reqwest::Client,
@@ -77,17 +101,15 @@ pub async fn get_or_mint(
     installation_id: i64,
     now_ts: i64,
 ) -> anyhow::Result<String> {
-    if let Some(t) = store
-        .get_installation_token(installation_id, now_ts)
-        .await?
-    {
-        return Ok(t.token);
-    }
-    let (token, exp) = fetch_installation_token(http, creds, installation_id).await?;
-    store
-        .put_installation_token(installation_id, &token, exp)
-        .await?;
-    Ok(token)
+    get_or_mint_for(
+        store,
+        http,
+        creds,
+        crate::checker::multi_review::identity::Identity::Barry,
+        installation_id,
+        now_ts,
+    )
+    .await
 }
 
 /// Refuse to start if the private key file is world- or group-readable.
