@@ -50,7 +50,7 @@ mod tests {
     use crate::github::pr::{GitRef, PullRequest, User};
     use std::sync::Arc;
 
-    fn ctx(body: Option<&str>, rule: DescriptionRule) -> CheckerCtx {
+    async fn ctx(body: Option<&str>, rule: DescriptionRule) -> CheckerCtx {
         let mut cfg = RepoConfig::default();
         cfg.hygiene.description = rule;
         CheckerCtx {
@@ -80,13 +80,15 @@ mod tests {
             files: vec![],
             prior_bot_reviews: vec![],
             prior_bot_comments: vec![],
+            store: crate::storage::Store::in_memory().await.unwrap(),
+            installation_id: None,
         }
     }
 
     #[tokio::test]
     async fn short_body_fails() {
         let out = DescriptionChecker
-            .run(&ctx(Some("hi"), DescriptionRule::default()))
+            .run(&ctx(Some("hi"), DescriptionRule::default()).await)
             .await
             .unwrap();
         assert!(matches!(out.status, crate::checker::OutcomeStatus::Failure));
@@ -95,10 +97,13 @@ mod tests {
     #[tokio::test]
     async fn long_body_passes() {
         let out = DescriptionChecker
-            .run(&ctx(
-                Some("This is plenty long for the default rule."),
-                DescriptionRule::default(),
-            ))
+            .run(
+                &ctx(
+                    Some("This is plenty long for the default rule."),
+                    DescriptionRule::default(),
+                )
+                .await,
+            )
             .await
             .unwrap();
         assert!(matches!(out.status, crate::checker::OutcomeStatus::Success));
@@ -112,7 +117,7 @@ mod tests {
             ..DescriptionRule::default()
         };
         let out = DescriptionChecker
-            .run(&ctx(Some("body without section"), r))
+            .run(&ctx(Some("body without section"), r).await)
             .await
             .unwrap();
         assert!(matches!(out.status, crate::checker::OutcomeStatus::Failure));

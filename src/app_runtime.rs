@@ -104,7 +104,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         store: store.clone(),
     });
 
-    let pipeline = Arc::new(build_pipeline(&cfg)?);
+    let pipeline = Arc::new(build_pipeline(&cfg, gh_factory.clone())?);
     let deps = Arc::new(JobDeps {
         store: store.clone(),
         config: cfg.clone(),
@@ -153,28 +153,28 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_pipeline(cfg: &Config) -> anyhow::Result<Pipeline> {
+fn build_pipeline(cfg: &Config, gh_factory: Arc<dyn MultiGhFactory>) -> anyhow::Result<Pipeline> {
     let mut p = Pipeline::hygiene_only();
 
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            cfg.llm
-                .get("barry")
-                .map(|d| d.request_timeout_secs)
-                .unwrap_or(300),
-        ))
-        .build()?;
-
-    let profile = cfg
-        .llm
-        .get("barry")
-        .ok_or_else(|| anyhow::anyhow!("missing [llm.barry]"))?;
-    let client = crate::llm::factory::build(profile, http)?;
+    let clients = Arc::new(crate::checker::multi_review::clients::build(cfg)?);
+    let overrides = personas_from_cfg(&cfg.personas);
+    let personas = Arc::new(crate::checker::multi_review::persona::resolve(&overrides)?);
 
     p.checkers
-        .push(Arc::new(crate::checker::llm_review::LlmReviewChecker {
-            client,
-            max_tokens: profile.max_tokens,
+        .push(Arc::new(crate::checker::multi_review::MultiReviewChecker {
+            clients,
+            personas,
+            gh_factory,
         }));
     Ok(p)
+}
+
+fn personas_from_cfg(
+    p: &crate::config::PersonaOverridesConfig,
+) -> crate::checker::multi_review::persona::PersonaOverrides {
+    crate::checker::multi_review::persona::PersonaOverrides {
+        security: p.security.as_ref().and_then(|x| x.prompt_path.clone()),
+        correctness: p.correctness.as_ref().and_then(|x| x.prompt_path.clone()),
+        style: p.style.as_ref().and_then(|x| x.prompt_path.clone()),
+    }
 }

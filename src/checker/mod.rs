@@ -71,6 +71,8 @@ pub struct CheckerCtx {
     pub files: Vec<ChangedFile>,
     pub prior_bot_reviews: Vec<BotComment>,
     pub prior_bot_comments: Vec<BotComment>,
+    pub store: crate::storage::Store,
+    pub installation_id: Option<i64>,
 }
 
 #[async_trait]

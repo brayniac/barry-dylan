@@ -115,6 +115,8 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         files,
         prior_bot_reviews: bot_reviews,
         prior_bot_comments: bot_comments,
+        store: deps.store.clone(),
+        installation_id: Some(job.installation_id),
     };
 
     let checker_timeout = Duration::from_secs(deps.config.dispatcher.checker_timeout_secs);

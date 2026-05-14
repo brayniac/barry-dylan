@@ -67,7 +67,7 @@ mod tests {
         }
     }
 
-    fn ctx_for(pr: PullRequest, rule: SizeRule) -> CheckerCtx {
+    async fn ctx_for(pr: PullRequest, rule: SizeRule) -> CheckerCtx {
         let mut cfg = RepoConfig::default();
         cfg.hygiene.size = rule;
         CheckerCtx {
@@ -79,13 +79,15 @@ mod tests {
             files: vec![],
             prior_bot_reviews: vec![],
             prior_bot_comments: vec![],
+            store: crate::storage::Store::in_memory().await.unwrap(),
+            installation_id: None,
         }
     }
 
     #[tokio::test]
     async fn small_pr_success() {
         let out = SizeChecker
-            .run(&ctx_for(pr(10, 5, 2), SizeRule::default()))
+            .run(&ctx_for(pr(10, 5, 2), SizeRule::default()).await)
             .await
             .unwrap();
         assert!(matches!(out.status, OutcomeStatus::Success));
@@ -94,7 +96,7 @@ mod tests {
     #[tokio::test]
     async fn large_pr_warns_neutral() {
         let out = SizeChecker
-            .run(&ctx_for(pr(600, 0, 30), SizeRule::default()))
+            .run(&ctx_for(pr(600, 0, 30), SizeRule::default()).await)
             .await
             .unwrap();
         assert!(matches!(out.status, OutcomeStatus::Neutral));
