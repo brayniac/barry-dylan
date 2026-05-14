@@ -127,6 +127,11 @@ pub enum LlmError {
 pub trait LlmClient: Send + Sync {
     /// Complete the given LLM request and return the response.
     async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError>;
+
+    /// Optional: name of the client for logging purposes.
+    fn name(&self) -> &'static str {
+        "llm_client"
+    }
 }
 
 fn is_transient(e: &LlmError) -> bool {
@@ -157,6 +162,64 @@ where
         }
     }
     unreachable!()
+}
+
+/// A wrapper client that adds timing metrics for LLM calls.
+pub struct TimedClient<C: LlmClient + Send + Sync> {
+    inner: C,
+    name: &'static str,
+}
+
+impl<C: LlmClient + Send + Sync> TimedClient<C> {
+    pub fn new(inner: C) -> Self {
+        let name = inner.name();
+        Self { inner, name }
+    }
+
+    pub fn with_name(inner: C, name: &'static str) -> Self {
+        Self { inner, name }
+    }
+}
+
+#[async_trait]
+impl<C: LlmClient + Send + Sync> LlmClient for TimedClient<C> {
+    async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let span = tracing::info_span!(
+            "llm.call",
+            client = self.name,
+            max_tokens = req.max_tokens,
+            messages = req.messages.len()
+        );
+        let _enter = span.enter();
+
+        let start = std::time::Instant::now();
+        let result = self.inner.complete(req).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match &result {
+            Ok(resp) => {
+                tracing::info!(
+                    duration_ms,
+                    input_tokens = resp.input_tokens,
+                    output_tokens = resp.output_tokens,
+                    "llm call completed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    duration_ms,
+                    error = ?e,
+                    "llm call failed"
+                );
+            }
+        }
+
+        result
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
 }
 
 #[cfg(test)]

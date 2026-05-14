@@ -41,7 +41,13 @@ pub struct Orchestrator<'a> {
 
 impl<'a> Orchestrator<'a> {
     pub async fn run(&self, files: &[ChangedFile]) -> anyhow::Result<Verdict> {
-        tracing::info!(files = files.len(), "multi-review orchestration starting");
+        let span = tracing::info_span!(
+            "orchestrator.run",
+            files = files.len()
+        );
+        let _enter = span.enter();
+
+        tracing::info!("multi-review orchestration starting");
         let diff = synthesis::render_diff_block(files);
 
         // Phase 1: persona drafts for both identities in parallel.
@@ -105,7 +111,7 @@ impl<'a> Orchestrator<'a> {
             duration_ms = r1_start.elapsed().as_millis() as u64,
             barry_outcome = ?barry_r1.outcome,
             ob_outcome = ?ob_r1.outcome,
-            "R1 complete"
+            "R1 synthesis complete"
         );
 
         // Phase 3: R2 synthesis — each identity reads the other's R1.
@@ -137,7 +143,7 @@ impl<'a> Orchestrator<'a> {
             duration_ms = r2_start.elapsed().as_millis() as u64,
             barry_outcome = ?barry_r2.outcome,
             ob_outcome = ?ob_r2.outcome,
-            "R2 complete"
+            "R2 synthesis complete"
         );
 
         // Judge.
@@ -196,11 +202,14 @@ impl<'a> Orchestrator<'a> {
     ) -> anyhow::Result<Vec<PersonaDraft>> {
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
-        tracing::debug!(
-            ?identity,
-            personas = self.personas.len(),
-            "persona drafts starting"
+        let span = tracing::info_span!(
+            "orchestrator.persona_drafts",
+            identity = ?identity,
+            personas = self.personas.len()
         );
+        let _enter = span.enter();
+
+        tracing::debug!("persona drafts starting");
 
         let mut futures = Vec::with_capacity(self.personas.len());
         for p in self.personas {
@@ -213,10 +222,9 @@ impl<'a> Orchestrator<'a> {
         }
         let start = std::time::Instant::now();
         let results = futures::future::join_all(futures).await;
-        tracing::debug!(
-            ?identity,
+        tracing::info!(
             duration_ms = start.elapsed().as_millis() as u64,
-            "persona drafts done"
+            "persona drafts complete"
         );
 
         let mut drafts = Vec::with_capacity(results.len());
@@ -242,13 +250,16 @@ impl<'a> Orchestrator<'a> {
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
         let start = std::time::Instant::now();
+
         let result = synthesis::synthesize(client.as_ref(), drafts, diff, peer, max_tokens)
             .await
             .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"));
+
+        let duration_ms = start.elapsed().as_millis() as u64;
         tracing::info!(
-            ?identity,
+            identity = ?identity,
             round,
-            duration_ms = start.elapsed().as_millis() as u64,
+            duration_ms,
             outcome = result.as_ref().ok().map(|r| format!("{:?}", r.outcome)),
             "synthesis done"
         );
