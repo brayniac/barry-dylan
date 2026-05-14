@@ -1,13 +1,54 @@
 use reqwest::header::HeaderMap;
 use reqwest::{Method, Response};
 use serde::de::DeserializeOwned;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Cache entry for a permission lookup.
+struct PermEntry {
+    permission: String,
+    expires_at: Instant,
+}
+
+/// In-memory TTL cache for `(owner, user) -> permission` lookups.
+/// Keys are (owner, user) — not per-repo — since permissions rarely change
+/// and the 5-minute TTL bounds staleness.
+#[derive(Clone, Default)]
+pub struct PermissionCache {
+    inner: Arc<Mutex<HashMap<(String, String), PermEntry>>>,
+}
+
+impl PermissionCache {
+    pub(crate) fn get(&self, owner: &str, user: &str) -> Option<String> {
+        let mut map = self.inner.lock().unwrap();
+        let key = (owner.to_string(), user.to_string());
+        let entry = map.get(&key)?;
+        if entry.expires_at <= Instant::now() {
+            map.remove(&key);
+            return None;
+        }
+        Some(entry.permission.clone())
+    }
+
+    pub(crate) fn put(&self, owner: &str, user: &str, permission: String) {
+        let mut map = self.inner.lock().unwrap();
+        map.insert(
+            (owner.to_string(), user.to_string()),
+            PermEntry {
+                permission,
+                expires_at: Instant::now() + Duration::from_secs(300),
+            },
+        );
+    }
+}
 
 #[derive(Clone)]
 pub struct GitHub {
     http: reqwest::Client,
     base: String,
     token: String,
+    cache: PermissionCache,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -28,7 +69,13 @@ impl GitHub {
             http,
             base: "https://api.github.com".into(),
             token,
+            cache: PermissionCache::default(),
         }
+    }
+
+    /// Return a reference to the in-memory permission cache.
+    pub fn perm_cache(&self) -> &PermissionCache {
+        &self.cache
     }
     pub fn with_base(mut self, base: impl Into<String>) -> Self {
         self.base = base.into();
