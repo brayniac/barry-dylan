@@ -157,11 +157,22 @@ mod tests {
             recorded: recorded.clone(),
         };
         let drafts = vec![
-            PersonaDraft { persona: "security", raw: "sec-draft".into() },
-            PersonaDraft { persona: "style", raw: "style-draft".into() },
+            PersonaDraft {
+                persona: "security",
+                raw: "sec-draft".into(),
+            },
+            PersonaDraft {
+                persona: "style",
+                raw: "style-draft".into(),
+            },
         ];
-        let r = synthesize(&client, &drafts, "diff", None, 1024).await.unwrap();
-        assert_eq!(r.outcome, crate::checker::multi_review::review::Outcome::Approve);
+        let r = synthesize(&client, &drafts, "diff", None, 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            r.outcome,
+            crate::checker::multi_review::review::Outcome::Approve
+        );
         let r = recorded.lock().unwrap();
         let user = &r[0].messages[0].content;
         assert!(user.contains("sec-draft"));
@@ -178,8 +189,13 @@ mod tests {
             ]),
             recorded: recorded.clone(),
         };
-        let drafts = vec![PersonaDraft { persona: "security", raw: "sd".into() }];
-        let _ = synthesize(&client, &drafts, "diff", Some("PEER-R1"), 1024).await.unwrap();
+        let drafts = vec![PersonaDraft {
+            persona: "security",
+            raw: "sd".into(),
+        }];
+        let _ = synthesize(&client, &drafts, "diff", Some("PEER-R1"), 1024)
+            .await
+            .unwrap();
         let r = recorded.lock().unwrap();
         assert!(r[0].messages[0].content.contains("PEER-R1"));
     }

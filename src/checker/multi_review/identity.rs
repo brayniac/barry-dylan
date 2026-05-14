@@ -33,7 +33,10 @@ mod tests {
     #[test]
     fn labels_distinct() {
         assert_ne!(Identity::Barry.label(), Identity::OtherBarry.label());
-        assert_ne!(Identity::OtherBarry.label(), Identity::OtherOtherBarry.label());
+        assert_ne!(
+            Identity::OtherBarry.label(),
+            Identity::OtherOtherBarry.label()
+        );
     }
 
     #[test]

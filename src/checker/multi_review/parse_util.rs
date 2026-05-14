@@ -30,7 +30,9 @@ pub(super) fn locate_json(text: &str) -> Option<&str> {
             }
             b'}' => {
                 depth -= 1;
-                if depth == 0 && let Some(s) = start {
+                if depth == 0
+                    && let Some(s) = start
+                {
                     return Some(&text[s..=i]);
                 }
             }

@@ -40,14 +40,16 @@ pub async fn judge(
             "findings": barry.findings.iter().map(|f| serde_json::json!({
                 "file": f.file, "line": f.line, "message": f.message
             })).collect::<Vec<_>>(),
-        })).unwrap_or_default(),
+        }))
+        .unwrap_or_default(),
         serde_json::to_string(&serde_json::json!({
             "outcome": other.outcome,
             "summary": other.summary,
             "findings": other.findings.iter().map(|f| serde_json::json!({
                 "file": f.file, "line": f.line, "message": f.message
             })).collect::<Vec<_>>(),
-        })).unwrap_or_default(),
+        }))
+        .unwrap_or_default(),
     );
     let req = LlmRequest {
         system: Some(JUDGE_TEMPLATE.to_string()),
@@ -62,9 +64,11 @@ pub async fn judge(
     let slice = locate_json(&resp.text).ok_or_else(|| JudgeError::Parse(resp.text.clone()))?;
     let parsed: JudgeResp =
         serde_json::from_str(slice).map_err(|e| JudgeError::Parse(e.to_string()))?;
-    Ok(JudgeVerdict { agree: parsed.agree, reason: parsed.reason })
+    Ok(JudgeVerdict {
+        agree: parsed.agree,
+        reason: parsed.reason,
+    })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -82,22 +86,37 @@ mod tests {
     impl LlmClient for StubClient {
         async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
             self.recorded.lock().unwrap().push(req.clone());
-            Ok(LlmResponse { text: self.resp.clone(), input_tokens: None, output_tokens: None })
+            Ok(LlmResponse {
+                text: self.resp.clone(),
+                input_tokens: None,
+                output_tokens: None,
+            })
         }
     }
 
     fn r(outcome: Outcome, summary: &str) -> UnifiedReview {
-        UnifiedReview { outcome, summary: summary.into(), findings: vec![] }
+        UnifiedReview {
+            outcome,
+            summary: summary.into(),
+            findings: vec![],
+        }
     }
 
     #[tokio::test]
     async fn parses_agree() {
         let rec = Arc::new(Mutex::new(vec![]));
-        let c =
-            StubClient { resp: r#"{"agree":true,"reason":"same"}"#.into(), recorded: rec };
-        let v = judge(&c, &r(Outcome::Approve, "x"), &r(Outcome::Approve, "y"), 256)
-            .await
-            .unwrap();
+        let c = StubClient {
+            resp: r#"{"agree":true,"reason":"same"}"#.into(),
+            recorded: rec,
+        };
+        let v = judge(
+            &c,
+            &r(Outcome::Approve, "x"),
+            &r(Outcome::Approve, "y"),
+            256,
+        )
+        .await
+        .unwrap();
         assert!(v.agree);
     }
 
@@ -108,10 +127,14 @@ mod tests {
             resp: r#"{"agree":false,"reason":"diff outcomes"}"#.into(),
             recorded: rec,
         };
-        let v =
-            judge(&c, &r(Outcome::Approve, "x"), &r(Outcome::RequestChanges, "y"), 256)
-                .await
-                .unwrap();
+        let v = judge(
+            &c,
+            &r(Outcome::Approve, "x"),
+            &r(Outcome::RequestChanges, "y"),
+            256,
+        )
+        .await
+        .unwrap();
         assert!(!v.agree);
         assert_eq!(v.reason, "diff outcomes");
     }
@@ -142,10 +165,18 @@ mod tests {
     #[tokio::test]
     async fn errors_on_unparseable() {
         let rec = Arc::new(Mutex::new(vec![]));
-        let c = StubClient { resp: "no json here".into(), recorded: rec };
-        let err = judge(&c, &r(Outcome::Approve, "x"), &r(Outcome::Approve, "y"), 256)
-            .await
-            .unwrap_err();
+        let c = StubClient {
+            resp: "no json here".into(),
+            recorded: rec,
+        };
+        let err = judge(
+            &c,
+            &r(Outcome::Approve, "x"),
+            &r(Outcome::Approve, "y"),
+            256,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, JudgeError::Parse(_)));
     }
 }

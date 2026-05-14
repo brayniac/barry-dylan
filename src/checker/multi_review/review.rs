@@ -53,7 +53,6 @@ pub fn parse(text: &str) -> Result<UnifiedReview, ParseError> {
     Ok(serde_json::from_str(slice)?)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,7 +79,8 @@ mod tests {
 
     #[test]
     fn parses_in_fenced_block() {
-        let r = parse("preamble\n```json\n{\"outcome\":\"comment\",\"summary\":\"x\"}\n```").unwrap();
+        let r =
+            parse("preamble\n```json\n{\"outcome\":\"comment\",\"summary\":\"x\"}\n```").unwrap();
         assert_eq!(r.outcome, Outcome::Comment);
     }
 
@@ -92,8 +92,17 @@ mod tests {
     #[test]
     fn outcome_maps_to_check_conclusion() {
         use crate::github::check_run::CheckConclusion;
-        assert!(matches!(Outcome::Approve.check_conclusion(), CheckConclusion::Success));
-        assert!(matches!(Outcome::Comment.check_conclusion(), CheckConclusion::Neutral));
-        assert!(matches!(Outcome::RequestChanges.check_conclusion(), CheckConclusion::Failure));
+        assert!(matches!(
+            Outcome::Approve.check_conclusion(),
+            CheckConclusion::Success
+        ));
+        assert!(matches!(
+            Outcome::Comment.check_conclusion(),
+            CheckConclusion::Neutral
+        ));
+        assert!(matches!(
+            Outcome::RequestChanges.check_conclusion(),
+            CheckConclusion::Failure
+        ));
     }
 }

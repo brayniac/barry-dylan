@@ -2,6 +2,14 @@ use crate::checker::multi_review::identity::Identity;
 use crate::storage::Store;
 use sqlx::Row;
 
+#[derive(Debug, Clone, Copy)]
+pub struct RunKey<'a> {
+    pub owner: &'a str,
+    pub repo: &'a str,
+    pub pr: i64,
+    pub head_sha: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunState {
     pub barry_posted: bool,
@@ -14,10 +22,7 @@ pub struct RunState {
 impl Store {
     pub async fn record_post(
         &self,
-        owner: &str,
-        repo: &str,
-        pr: i64,
-        head_sha: &str,
+        key: RunKey<'_>,
         identity: Identity,
         outcome: &str,
         now_ts: i64,
@@ -35,10 +40,10 @@ impl Store {
                {col} = 1, last_outcome = excluded.last_outcome, updated_at = excluded.updated_at"
         );
         sqlx::query(&sql)
-            .bind(owner)
-            .bind(repo)
-            .bind(pr)
-            .bind(head_sha)
+            .bind(key.owner)
+            .bind(key.repo)
+            .bind(key.pr)
+            .bind(key.head_sha)
             .bind(outcome)
             .bind(now_ts)
             .execute(&self.pool)
@@ -46,14 +51,7 @@ impl Store {
         Ok(())
     }
 
-    pub async fn record_confer_used(
-        &self,
-        owner: &str,
-        repo: &str,
-        pr: i64,
-        head_sha: &str,
-        now_ts: i64,
-    ) -> anyhow::Result<()> {
+    pub async fn record_confer_used(&self, key: RunKey<'_>, now_ts: i64) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO multi_review_runs
                 (repo_owner, repo_name, pr_number, head_sha, confers_used, updated_at)
@@ -61,33 +59,27 @@ impl Store {
                ON CONFLICT(repo_owner, repo_name, pr_number, head_sha) DO UPDATE SET
                  confers_used = confers_used + 1, updated_at = excluded.updated_at"#,
         )
-        .bind(owner)
-        .bind(repo)
-        .bind(pr)
-        .bind(head_sha)
+        .bind(key.owner)
+        .bind(key.repo)
+        .bind(key.pr)
+        .bind(key.head_sha)
         .bind(now_ts)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    pub async fn run_state(
-        &self,
-        owner: &str,
-        repo: &str,
-        pr: i64,
-        head_sha: &str,
-    ) -> anyhow::Result<Option<RunState>> {
+    pub async fn run_state(&self, key: RunKey<'_>) -> anyhow::Result<Option<RunState>> {
         let row = sqlx::query(
             r#"SELECT barry_posted, other_barry_posted, other_other_barry_posted,
                       confers_used, last_outcome
                FROM multi_review_runs
                WHERE repo_owner=?1 AND repo_name=?2 AND pr_number=?3 AND head_sha=?4"#,
         )
-        .bind(owner)
-        .bind(repo)
-        .bind(pr)
-        .bind(head_sha)
+        .bind(key.owner)
+        .bind(key.repo)
+        .bind(key.pr)
+        .bind(key.head_sha)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| RunState {
@@ -104,13 +96,22 @@ impl Store {
 mod tests {
     use super::*;
 
+    fn key<'a>() -> RunKey<'a> {
+        RunKey {
+            owner: "o",
+            repo: "r",
+            pr: 1,
+            head_sha: "sha",
+        }
+    }
+
     #[tokio::test]
     async fn record_post_creates_row() {
         let s = Store::in_memory().await.unwrap();
-        s.record_post("o", "r", 1, "sha", Identity::Barry, "approve", 100)
+        s.record_post(key(), Identity::Barry, "approve", 100)
             .await
             .unwrap();
-        let st = s.run_state("o", "r", 1, "sha").await.unwrap().unwrap();
+        let st = s.run_state(key()).await.unwrap().unwrap();
         assert!(st.barry_posted);
         assert!(!st.other_barry_posted);
         assert_eq!(st.last_outcome.as_deref(), Some("approve"));
@@ -119,13 +120,13 @@ mod tests {
     #[tokio::test]
     async fn record_post_updates_existing_row() {
         let s = Store::in_memory().await.unwrap();
-        s.record_post("o", "r", 1, "sha", Identity::Barry, "approve", 100)
+        s.record_post(key(), Identity::Barry, "approve", 100)
             .await
             .unwrap();
-        s.record_post("o", "r", 1, "sha", Identity::OtherBarry, "comment", 200)
+        s.record_post(key(), Identity::OtherBarry, "comment", 200)
             .await
             .unwrap();
-        let st = s.run_state("o", "r", 1, "sha").await.unwrap().unwrap();
+        let st = s.run_state(key()).await.unwrap().unwrap();
         assert!(st.barry_posted);
         assert!(st.other_barry_posted);
         assert_eq!(st.last_outcome.as_deref(), Some("comment"));
@@ -134,25 +135,33 @@ mod tests {
     #[tokio::test]
     async fn no_row_for_unknown_sha() {
         let s = Store::in_memory().await.unwrap();
-        s.record_post("o", "r", 1, "sha-old", Identity::Barry, "approve", 100)
+        let old = RunKey {
+            owner: "o",
+            repo: "r",
+            pr: 1,
+            head_sha: "sha-old",
+        };
+        let new = RunKey {
+            owner: "o",
+            repo: "r",
+            pr: 1,
+            head_sha: "sha-new",
+        };
+        s.record_post(old, Identity::Barry, "approve", 100)
             .await
             .unwrap();
-        assert!(s
-            .run_state("o", "r", 1, "sha-new")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(s.run_state(new).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn confer_count_increments() {
         let s = Store::in_memory().await.unwrap();
-        s.record_post("o", "r", 1, "sha", Identity::Barry, "approve", 100)
+        s.record_post(key(), Identity::Barry, "approve", 100)
             .await
             .unwrap();
-        s.record_confer_used("o", "r", 1, "sha", 200).await.unwrap();
-        s.record_confer_used("o", "r", 1, "sha", 300).await.unwrap();
-        let st = s.run_state("o", "r", 1, "sha").await.unwrap().unwrap();
+        s.record_confer_used(key(), 200).await.unwrap();
+        s.record_confer_used(key(), 300).await.unwrap();
+        let st = s.run_state(key()).await.unwrap().unwrap();
         assert_eq!(st.confers_used, 2);
     }
 }
