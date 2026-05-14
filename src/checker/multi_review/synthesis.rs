@@ -26,13 +26,14 @@ pub async fn run_persona(
     max_tokens: u32,
 ) -> Result<PersonaDraft, LlmError> {
     let req = LlmRequest {
-        system: Some(persona.prompt.as_ref().clone()),
+        system: Some(diff_block.to_string()),
         messages: vec![LlmMessage {
             role: Role::User,
             content: format!(
-                "{diff_block}\n\nReturn ONLY a JSON object with: \
+                "{prompt}\n\nReview the diff above. Return ONLY a JSON object with: \
                  {{\"findings\":[{{\"file\":\"<path>\",\"line\":<int>,\"message\":\"<text>\"}}],\
-                 \"summary\":\"<one short sentence>\"}}"
+                 \"summary\":\"<one short sentence>\"}}",
+                prompt = persona.prompt.as_ref(),
             ),
         }],
         max_tokens,
@@ -53,8 +54,7 @@ pub async fn synthesize(
     prior_peer_review: Option<&str>,
     max_tokens: u32,
 ) -> Result<UnifiedReview, SynthesisError> {
-    let mut user = String::new();
-    user.push_str(diff_block);
+    let mut user = String::from(SYNTHESIS_TEMPLATE);
     user.push_str("\n\n=== persona drafts ===\n");
     for d in drafts {
         user.push_str(&format!("--- {} ---\n{}\n", d.persona, d.raw));
@@ -65,7 +65,7 @@ pub async fn synthesize(
         user.push_str("\nYou MAY revise your position based on the peer review. If you do, say so in summary.\n");
     }
     let req = LlmRequest {
-        system: Some(SYNTHESIS_TEMPLATE.to_string()),
+        system: Some(diff_block.to_string()),
         messages: vec![LlmMessage {
             role: Role::User,
             content: user,
@@ -134,17 +134,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_persona_passes_prompt_as_system() {
+    async fn run_persona_puts_diff_in_system_and_prompt_in_user() {
         let recorded = Arc::new(Mutex::new(vec![]));
         let client = StubClient {
             responses: Mutex::new(vec![r#"{"findings":[],"summary":"ok"}"#.into()]),
             recorded: recorded.clone(),
         };
         let p = persona("security");
-        let d = run_persona(&client, &p, "diff", 1024).await.unwrap();
+        let d = run_persona(&client, &p, "DIFF-BLOCK", 1024).await.unwrap();
         assert_eq!(d.persona, "security");
         let r = recorded.lock().unwrap();
-        assert!(r[0].system.as_ref().unwrap().contains("you are security"));
+        assert_eq!(r[0].system.as_deref(), Some("DIFF-BLOCK"));
+        assert!(r[0].messages[0].content.contains("you are security"));
     }
 
     #[tokio::test]
@@ -166,7 +167,7 @@ mod tests {
                 raw: "style-draft".into(),
             },
         ];
-        let r = synthesize(&client, &drafts, "diff", None, 1024)
+        let r = synthesize(&client, &drafts, "DIFF-BLOCK", None, 1024)
             .await
             .unwrap();
         assert_eq!(
@@ -174,6 +175,7 @@ mod tests {
             crate::checker::multi_review::review::Outcome::Approve
         );
         let r = recorded.lock().unwrap();
+        assert_eq!(r[0].system.as_deref(), Some("DIFF-BLOCK"));
         let user = &r[0].messages[0].content;
         assert!(user.contains("sec-draft"));
         assert!(user.contains("style-draft"));
