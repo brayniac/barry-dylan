@@ -6,8 +6,8 @@ pub struct DescriptionChecker;
 
 #[async_trait]
 impl Checker for DescriptionChecker {
-    fn name(&self) -> &'static str {
-        "barry/hygiene.description"
+    fn name(&self) -> String {
+        "barry/hygiene.description".to_string()
     }
     fn enabled(&self, cfg: &RepoConfig) -> bool {
         cfg.hygiene.description.enabled

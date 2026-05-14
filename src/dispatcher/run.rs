@@ -169,12 +169,12 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
                     tracing::error!(error = ?e, "checker failed");
-                    CheckerOutcome::neutral(static_name(&checker_name), "internal error (see logs)")
+                    CheckerOutcome::neutral(&checker_name, "internal error (see logs)")
                 }
                 Err(_) => {
                     let timeout_msg = format!("timed out after {}s", checker_timeout.as_secs());
                     tracing::warn!(timeout_msg, "checker timed out");
-                    CheckerOutcome::neutral(static_name(&checker_name), &timeout_msg)
+                    CheckerOutcome::neutral(&checker_name, &timeout_msg)
                 }
             };
             tracing::info!(
@@ -389,7 +389,7 @@ async fn post_outcome(
         status: CheckStatus::Completed,
         conclusion: Some(conclusion),
         output: CheckOutput {
-            title: o.checker_name.into(),
+            title: o.checker_name.clone().into(),
             summary: o.summary.clone(),
             text: o.text.clone(),
         },
@@ -436,10 +436,6 @@ async fn post_outcome(
     Ok(())
 }
 
-fn static_name(s: &str) -> &'static str {
-    // Leak once for &'static — only happens on the error path; bounded by checker count.
-    Box::leak(s.to_string().into_boxed_str())
-}
 
 fn status_str(s: OutcomeStatus) -> &'static str {
     match s {
