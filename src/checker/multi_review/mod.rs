@@ -5,6 +5,7 @@
 
 pub mod identity;
 pub mod judge;
+pub(super) mod parse_util;
 pub mod persona;
 pub mod review;
 pub mod synthesis;

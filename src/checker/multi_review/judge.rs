@@ -1,3 +1,4 @@
+use super::parse_util::locate_json;
 use crate::checker::multi_review::review::UnifiedReview;
 use crate::llm::{LlmClient, LlmError, LlmMessage, LlmRequest, Role};
 use serde::Deserialize;
@@ -64,48 +65,6 @@ pub async fn judge(
     Ok(JudgeVerdict { agree: parsed.agree, reason: parsed.reason })
 }
 
-fn locate_json(text: &str) -> Option<&str> {
-    // Identical to the parser in `review.rs`. Kept inline because it's tiny
-    // and avoids cross-module coupling on a private utility.
-    let bytes = text.as_bytes();
-    let mut start = None;
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut esc = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        if in_str {
-            if esc {
-                esc = false;
-                continue;
-            }
-            if b == b'\\' {
-                esc = true;
-                continue;
-            }
-            if b == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_str = true,
-            b'{' => {
-                if depth == 0 {
-                    start = Some(i);
-                }
-                depth += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                if depth == 0 && let Some(s) = start {
-                    return Some(&text[s..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
 
 #[cfg(test)]
 mod tests {
