@@ -43,6 +43,13 @@ pub async fn post_review(
 ) -> anyhow::Result<()> {
     let gh = factory.for_identity(identity, installation_id).await?;
     let inline = to_inline_comments(files, &review.findings);
+    tracing::info!(
+        ?identity,
+        outcome = ?review.outcome,
+        findings = review.findings.len(),
+        inline_comments = inline.len(),
+        "posting review"
+    );
     let body = body_for(identity, review, peer_disagreement);
     let event = match review.outcome {
         crate::checker::multi_review::review::Outcome::Approve => "APPROVE",
@@ -56,6 +63,7 @@ pub async fn post_review(
         commit_id: head_sha,
     };
     let _ = gh.create_review(owner, repo, pr_number, &input).await?;
+    tracing::info!(?identity, "review posted");
     Ok(())
 }
 

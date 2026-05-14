@@ -40,12 +40,25 @@ impl Checker for MultiReviewChecker {
     }
 
     async fn run(&self, ctx: &CheckerCtx) -> anyhow::Result<CheckerOutcome> {
+        tracing::info!(
+            pr = ctx.pr.number,
+            owner = %ctx.owner,
+            repo = %ctx.repo,
+            files = ctx.files.len(),
+            "multi-review checker starting"
+        );
         let installation_id = installation_id_from_ctx(ctx)?;
         let orchestrator = Orchestrator {
             clients: &self.clients,
             personas: &self.personas,
         };
         let verdict = orchestrator.run(&ctx.files).await?;
+        let verdict_kind = match &verdict {
+            Verdict::Agree { .. } => "agree",
+            Verdict::Disagree { .. } => "disagree",
+            Verdict::BarryAlone { .. } => "barry_alone",
+        };
+        tracing::info!(verdict = verdict_kind, "orchestrator verdict received");
 
         // Post under each Barry that has something to say.
         match &verdict {
@@ -146,6 +159,7 @@ impl Checker for MultiReviewChecker {
             }
             Verdict::Disagree { reason, .. } => format!("No consensus: {reason}"),
         };
+        tracing::info!(?status, "multi-review checker done");
         Ok(CheckerOutcome {
             checker_name: CHECKER_NAME,
             status,

@@ -41,12 +41,19 @@ pub struct Orchestrator<'a> {
 
 impl<'a> Orchestrator<'a> {
     pub async fn run(&self, files: &[ChangedFile]) -> anyhow::Result<Verdict> {
+        tracing::info!(files = files.len(), "multi-review orchestration starting");
         let diff = synthesis::render_diff_block(files);
 
         // R1: parallel persona+synthesis per identity.
+        tracing::info!("R1 starting (parallel persona+synthesis for Barry and Other Barry)");
+        let r1_start = std::time::Instant::now();
         let barry_r1 = self.run_unified(Identity::Barry, &diff, None);
         let ob_r1 = self.run_unified(Identity::OtherBarry, &diff, None);
         let (barry_r1, ob_r1) = tokio::join!(barry_r1, ob_r1);
+        tracing::info!(
+            duration_ms = r1_start.elapsed().as_millis() as u64,
+            "R1 complete"
+        );
 
         let barry_r1 = match barry_r1 {
             Ok(r) => r,
@@ -56,12 +63,19 @@ impl<'a> Orchestrator<'a> {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(?e, "Other Barry R1 failed; Barry posts alone");
+                tracing::info!(kind = "barry_alone", "verdict");
                 return Ok(Verdict::BarryAlone {
                     barry: barry_r1,
                     reason: format!("Other Barry unavailable: {e}"),
                 });
             }
         };
+
+        tracing::info!(
+            barry_outcome = ?barry_r1.outcome,
+            ob_outcome = ?ob_r1.outcome,
+            "R1 outcomes"
+        );
 
         // R2: each reads the other's R1 and may revise.
         let barry_r1_text = serde_json::to_string(&serde_json::json!({
@@ -74,13 +88,23 @@ impl<'a> Orchestrator<'a> {
             "summary": ob_r1.summary,
         }))
         .unwrap_or_default();
+        tracing::info!("R2 starting (each identity reads the other's R1)");
+        let r2_start = std::time::Instant::now();
         let barry_r2 = self.run_unified(Identity::Barry, &diff, Some(&ob_r1_text));
         let ob_r2 = self.run_unified(Identity::OtherBarry, &diff, Some(&barry_r1_text));
         let (barry_r2, ob_r2) = tokio::join!(barry_r2, ob_r2);
         let barry_r2 = barry_r2.unwrap_or(barry_r1);
         let ob_r2 = ob_r2.unwrap_or(ob_r1);
+        tracing::info!(
+            duration_ms = r2_start.elapsed().as_millis() as u64,
+            barry_outcome = ?barry_r2.outcome,
+            ob_outcome = ?ob_r2.outcome,
+            "R2 complete"
+        );
 
         // Judge.
+        tracing::info!("judge starting");
+        let judge_start = std::time::Instant::now();
         let verdict = match judge::judge(
             self.clients.judge.as_ref(),
             &barry_r2,
@@ -92,6 +116,7 @@ impl<'a> Orchestrator<'a> {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(?e, "judge failed; defaulting to disagreement");
+                tracing::info!(kind = "disagree", "verdict");
                 return Ok(Verdict::Disagree {
                     barry: barry_r2,
                     other_barry: ob_r2,
@@ -99,10 +124,18 @@ impl<'a> Orchestrator<'a> {
                 });
             }
         };
+        tracing::info!(
+            duration_ms = judge_start.elapsed().as_millis() as u64,
+            agree = verdict.agree,
+            reason = %verdict.reason,
+            "judge done"
+        );
 
         if verdict.agree {
+            tracing::info!(kind = "agree", outcome = ?barry_r2.outcome, "verdict");
             Ok(Verdict::Agree { barry: barry_r2 })
         } else {
+            tracing::info!(kind = "disagree", "verdict");
             Ok(Verdict::Disagree {
                 barry: barry_r2,
                 other_barry: ob_r2,
@@ -118,6 +151,13 @@ impl<'a> Orchestrator<'a> {
         diff: &str,
         peer: Option<&str>,
     ) -> anyhow::Result<UnifiedReview> {
+        let round = if peer.is_some() { "R2" } else { "R1" };
+        tracing::debug!(
+            ?identity,
+            round,
+            personas = self.personas.len(),
+            "persona drafts starting"
+        );
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
 
@@ -130,7 +170,14 @@ impl<'a> Orchestrator<'a> {
                 async move { synthesis::run_persona(c.as_ref(), &p, &diff, max_tokens).await },
             );
         }
+        let drafts_start = std::time::Instant::now();
         let results = futures::future::join_all(futures).await;
+        tracing::debug!(
+            ?identity,
+            round,
+            duration_ms = drafts_start.elapsed().as_millis() as u64,
+            "persona drafts done"
+        );
         let mut drafts = Vec::with_capacity(results.len());
         for r in results {
             match r {
@@ -138,9 +185,18 @@ impl<'a> Orchestrator<'a> {
                 Err(e) => return Err(anyhow::anyhow!("persona call failed: {e}")),
             }
         }
-        synthesis::synthesize(client.as_ref(), &drafts, diff, peer, max_tokens)
+        let synth_start = std::time::Instant::now();
+        let result = synthesis::synthesize(client.as_ref(), &drafts, diff, peer, max_tokens)
             .await
-            .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"))
+            .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"));
+        tracing::info!(
+            ?identity,
+            round,
+            duration_ms = synth_start.elapsed().as_millis() as u64,
+            outcome = result.as_ref().ok().map(|r| format!("{:?}", r.outcome)),
+            "synthesis done"
+        );
+        result
     }
 }
 
