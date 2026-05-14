@@ -3,7 +3,7 @@ use crate::checker::multi_review::identity::Identity;
 use crate::checker::multi_review::judge;
 use crate::checker::multi_review::persona::Persona;
 use crate::checker::multi_review::review::{Outcome, UnifiedReview};
-use crate::checker::multi_review::synthesis;
+use crate::checker::multi_review::synthesis::{self, PersonaDraft};
 use crate::github::pr::ChangedFile;
 use std::sync::Arc;
 
@@ -44,25 +44,31 @@ impl<'a> Orchestrator<'a> {
         tracing::info!(files = files.len(), "multi-review orchestration starting");
         let diff = synthesis::render_diff_block(files);
 
-        // R1: parallel persona+synthesis per identity.
-        tracing::info!("R1 starting (parallel persona+synthesis for Barry and Other Barry)");
-        let r1_start = std::time::Instant::now();
-        let barry_r1 = self.run_unified(Identity::Barry, &diff, None);
-        let ob_r1 = self.run_unified(Identity::OtherBarry, &diff, None);
-        let (barry_r1, ob_r1) = tokio::join!(barry_r1, ob_r1);
-        tracing::info!(
-            duration_ms = r1_start.elapsed().as_millis() as u64,
-            "R1 complete"
+        // Phase 1: persona drafts for both identities in parallel.
+        // Drafts depend only on (persona, diff) — same in R1 and R2 — so we
+        // compute them once and reuse for both synthesis rounds.
+        tracing::info!("persona drafts starting (Barry + Other Barry in parallel)");
+        let drafts_start = std::time::Instant::now();
+        let (barry_drafts, ob_drafts) = tokio::join!(
+            self.run_persona_drafts(Identity::Barry, &diff),
+            self.run_persona_drafts(Identity::OtherBarry, &diff),
         );
-
-        let barry_r1 = match barry_r1 {
-            Ok(r) => r,
-            Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
+        tracing::info!(
+            duration_ms = drafts_start.elapsed().as_millis() as u64,
+            "persona drafts complete"
+        );
+        let barry_drafts = match barry_drafts {
+            Ok(d) => d,
+            Err(e) => return Err(anyhow::anyhow!("barry drafts failed: {e}")),
         };
-        let ob_r1 = match ob_r1 {
-            Ok(r) => r,
+        let ob_drafts = match ob_drafts {
+            Ok(d) => d,
             Err(e) => {
-                tracing::warn!(?e, "Other Barry R1 failed; Barry posts alone");
+                tracing::warn!(?e, "Other Barry persona drafts failed; Barry posts alone");
+                let barry_r1 = self
+                    .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
                 tracing::info!(kind = "barry_alone", "verdict");
                 return Ok(Verdict::BarryAlone {
                     barry: barry_r1,
@@ -71,13 +77,37 @@ impl<'a> Orchestrator<'a> {
             }
         };
 
+        // Phase 2: R1 synthesis (no peer) in parallel.
+        tracing::info!("R1 synthesis starting");
+        let r1_start = std::time::Instant::now();
+        let (barry_r1, ob_r1) = tokio::join!(
+            self.synthesize_for(Identity::Barry, &diff, &barry_drafts, None),
+            self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts, None),
+        );
+        let barry_r1 = match barry_r1 {
+            Ok(r) => r,
+            Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
+        };
+        let ob_r1 = match ob_r1 {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(?e, "Other Barry R1 synthesis failed; Barry posts alone");
+                tracing::info!(kind = "barry_alone", "verdict");
+                return Ok(Verdict::BarryAlone {
+                    barry: barry_r1,
+                    reason: format!("Other Barry unavailable: {e}"),
+                });
+            }
+        };
         tracing::info!(
+            duration_ms = r1_start.elapsed().as_millis() as u64,
             barry_outcome = ?barry_r1.outcome,
             ob_outcome = ?ob_r1.outcome,
-            "R1 outcomes"
+            "R1 complete"
         );
 
-        // R2: each reads the other's R1 and may revise.
+        // Phase 3: R2 synthesis — each identity reads the other's R1.
+        // Reuses the R1 drafts; no fresh persona calls.
         let barry_r1_text = serde_json::to_string(&serde_json::json!({
             "outcome": barry_r1.outcome,
             "summary": barry_r1.summary,
@@ -88,11 +118,12 @@ impl<'a> Orchestrator<'a> {
             "summary": ob_r1.summary,
         }))
         .unwrap_or_default();
-        tracing::info!("R2 starting (each identity reads the other's R1)");
+        tracing::info!("R2 synthesis starting (drafts reused from R1)");
         let r2_start = std::time::Instant::now();
-        let barry_r2 = self.run_unified(Identity::Barry, &diff, Some(&ob_r1_text));
-        let ob_r2 = self.run_unified(Identity::OtherBarry, &diff, Some(&barry_r1_text));
-        let (barry_r2, ob_r2) = tokio::join!(barry_r2, ob_r2);
+        let (barry_r2, ob_r2) = tokio::join!(
+            self.synthesize_for(Identity::Barry, &diff, &barry_drafts, Some(&ob_r1_text)),
+            self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts, Some(&barry_r1_text)),
+        );
         let barry_r2 = barry_r2.unwrap_or(barry_r1);
         let ob_r2 = ob_r2.unwrap_or(ob_r1);
         tracing::info!(
@@ -144,22 +175,20 @@ impl<'a> Orchestrator<'a> {
         }
     }
 
-    /// Run all personas in parallel for one identity, then synthesize.
-    async fn run_unified(
+    /// Run every persona in parallel for one identity and collect raw drafts.
+    /// Independent of peer review, so a single call's output is reusable in R1 and R2.
+    async fn run_persona_drafts(
         &self,
         identity: Identity,
         diff: &str,
-        peer: Option<&str>,
-    ) -> anyhow::Result<UnifiedReview> {
-        let round = if peer.is_some() { "R2" } else { "R1" };
+    ) -> anyhow::Result<Vec<PersonaDraft>> {
+        let client = self.clients.for_identity(identity);
+        let max_tokens = self.clients.max_tokens_for(identity);
         tracing::debug!(
             ?identity,
-            round,
             personas = self.personas.len(),
             "persona drafts starting"
         );
-        let client = self.clients.for_identity(identity);
-        let max_tokens = self.clients.max_tokens_for(identity);
 
         let mut futures = Vec::with_capacity(self.personas.len());
         for p in self.personas {
@@ -170,14 +199,14 @@ impl<'a> Orchestrator<'a> {
                 async move { synthesis::run_persona(c.as_ref(), &p, &diff, max_tokens).await },
             );
         }
-        let drafts_start = std::time::Instant::now();
+        let start = std::time::Instant::now();
         let results = futures::future::join_all(futures).await;
         tracing::debug!(
             ?identity,
-            round,
-            duration_ms = drafts_start.elapsed().as_millis() as u64,
+            duration_ms = start.elapsed().as_millis() as u64,
             "persona drafts done"
         );
+
         let mut drafts = Vec::with_capacity(results.len());
         for r in results {
             match r {
@@ -185,14 +214,29 @@ impl<'a> Orchestrator<'a> {
                 Err(e) => return Err(anyhow::anyhow!("persona call failed: {e}")),
             }
         }
-        let synth_start = std::time::Instant::now();
-        let result = synthesis::synthesize(client.as_ref(), &drafts, diff, peer, max_tokens)
+        Ok(drafts)
+    }
+
+    /// Synthesize a unified review from pre-computed persona drafts. Used for
+    /// both R1 (peer=None) and R2 (peer=Some(...)).
+    async fn synthesize_for(
+        &self,
+        identity: Identity,
+        diff: &str,
+        drafts: &[PersonaDraft],
+        peer: Option<&str>,
+    ) -> anyhow::Result<UnifiedReview> {
+        let round = if peer.is_some() { "R2" } else { "R1" };
+        let client = self.clients.for_identity(identity);
+        let max_tokens = self.clients.max_tokens_for(identity);
+        let start = std::time::Instant::now();
+        let result = synthesis::synthesize(client.as_ref(), drafts, diff, peer, max_tokens)
             .await
             .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"));
         tracing::info!(
             ?identity,
             round,
-            duration_ms = synth_start.elapsed().as_millis() as u64,
+            duration_ms = start.elapsed().as_millis() as u64,
             outcome = result.as_ref().ok().map(|r| format!("{:?}", r.outcome)),
             "synthesis done"
         );
@@ -278,10 +322,10 @@ mod tests {
 
     #[tokio::test]
     async fn agreement_returns_agree_with_barry() {
-        // Order: persona R1, synth R1, persona R2, synth R2 — for both identities.
+        // Per identity: 1 persona call, then synth R1, then synth R2 (drafts reused).
         let c = clients(
-            vec![Ok(approve()), Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Ok(approve()), Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
             vec![Ok(agree())],
         );
         let p = personas();
@@ -301,8 +345,8 @@ mod tests {
     #[tokio::test]
     async fn disagreement_returns_both() {
         let c = clients(
-            vec![Ok(approve()), Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Ok(comment()), Ok(comment()), Ok(comment()), Ok(comment())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(comment()), Ok(comment()), Ok(comment())],
             vec![Ok(disagree())],
         );
         let p = personas();
@@ -348,8 +392,8 @@ mod tests {
     #[tokio::test]
     async fn judge_failure_defaults_to_disagree() {
         let c = clients(
-            vec![Ok(approve()), Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Ok(approve()), Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
             vec![Err("judge down")],
         );
         let p = personas();
