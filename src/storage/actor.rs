@@ -1,8 +1,8 @@
+use crate::storage::DbError;
 use crate::storage::audit::AuditEntry;
 use crate::storage::multi_review::{RunKey, RunState};
 use crate::storage::queue::{LeasedJob, NewJob};
 use crate::storage::tokens::CachedToken;
-use crate::storage::DbError;
 use sqlx::{Column, Connection, Row};
 use std::cell::UnsafeCell;
 use std::sync::mpsc;
@@ -173,12 +173,20 @@ where
 }
 
 /// The actor task that owns the SQLite connection and processes commands.
-pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUnsafeSend>, rt: Handle) -> thread::JoinHandle<()> {
+pub(crate) fn run(
+    rx: mpsc::Receiver<ActorCommand>,
+    conn: std::sync::Arc<ConnUnsafeSend>,
+    rt: Handle,
+) -> thread::JoinHandle<()> {
     std::thread::spawn(move || {
         while let Ok(msg) = rx.recv() {
             let raw = conn.0.get();
             match msg {
-                ActorCommand::LeaseNext { now_ts, lease_secs, reply } => {
+                ActorCommand::LeaseNext {
+                    now_ts,
+                    lease_secs,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || async move {
                         sqlx::query(
                             r#"UPDATE jobs
@@ -220,7 +228,12 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::RescheduleAt { job_id, run_after, reason, reply } => {
+                ActorCommand::RescheduleAt {
+                    job_id,
+                    run_after,
+                    reason,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || {
                         let reason = reason.clone();
                         async move {
@@ -239,7 +252,14 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::Nack { job_id, now_ts, error, max_attempts, backoff, reply } => {
+                ActorCommand::Nack {
+                    job_id,
+                    now_ts,
+                    error,
+                    max_attempts,
+                    backoff,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || {
                         let error = error.clone();
                         let backoff = backoff.clone();
@@ -277,7 +297,12 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::Enqueue { job, now_ts, run_after, reply } => {
+                ActorCommand::Enqueue {
+                    job,
+                    now_ts,
+                    run_after,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || {
                         let job = job.clone();
                         async move {
@@ -325,7 +350,13 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::PendingRunAfter { repo_owner, repo_name, pr, event_kind, reply } => {
+                ActorCommand::PendingRunAfter {
+                    repo_owner,
+                    repo_name,
+                    pr,
+                    event_kind,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || {
                         let repo_owner = repo_owner.clone();
                         let repo_name = repo_name.clone();
@@ -347,7 +378,12 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::GetTokenFor { identity, installation_id, now_ts, reply } => {
+                ActorCommand::GetTokenFor {
+                    identity,
+                    installation_id,
+                    now_ts,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || {
                         let identity = identity.clone();
                         async move {
@@ -372,7 +408,13 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::PutTokenFor { identity, installation_id, token, expires_at, reply } => {
+                ActorCommand::PutTokenFor {
+                    identity,
+                    installation_id,
+                    token,
+                    expires_at,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || {
                         let identity = identity.clone();
                         let token = token.clone();
@@ -393,7 +435,11 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::GetToken { installation_id, now_ts, reply } => {
+                ActorCommand::GetToken {
+                    installation_id,
+                    now_ts,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || async move {
                         let row = sqlx::query(
                             "SELECT token, expires_at FROM installation_tokens \
@@ -415,7 +461,12 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::PutToken { installation_id, token, expires_at, reply } => {
+                ActorCommand::PutToken {
+                    installation_id,
+                    token,
+                    expires_at,
+                    reply,
+                } => {
                     let result = retry_busy(&rt, || {
                         let token = token.clone();
                         async move {
@@ -435,7 +486,13 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                     });
                     reply.send(result)
                 }
-                ActorCommand::RecordPost { key, identity, outcome, now_ts, reply } => {
+                ActorCommand::RecordPost {
+                    key,
+                    identity,
+                    outcome,
+                    now_ts,
+                    reply,
+                } => {
                     let col = match identity.as_str() {
                         "barry" => "barry_posted",
                         "other_barry" => "other_barry_posted",
@@ -516,7 +573,9 @@ pub(crate) fn run(rx: mpsc::Receiver<ActorCommand>, conn: std::sync::Arc<ConnUns
                             Ok(row.map(|r| RunState {
                                 barry_posted: r.get::<i64, _>("barry_posted") != 0,
                                 other_barry_posted: r.get::<i64, _>("other_barry_posted") != 0,
-                                other_other_barry_posted: r.get::<i64, _>("other_other_barry_posted") != 0,
+                                other_other_barry_posted: r
+                                    .get::<i64, _>("other_other_barry_posted")
+                                    != 0,
                                 confers_used: r.get::<i64, _>("confers_used") as u32,
                                 last_outcome: r.get("last_outcome"),
                             }))

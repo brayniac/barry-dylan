@@ -54,7 +54,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         pr: job.pr_number,
         head_sha: head_sha.clone(),
     };
- let st = match deps.store.run_state(key.clone()).await? {
+    let st = match deps.store.run_state(key.clone()).await? {
         Some(s) => s,
         None => {
             tracing::info!(%head_sha, "confer with no prior run; replying");

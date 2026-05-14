@@ -16,9 +16,9 @@ pub mod multi_review;
 pub mod queue;
 pub mod tokens;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteSynchronous};
-use sqlx::sqlite::SqliteJournalMode;
 use sqlx::pool::PoolOptions;
+use sqlx::sqlite::SqliteJournalMode;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteSynchronous};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::mpsc;
@@ -137,15 +137,16 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| DbError::Closed)?;
-        let res: Vec<Vec<(String, RawSqliteValue)>> = rx.await
-            .map_err(|_| DbError::Closed)??;
+        let res: Vec<Vec<(String, RawSqliteValue)>> = rx.await.map_err(|_| DbError::Closed)??;
         Ok(res)
     }
 
     /// Helper for tests: execute COUNT(*) query and return the count as i64.
     #[cfg(test)]
     pub async fn count_rows(&self, table: &str) -> anyhow::Result<i64> {
-        let rows = self.query_raw(&format!("SELECT COUNT(*) FROM {table}")).await?;
+        let rows = self
+            .query_raw(&format!("SELECT COUNT(*) FROM {table}"))
+            .await?;
         let row = rows.first().ok_or_else(|| anyhow::anyhow!("no rows"))?;
         let val = row.first().ok_or_else(|| anyhow::anyhow!("no columns"))?;
         match &val.1 {
@@ -168,7 +169,11 @@ mod tests {
             .unwrap();
         let names: Vec<String> = rows
             .iter()
-            .flat_map(|row| row.iter().filter(|(name, _)| name == "name").map(|(_, v)| v))
+            .flat_map(|row| {
+                row.iter()
+                    .filter(|(name, _)| name == "name")
+                    .map(|(_, v)| v)
+            })
             .filter_map(|v| match v {
                 RawSqliteValue::Text(s) => Some(s.clone()),
                 _ => None,

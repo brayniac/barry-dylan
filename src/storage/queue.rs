@@ -1,5 +1,5 @@
-use crate::storage::actor::{ActorCommand, Reply};
 use crate::storage::Store;
+use crate::storage::actor::{ActorCommand, Reply};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone)]
@@ -42,8 +42,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 
@@ -65,8 +64,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        let res: Option<i64> = rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        let res: Option<i64> = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(res)
     }
 }
@@ -87,8 +85,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        let res: Option<LeasedJob> = rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        let res: Option<LeasedJob> = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(res)
     }
 
@@ -100,8 +97,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 
@@ -123,8 +119,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        let res: () = rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        let res: () = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(res)
     }
 
@@ -149,8 +144,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        let res: bool = rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        let res: bool = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(res)
     }
 }
@@ -272,7 +266,7 @@ mod tests {
         assert_eq!(after, Some(130));
     }
 
-  #[tokio::test]
+    #[tokio::test]
     async fn coalesces_pending_job() {
         let s = Store::in_memory().await.unwrap();
         s.enqueue(&job(1, "synchronize", "d1"), 100, 130)

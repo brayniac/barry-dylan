@@ -1,5 +1,5 @@
-use crate::storage::actor::{ActorCommand, Reply};
 use crate::storage::Store;
+use crate::storage::actor::{ActorCommand, Reply};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone)]
@@ -23,15 +23,14 @@ impl Store {
 
         let (tx, rx) = oneshot::channel();
         self.tx
- .send(ActorCommand::GetTokenFor {
+            .send(ActorCommand::GetTokenFor {
                 identity: identity.to_string(),
                 installation_id,
                 now_ts,
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        let result = rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        let result = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
 
         // Write-through cache on hit.
         if let Some(token) = &result {
@@ -59,8 +58,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
 
         // Invalidate cache on successful write.
         self.cache.invalidate(identity, installation_id);

@@ -1,5 +1,5 @@
-use crate::storage::actor::{ActorCommand, Reply};
 use crate::storage::Store;
+use crate::storage::actor::{ActorCommand, Reply};
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone)]
@@ -19,7 +19,7 @@ impl Store {
     pub async fn append_audit(&self, e: &AuditEntry) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.tx
- .send(ActorCommand::AppendAudit {
+            .send(ActorCommand::AppendAudit {
                 entry: AuditEntry {
                     ts: e.ts,
                     delivery_id: e.delivery_id.clone(),
@@ -34,8 +34,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 }

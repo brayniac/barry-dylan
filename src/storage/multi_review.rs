@@ -1,6 +1,6 @@
 use crate::checker::multi_review::identity::Identity;
-use crate::storage::actor::{ActorCommand, Reply};
 use crate::storage::Store;
+use crate::storage::actor::{ActorCommand, Reply};
 use tokio::sync::oneshot;
 
 /// Key for multi-review run state, owned to cross the actor boundary.
@@ -31,7 +31,7 @@ impl Store {
     ) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.tx
- .send(ActorCommand::RecordPost {
+            .send(ActorCommand::RecordPost {
                 key,
                 identity: identity.slug().to_string(),
                 outcome: outcome.to_string(),
@@ -39,8 +39,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 
@@ -53,8 +52,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
     }
 
@@ -66,8 +64,7 @@ impl Store {
                 reply: Reply { tx },
             })
             .map_err(|_| crate::storage::DbError::Closed)?;
-        let res: Option<RunState> = rx.await
-            .map_err(|_| crate::storage::DbError::Closed)??;
+        let res: Option<RunState> = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(res)
     }
 }
@@ -112,7 +109,7 @@ mod tests {
         assert_eq!(st.last_outcome.as_deref(), Some("comment"));
     }
 
-  #[tokio::test]
+    #[tokio::test]
     async fn no_row_for_unknown_sha() {
         let s = Store::in_memory().await.unwrap();
         let old = RunKey {
