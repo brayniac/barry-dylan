@@ -1,5 +1,4 @@
 pub mod hygiene;
-pub mod llm_review;
 pub mod multi_review;
 
 use crate::config::repo::RepoConfig;
@@ -28,7 +27,7 @@ pub struct CheckerOutcome {
     pub status: OutcomeStatus,
     pub summary: String,
     pub text: Option<String>,
-    /// PR-Review inline comments (only LlmReview uses these).
+    /// PR-Review inline comments.
     pub inline_comments: Vec<crate::github::pr::ReviewCommentInput>,
     /// Issue-comment to post in addition (used only for one-shot notices).
     pub issue_comment: Option<String>,

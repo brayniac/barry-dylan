@@ -36,7 +36,7 @@ impl Checker for MultiReviewChecker {
         CHECKER_NAME
     }
     fn enabled(&self, cfg: &RepoConfig) -> bool {
-        cfg.llm_review.enabled
+        cfg.multi_review.enabled
     }
 
     async fn run(&self, ctx: &CheckerCtx) -> anyhow::Result<CheckerOutcome> {
