@@ -148,7 +148,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
                     tracing::error!(checker = name, error = ?e, "checker failed");
-                    CheckerOutcome::neutral(static_name(name), format!("internal error: {e}"))
+                    CheckerOutcome::neutral(static_name(name), "internal error (see logs)")
                 }
                 Err(_) => {
                     tracing::warn!(checker = name, "checker timed out");
