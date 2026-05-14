@@ -73,6 +73,8 @@ pub async fn fixture(server: &MockServer) -> (Store, Arc<JobDeps>) {
         config: cfg,
         pipeline,
         gh_factory: Arc::new(StaticGh { gh }),
+        clients: None,
+        personas: None,
     });
     (store, deps)
 }
@@ -175,8 +177,8 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
 
     let mut pipeline = Pipeline::hygiene_only();
     pipeline.checkers.push(Arc::new(MultiReviewChecker {
-        clients,
-        personas,
+        clients: clients.clone(),
+        personas: personas.clone(),
         gh_factory: factory.clone(),
     }));
 
@@ -185,6 +187,8 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
         config: cfg,
         pipeline: Arc::new(pipeline),
         gh_factory: factory,
+        clients: Some(clients),
+        personas: Some(personas),
     });
     (store, deps)
 }

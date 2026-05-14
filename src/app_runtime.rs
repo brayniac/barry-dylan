@@ -104,12 +104,21 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         store: store.clone(),
     });
 
-    let pipeline = Arc::new(build_pipeline(&cfg, gh_factory.clone())?);
+    let clients = Arc::new(crate::checker::multi_review::clients::build(&cfg)?);
+    let overrides = personas_from_cfg(&cfg.personas);
+    let personas = Arc::new(crate::checker::multi_review::persona::resolve(&overrides)?);
+    let pipeline = Arc::new(build_pipeline_with(
+        clients.clone(),
+        personas.clone(),
+        gh_factory.clone(),
+    ));
     let deps = Arc::new(JobDeps {
         store: store.clone(),
         config: cfg.clone(),
         pipeline: pipeline.clone(),
         gh_factory: gh_factory.clone(),
+        clients: Some(clients),
+        personas: Some(personas),
     });
 
     // Workers.
@@ -153,20 +162,19 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_pipeline(cfg: &Config, gh_factory: Arc<dyn MultiGhFactory>) -> anyhow::Result<Pipeline> {
+fn build_pipeline_with(
+    clients: Arc<crate::checker::multi_review::clients::IdentityClients>,
+    personas: Arc<Vec<crate::checker::multi_review::persona::Persona>>,
+    gh_factory: Arc<dyn MultiGhFactory>,
+) -> Pipeline {
     let mut p = Pipeline::hygiene_only();
-
-    let clients = Arc::new(crate::checker::multi_review::clients::build(cfg)?);
-    let overrides = personas_from_cfg(&cfg.personas);
-    let personas = Arc::new(crate::checker::multi_review::persona::resolve(&overrides)?);
-
     p.checkers
         .push(Arc::new(crate::checker::multi_review::MultiReviewChecker {
             clients,
             personas,
             gh_factory,
         }));
-    Ok(p)
+    p
 }
 
 fn personas_from_cfg(
