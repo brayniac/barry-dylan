@@ -41,6 +41,7 @@ impl Store {
     }
 
     async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
+        migrate_installation_tokens(pool).await?;
         for stmt in SCHEMA.split(';') {
             let s = stmt.trim();
             if !s.is_empty() {
@@ -49,6 +50,25 @@ impl Store {
         }
         Ok(())
     }
+}
+
+async fn migrate_installation_tokens(pool: &SqlitePool) -> anyhow::Result<()> {
+    let cols: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('installation_tokens')")
+            .fetch_all(pool)
+            .await?;
+    let cols: Vec<String> = cols.into_iter().map(|t| t.0).collect();
+    if cols.is_empty() {
+        return Ok(()); // table not yet created
+    }
+    if cols.iter().any(|c| c == "identity") {
+        return Ok(()); // already migrated
+    }
+    tracing::warn!("migrating installation_tokens to identity-scoped schema (cache cleared)");
+    sqlx::query("DROP TABLE installation_tokens")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -68,5 +88,43 @@ mod tests {
         assert!(names.contains(&"installation_tokens".to_string()));
         assert!(names.contains(&"audit_log".to_string()));
         assert!(names.contains(&"multi_review_runs".to_string()));
+    }
+
+    #[tokio::test]
+    async fn migrates_old_installation_tokens_schema() {
+        // Open a raw pool (no migration) and create the pre-PR2 schema.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE installation_tokens \
+             (installation_id INTEGER PRIMARY KEY, token TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO installation_tokens (installation_id, token, expires_at) VALUES (1, 'tok', 9999999999)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Run the full migration.
+        Store::migrate(&pool).await.unwrap();
+
+        // The table should now have an `identity` column.
+        let cols: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_table_info('installation_tokens')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let col_names: Vec<String> = cols.into_iter().map(|t| t.0).collect();
+        assert!(
+            col_names.iter().any(|c| c == "identity"),
+            "expected identity column after migration, got: {col_names:?}"
+        );
     }
 }
