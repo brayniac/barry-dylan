@@ -135,6 +135,8 @@ pub struct PersonaOverridesConfig {
     pub correctness: Option<PersonaOverride>,
     #[serde(default)]
     pub style: Option<PersonaOverride>,
+    #[serde(default)]
+    pub rust: Option<PersonaOverride>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

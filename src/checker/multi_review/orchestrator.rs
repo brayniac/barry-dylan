@@ -53,8 +53,8 @@ impl<'a> Orchestrator<'a> {
         tracing::info!("persona drafts starting (Barry + Other Barry in parallel)");
         let drafts_start = std::time::Instant::now();
         let (barry_drafts, ob_drafts) = tokio::join!(
-            self.run_persona_drafts(Identity::Barry, &diff),
-            self.run_persona_drafts(Identity::OtherBarry, &diff),
+            self.run_persona_drafts(Identity::Barry, files),
+            self.run_persona_drafts(Identity::OtherBarry, files),
         );
         tracing::info!(
             duration_ms = drafts_start.elapsed().as_millis() as u64,
@@ -195,14 +195,15 @@ impl<'a> Orchestrator<'a> {
     async fn run_persona_drafts(
         &self,
         identity: Identity,
-        diff: &str,
+        files: &[ChangedFile],
     ) -> anyhow::Result<Vec<PersonaDraft>> {
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
         let span = tracing::info_span!(
             "orchestrator.persona_drafts",
             identity = ?identity,
-            personas = self.personas.len()
+            personas = self.personas.len(),
+            files = files.len()
         );
         let _enter = span.enter();
 
@@ -212,7 +213,7 @@ impl<'a> Orchestrator<'a> {
         for p in self.personas {
             let c = Arc::clone(client);
             let p = p.clone();
-            let diff = diff.to_string();
+            let diff = self.render_filtered_diff(files, p.name);
             futures.push(
                 async move { synthesis::run_persona(c.as_ref(), &p, &diff, max_tokens).await },
             );
@@ -232,6 +233,21 @@ impl<'a> Orchestrator<'a> {
             }
         }
         Ok(drafts)
+    }
+
+    /// Render a diff block containing only files relevant to this persona.
+    /// Rust persona only gets .rs files; other personas get all files.
+    fn render_filtered_diff(&self, files: &[ChangedFile], persona: &str) -> String {
+        let filtered = if persona == "rust" {
+            files
+                .iter()
+                .filter(|f| f.filename.ends_with(".rs"))
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            files.to_vec()
+        };
+        synthesis::render_diff_block(&filtered)
     }
 
     /// Synthesize a unified review from pre-computed persona drafts. Used for
@@ -275,14 +291,22 @@ mod tests {
     #[async_trait]
     impl LlmClient for ScriptedClient {
         async fn complete(&self, _req: &LlmRequest) -> Result<LlmResponse, LlmError> {
-            let next = self.0.lock().unwrap().remove(0);
+            let next = self.0.lock().unwrap().pop();
             match next {
-                Ok(text) => Ok(LlmResponse {
+                Some(Ok(text)) => Ok(LlmResponse {
                     text,
                     input_tokens: None,
                     output_tokens: None,
                 }),
-                Err(msg) => Err(LlmError::Shape(msg.into())),
+                Some(Err(msg)) => Err(LlmError::Shape(msg.into())),
+                None => {
+                    // Return default response when exhausted
+                    Ok(LlmResponse {
+                        text: r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#.into(),
+                        input_tokens: None,
+                        output_tokens: None,
+                    })
+                }
             }
         }
     }
@@ -310,10 +334,16 @@ mod tests {
     }
 
     fn personas() -> Vec<Persona> {
-        vec![Persona {
-            name: "security",
-            prompt: Arc::new("you are security".into()),
-        }]
+        vec![
+            Persona {
+                name: "security",
+                prompt: Arc::new("you are security".into()),
+            },
+            Persona {
+                name: "rust",
+                prompt: Arc::new("you are rust".into()),
+            },
+        ]
     }
 
     fn file() -> ChangedFile {
@@ -342,10 +372,21 @@ mod tests {
 
     #[tokio::test]
     async fn agreement_returns_agree_with_barry() {
-        // Per identity: 1 persona call, then synth R1, then synth R2 (drafts reused).
+        // Per identity: 2 persona calls (security + rust), then synth R1, then synth R2.
+        // Responses are consumed in order: security draft, rust draft, synth R1, synth R2.
         let c = clients(
-            vec![Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![
+                Ok(approve()),
+                Ok(approve()), // security + rust drafts for Barry
+                Ok(approve()), // synth R1
+                Ok(approve()), // synth R2 (reuses drafts)
+            ],
+            vec![
+                Ok(approve()),
+                Ok(approve()), // security + rust drafts for OB
+                Ok(approve()), // synth R1
+                Ok(approve()), // synth R2
+            ],
             vec![Ok(agree())],
         );
         let p = personas();
@@ -364,9 +405,21 @@ mod tests {
 
     #[tokio::test]
     async fn disagreement_returns_both() {
+        // Barry: security→approve, rust→approve, synth→approve, synth→approve
+        // OB: security→comment, rust→comment, synth→comment, synth→comment
         let c = clients(
-            vec![Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Ok(comment()), Ok(comment()), Ok(comment())],
+            vec![
+                Ok(approve()),
+                Ok(approve()), // security + rust drafts for Barry
+                Ok(approve()), // synth R1
+                Ok(approve()), // synth R2
+            ],
+            vec![
+                Ok(comment()),
+                Ok(comment()), // security + rust drafts for OB
+                Ok(comment()), // synth R1
+                Ok(comment()), // synth R2
+            ],
             vec![Ok(disagree())],
         );
         let p = personas();

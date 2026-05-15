@@ -10,12 +10,14 @@ pub struct Persona {
 const SECURITY: &str = include_str!("prompts/security.md");
 const CORRECTNESS: &str = include_str!("prompts/correctness.md");
 const STYLE: &str = include_str!("prompts/style.md");
+const RUST: &str = include_str!("prompts/rust.md");
 
 #[derive(Debug, Clone, Default)]
 pub struct PersonaOverrides {
     pub security: Option<PathBuf>,
     pub correctness: Option<PathBuf>,
     pub style: Option<PathBuf>,
+    pub rust: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +44,10 @@ pub fn resolve(overrides: &PersonaOverrides) -> Result<Vec<Persona>, PersonaErro
             name: "style",
             prompt: Arc::new(load(overrides.style.as_deref(), STYLE)?),
         },
+        Persona {
+            name: "rust",
+            prompt: Arc::new(load(overrides.rust.as_deref(), RUST)?),
+        },
     ])
 }
 
@@ -63,11 +69,12 @@ mod tests {
     #[test]
     fn defaults_all_loaded() {
         let p = resolve(&PersonaOverrides::default()).unwrap();
-        assert_eq!(p.len(), 3);
+        assert_eq!(p.len(), 4);
         assert_eq!(p[0].name, "security");
         assert!(!p[0].prompt.is_empty());
         assert!(!p[1].prompt.is_empty());
         assert!(!p[2].prompt.is_empty());
+        assert!(!p[3].prompt.is_empty());
     }
 
     #[test]
@@ -92,5 +99,16 @@ mod tests {
         };
         let err = resolve(&ovr).unwrap_err();
         assert!(matches!(err, PersonaError::Io { .. }));
+    }
+
+    #[test]
+    fn rust_persona_prompt_exists() {
+        let p = resolve(&PersonaOverrides::default()).unwrap();
+        let rust_persona = p.iter().find(|persona| persona.name == "rust").unwrap();
+        assert!(!rust_persona.prompt.is_empty());
+        // Verify it mentions key Rust concepts
+        let prompt = rust_persona.prompt.to_lowercase();
+        assert!(prompt.contains("ownership"));
+        assert!(prompt.contains("clone"));
     }
 }

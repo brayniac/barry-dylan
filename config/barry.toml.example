@@ -69,3 +69,14 @@ request_timeout_secs = 60
 [confer]
 allowed = ["author", "write", "maintain", "admin"]
 max_per_pr = 2
+
+# Persona overrides — custom prompts for each reviewer identity.
+# Each persona has a `prompt_path` field to override the default prompt.
+# [personas.security]
+# prompt_path = "/path/to/custom-security.md"
+# [personas.correctness]
+# prompt_path = "/path/to/custom-correctness.md"
+# [personas.style]
+# prompt_path = "/path/to/custom-style.md"
+# [personas.rust]
+# prompt_path = "/path/to/custom-rust.md"

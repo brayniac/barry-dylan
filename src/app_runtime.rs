@@ -191,5 +191,6 @@ fn personas_from_cfg(
         security: p.security.as_ref().and_then(|x| x.prompt_path.clone()),
         correctness: p.correctness.as_ref().and_then(|x| x.prompt_path.clone()),
         style: p.style.as_ref().and_then(|x| x.prompt_path.clone()),
+        rust: p.rust.as_ref().and_then(|x| x.prompt_path.clone()),
     }
 }
