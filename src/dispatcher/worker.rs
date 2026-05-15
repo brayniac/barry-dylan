@@ -2,21 +2,33 @@ use crate::dispatcher::run::{JobDeps, run_job};
 use crate::github::client::GhError;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
 
-pub async fn run_worker(deps: Arc<JobDeps>, lease_secs: i64) {
+pub async fn run_worker(
+    deps: Arc<JobDeps>,
+    lease_secs: i64,
+    mut shutdown: broadcast::Receiver<()>,
+) {
     let backoff = [60i64, 300, 1500];
     loop {
-        let now = now_ts();
-        let leased = match deps.store.lease_next(now, lease_secs).await {
-            Ok(Some(j)) => j,
-            Ok(None) => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
+        let leased = tokio::select! {
+            _ = shutdown.recv() => {
+                tracing::info!("shutdown signal received; stopping worker");
+                break;
             }
-            Err(e) => {
-                tracing::error!(?e, "lease_next failed");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+            leased = deps.store.lease_next(now_ts(), lease_secs) => {
+                match leased {
+                    Ok(Some(j)) => j,
+                    Ok(None) => {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "lease_next failed");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
             }
         };
         let id = leased.id;

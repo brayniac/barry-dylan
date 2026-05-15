@@ -3,6 +3,34 @@ use crate::config::Config;
 use crate::llm::LlmClient;
 use std::fmt;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+/// Wrapper around an LLM client that acquires a semaphore permit before making calls.
+pub struct LlmClientWithSemaphore {
+    inner: Arc<dyn LlmClient>,
+    semaphore: Arc<Semaphore>,
+}
+
+impl LlmClientWithSemaphore {
+    pub fn new(inner: Arc<dyn LlmClient>, semaphore: Arc<Semaphore>) -> Self {
+        Self { inner, semaphore }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for LlmClientWithSemaphore {
+    async fn complete(
+        &self,
+        req: &crate::llm::LlmRequest,
+    ) -> Result<crate::llm::LlmResponse, crate::llm::LlmError> {
+        let _permit = self.semaphore.acquire().await.expect("semaphore closed");
+        self.inner.complete(req).await
+    }
+
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+}
 
 pub struct IdentityClients {
     pub barry: Arc<dyn LlmClient>,
@@ -65,16 +93,31 @@ pub fn build(cfg: &Config) -> anyhow::Result<IdentityClients> {
     let oob = pick("other_other_barry")?;
     let judge = pick("judge")?;
 
-    Ok(IdentityClients {
-        barry: crate::llm::factory::build(b, http(b.request_timeout_secs)?)?,
-        other_barry: crate::llm::factory::build(ob, http(ob.request_timeout_secs)?)?,
-        other_other_barry: crate::llm::factory::build(oob, http(oob.request_timeout_secs)?)?,
-        judge: crate::llm::factory::build(judge, http(judge.request_timeout_secs)?)?,
+    let llm_semaphore = Arc::new(Semaphore::new(10));
+
+    let clients = IdentityClients {
+        barry: Arc::new(LlmClientWithSemaphore::new(
+            crate::llm::factory::build(b, http(b.request_timeout_secs)?)?,
+            llm_semaphore.clone(),
+        )),
+        other_barry: Arc::new(LlmClientWithSemaphore::new(
+            crate::llm::factory::build(ob, http(ob.request_timeout_secs)?)?,
+            llm_semaphore.clone(),
+        )),
+        other_other_barry: Arc::new(LlmClientWithSemaphore::new(
+            crate::llm::factory::build(oob, http(oob.request_timeout_secs)?)?,
+            llm_semaphore.clone(),
+        )),
+        judge: Arc::new(LlmClientWithSemaphore::new(
+            crate::llm::factory::build(judge, http(judge.request_timeout_secs)?)?,
+            llm_semaphore,
+        )),
         barry_max_tokens: b.max_tokens,
         other_barry_max_tokens: ob.max_tokens,
         other_other_barry_max_tokens: oob.max_tokens,
         judge_max_tokens: judge.max_tokens,
-    })
+    };
+    Ok(clients)
 }
 
 #[cfg(test)]

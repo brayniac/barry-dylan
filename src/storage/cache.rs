@@ -1,11 +1,12 @@
 use crate::storage::tokens::CachedToken;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// In-memory read cache for installation tokens.
 /// Intercepts GetTokenFor commands before they hit the actor channel.
 #[derive(Default)]
 pub struct ReadCache {
-    data: parking_lot::Mutex<HashMap<(String, i64), CachedToken>>,
+    data: parking_lot::Mutex<HashMap<(Arc<str>, i64), CachedToken>>,
 }
 
 impl Clone for ReadCache {
@@ -24,7 +25,7 @@ impl ReadCache {
 
     /// Check if a valid cached token exists. Returns None on miss or expiry.
     pub fn get(&self, identity: &str, installation_id: i64, now_ts: i64) -> Option<CachedToken> {
-        let key = (identity.to_string(), installation_id);
+        let key = (Arc::from(identity as &str), installation_id);
         let map = self.data.lock();
         map.get(&key).and_then(|token| {
             // 60s skew margin, same as the DB query logic.
@@ -39,13 +40,13 @@ impl ReadCache {
     /// Write-through cache insert. Called after a successful DB read.
     pub fn put(&self, identity: &str, installation_id: i64, token: CachedToken) {
         let mut map = self.data.lock();
-        map.insert((identity.to_string(), installation_id), token);
+        map.insert((Arc::from(identity as &str), installation_id), token);
     }
 
     /// Invalidate a cache entry. Called after a token update.
     pub fn invalidate(&self, identity: &str, installation_id: i64) {
         let mut map = self.data.lock();
-        map.remove(&(identity.to_string(), installation_id));
+        map.remove(&(Arc::from(identity as &str), installation_id));
     }
 
     /// Invalidate all entries for an installation_id across all identities.

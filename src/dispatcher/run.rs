@@ -128,7 +128,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         repo_cfg: Arc::new(repo_cfg),
         owner: job.repo_owner.clone(),
         repo: job.repo_name.clone(),
-        pr: pr.clone(),
+        pr: Arc::new(pr),
         files,
         prior_bot_reviews: bot_reviews,
         prior_bot_comments: bot_comments,
@@ -140,7 +140,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let store = &deps.store;
     let gh_ref = &gh;
     let job_ref = job;
-    let pr_ref = &pr;
+    let pr_ref = &ctx.pr;
     let ctx_ref = &ctx;
     let rate_limit_reset: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
     let mut tasks = Vec::new();
