@@ -103,6 +103,13 @@ impl LlmClient for TimedClient {
         let result = self.inner.complete(req).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
+        // Record metrics
+        // Note: metrics::Label requires 'static str, but we only have a String.
+        // We use a static placeholder "llm" since the actual client name is
+        // captured in the tracing span anyway.
+        metrics::counter!("barry_llm_calls_total", "client" => "llm").increment(1);
+        metrics::histogram!("barry_llm_duration_ms", "client" => "llm").record(duration_ms as f64);
+
         match &result {
             Ok(resp) => {
                 tracing::info!(

@@ -105,8 +105,29 @@ impl GitHub {
         // Up to 3 attempts on 5xx / 429.
         let mut delay = Duration::from_millis(250);
         for attempt in 0..3u32 {
+            let start = Instant::now();
             let resp = req.try_clone().expect("clonable request").send().await?;
+            let duration_ms = start.elapsed().as_millis() as u64;
             let status = resp.status();
+
+            // Record GitHub API metrics
+            // Convert Method to static string; extensions default to "EXTENSION"
+            let method_str = match method {
+                Method::GET => "GET",
+                Method::POST => "POST",
+                Method::PUT => "PUT",
+                Method::PATCH => "PATCH",
+                Method::DELETE => "DELETE",
+                Method::HEAD => "HEAD",
+                Method::OPTIONS => "OPTIONS",
+                Method::TRACE => "TRACE",
+                Method::CONNECT => "CONNECT",
+                _ => "EXTENSION",
+            };
+            metrics::counter!("barry_github_api_calls_total", "method" => method_str).increment(1);
+            metrics::histogram!("barry_github_api_duration_ms", "method" => method_str)
+                .record(duration_ms as f64);
+
             if status.is_success() {
                 return Ok(resp);
             }

@@ -146,6 +146,12 @@ fn is_busy_error(err: &sqlx::Error) -> bool {
     }
 }
 
+/// Record timing for a database operation.
+fn record_db_timing(operation: &'static str, duration_ms: u64) {
+    metrics::histogram!("barry_db_duration_ms", "operation" => operation)
+        .record(duration_ms as f64);
+}
+
 /// Retry a closure with exponential backoff on SQLITE_BUSY.
 /// Takes a blocking closure that returns a future; uses Handle::block_on to run it.
 fn retry_busy<F, Fut, T>(handle: &Handle, mut f: F) -> Result<T, DbError>
@@ -187,6 +193,7 @@ pub(crate) fn run(
                     lease_secs,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || async move {
                         sqlx::query(
                             r#"UPDATE jobs
@@ -216,9 +223,13 @@ pub(crate) fn run(
                         delivery_id: row.get("delivery_id"),
                         attempts: row.get("attempts"),
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    metrics::histogram!("barry_db_duration_ms", "operation" => "lease_next")
+                        .record(duration_ms as f64);
                     reply.send(Ok(job))
                 }
                 ActorCommand::Ack { job_id, reply } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || async move {
                         sqlx::query("DELETE FROM jobs WHERE id = ?1")
                             .bind(job_id)
@@ -226,6 +237,8 @@ pub(crate) fn run(
                             .await
                             .map(|_| ())
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("ack", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::RescheduleAt {
@@ -234,6 +247,7 @@ pub(crate) fn run(
                     reason,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let reason = reason.clone();
                         async move {
@@ -250,6 +264,8 @@ pub(crate) fn run(
                             .map(|_| ())
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("reschedule", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::Nack {
@@ -260,6 +276,7 @@ pub(crate) fn run(
                     backoff,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let error = error.clone();
                         let backoff = backoff.clone();
@@ -295,6 +312,8 @@ pub(crate) fn run(
                             Ok(true)
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("nack", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::Enqueue {
@@ -303,6 +322,7 @@ pub(crate) fn run(
                     run_after,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let job = job.clone();
                         async move {
@@ -348,6 +368,8 @@ pub(crate) fn run(
                             Ok(())
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("enqueue", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::PendingRunAfter {
@@ -357,6 +379,7 @@ pub(crate) fn run(
                     event_kind,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let repo_owner = repo_owner.clone();
                         let repo_name = repo_name.clone();
@@ -376,6 +399,8 @@ pub(crate) fn run(
                             Ok(row.map(|r| r.get::<i64, _>("run_after")))
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("pending_run_after", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::GetTokenFor {
@@ -384,6 +409,7 @@ pub(crate) fn run(
                     now_ts,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let identity = identity.clone();
                         async move {
@@ -406,6 +432,8 @@ pub(crate) fn run(
                             }))
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("get_token_for", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::PutTokenFor {
@@ -415,6 +443,7 @@ pub(crate) fn run(
                     expires_at,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let identity = identity.clone();
                         let token = token.clone();
@@ -433,6 +462,8 @@ pub(crate) fn run(
                             .map(|_| ())
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("put_token_for", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::GetToken {
@@ -440,6 +471,7 @@ pub(crate) fn run(
                     now_ts,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || async move {
                         let row = sqlx::query(
                             "SELECT token, expires_at FROM installation_tokens \
@@ -459,6 +491,8 @@ pub(crate) fn run(
                             }
                         }))
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("get_token", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::PutToken {
@@ -467,6 +501,7 @@ pub(crate) fn run(
                     expires_at,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let token = token.clone();
                         async move {
@@ -484,6 +519,8 @@ pub(crate) fn run(
                             .map(|_| ())
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("put_token", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::RecordPost {
@@ -493,6 +530,7 @@ pub(crate) fn run(
                     now_ts,
                     reply,
                 } => {
+                    let start = std::time::Instant::now();
                     let col = match identity.as_str() {
                         "barry" => "barry_posted",
                         "other_barry" => "other_barry_posted",
@@ -525,9 +563,12 @@ pub(crate) fn run(
                                 .map(|_| ())
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("record_post", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::RecordConferUsed { key, now_ts, reply } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let owner = key.owner.clone();
                         let repo = key.repo.clone();
@@ -550,9 +591,12 @@ pub(crate) fn run(
                             .map(|_| ())
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("record_confer_used", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::RunState { key, reply } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let owner = key.owner.clone();
                         let repo = key.repo.clone();
@@ -581,9 +625,12 @@ pub(crate) fn run(
                             }))
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("run_state", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::AppendAudit { entry, reply } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let delivery_id = entry.delivery_id.clone();
                         let repo_owner = entry.repo_owner.clone();
@@ -611,9 +658,12 @@ pub(crate) fn run(
                             .map(|_| ())
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("append_audit", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::RawQuery { sql, reply } => {
+                    let start = std::time::Instant::now();
                     let result = retry_busy(&rt, || {
                         let sql = sql.clone();
                         async move {
@@ -641,6 +691,8 @@ pub(crate) fn run(
                             Ok(all_rows)
                         }
                     });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("raw_query", duration_ms);
                     reply.send(result)
                 }
             };
