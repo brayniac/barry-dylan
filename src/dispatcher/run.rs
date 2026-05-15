@@ -142,14 +142,14 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let job_ref = job;
     let pr_ref = &pr;
     let ctx_ref = &ctx;
-    let rate_limit: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
+    let rate_limit_reset: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
     let mut tasks = Vec::new();
     for chk in &deps.pipeline.checkers {
         if !chk.enabled(&ctx.repo_cfg) {
             continue;
         }
         let chk = chk.clone();
-        let rate_limit = rate_limit.clone();
+        let rate_limit_reset = rate_limit_reset.clone();
         let checker_name = chk.name();
         tasks.push(async move {
             let span = tracing::info_span!(
@@ -185,7 +185,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
             );
             if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome).await {
                 if let Some(GhError::RateLimited { reset_in_secs }) = e.downcast_ref::<GhError>() {
-                    rate_limit.fetch_max(*reset_in_secs, Ordering::SeqCst);
+                    rate_limit_reset.fetch_max(*reset_in_secs, Ordering::SeqCst);
                     tracing::warn!(reset_in_secs, "post_outcome rate limited");
                 } else {
                     tracing::error!(error = ?e, "post_outcome failed");
@@ -207,7 +207,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         });
     }
     futures::future::join_all(tasks).await;
-    let reset_in_secs = rate_limit.load(Ordering::SeqCst);
+    let reset_in_secs = rate_limit_reset.load(Ordering::SeqCst);
     if reset_in_secs > 0 {
         return Err(GhError::RateLimited { reset_in_secs }.into());
     }
