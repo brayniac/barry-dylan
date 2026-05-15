@@ -7,7 +7,6 @@ pub fn init_tracing() {
 
     // Human-readable text to stderr for operators reading in the terminal.
     let text_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(true)
         .with_target(true)
         .with_thread_ids(false)
         .with_thread_names(false)
