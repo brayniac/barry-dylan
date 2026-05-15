@@ -24,8 +24,8 @@ impl ReadCache {
 
     /// Check if a valid cached token exists. Returns None on miss or expiry.
     pub fn get(&self, identity: &str, installation_id: i64, now_ts: i64) -> Option<CachedToken> {
-        let map = self.data.lock();
         let key = (identity.to_string(), installation_id);
+        let map = self.data.lock();
         map.get(&key).and_then(|token| {
             // 60s skew margin, same as the DB query logic.
             if token.expires_at - 60 > now_ts {
