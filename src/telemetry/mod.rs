@@ -7,11 +7,6 @@ pub fn init_tracing() {
 
     // Human-readable text to stderr for operators reading in the terminal.
     let text_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_thread_names(false)
-        .with_file(false)
-        .with_line_number(false)
         .with_writer(std::io::stderr);
 
     // Structured JSON to stdout for log aggregation / monitoring.
