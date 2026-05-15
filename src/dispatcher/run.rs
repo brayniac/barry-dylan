@@ -7,8 +7,8 @@ use crate::github::client::{GhError, GitHub};
 use crate::github::pr::{BotComment, PullRequest, ReviewInput};
 use crate::storage::Store;
 use crate::storage::queue::LeasedJob;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 pub struct Pipeline {
@@ -150,12 +150,11 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         }
         let chk = chk.clone();
         let rate_limit = rate_limit.clone();
-        let checker_name_static = chk.name();
-        let checker_name_owned = checker_name_static.to_string();
+        let checker_name = chk.name();
         tasks.push(async move {
             let span = tracing::info_span!(
                 "checker.run",
-                checker = checker_name_owned,
+                checker = checker_name,
                 pr = job_ref.pr_number,
                 owner = %job_ref.repo_owner,
                 repo = %job_ref.repo_name
@@ -170,16 +169,16 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
                     tracing::error!(error = ?e, "checker failed");
-                    CheckerOutcome::neutral(checker_name_static, "internal error (see logs)")
+                    CheckerOutcome::neutral(checker_name, "internal error (see logs)")
                 }
                 Err(_) => {
                     let timeout_msg = format!("timed out after {}s", checker_timeout.as_secs());
                     tracing::warn!(timeout_msg, "checker timed out");
-                    CheckerOutcome::neutral(checker_name_static, &timeout_msg)
+                    CheckerOutcome::neutral(checker_name, &timeout_msg)
                 }
             };
             tracing::info!(
-                checker = checker_name_static,
+                checker = checker_name,
                 status = status_str(outcome.status),
                 duration_ms = dur.as_millis() as u64,
                 "checker completed"
@@ -199,7 +198,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                     repo_owner: Some(job_ref.repo_owner.clone()),
                     repo_name: Some(job_ref.repo_name.clone()),
                     pr_number: Some(job_ref.pr_number),
-                    checker_name: Some(checker_name_static.to_string()),
+                    checker_name: Some(checker_name.to_string()),
                     outcome: status_str(outcome.status).to_string(),
                     duration_ms: Some(dur.as_millis() as i64),
                     details: None,
@@ -390,7 +389,7 @@ async fn post_outcome(
         status: CheckStatus::Completed,
         conclusion: Some(conclusion),
         output: CheckOutput {
-            title: o.checker_name.to_string().into(),
+            title: o.checker_name.to_string(),
             summary: o.summary.clone(),
             text: o.text.clone(),
         },
@@ -436,7 +435,6 @@ async fn post_outcome(
     }
     Ok(())
 }
-
 
 fn status_str(s: OutcomeStatus) -> &'static str {
     match s {
