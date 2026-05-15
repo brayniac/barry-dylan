@@ -111,7 +111,7 @@ impl GitHub {
             let status = resp.status();
 
             // Record GitHub API metrics
-            // Convert Method to static string; extensions default to "EXTENSION"
+            // Use a match to get static string from Method
             let method_str = match method {
                 Method::GET => "GET",
                 Method::POST => "POST",

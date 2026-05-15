@@ -224,8 +224,7 @@ pub(crate) fn run(
                         attempts: row.get("attempts"),
                     });
                     let duration_ms = start.elapsed().as_millis() as u64;
-                    metrics::histogram!("barry_db_duration_ms", "operation" => "lease_next")
-                        .record(duration_ms as f64);
+                    record_db_timing("lease_next", duration_ms);
                     reply.send(Ok(job))
                 }
                 ActorCommand::Ack { job_id, reply } => {
