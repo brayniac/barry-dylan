@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::broadcast;
 
 pub struct AppGhFactory {
     pub barry: Arc<AppCreds>,
@@ -122,10 +123,14 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     });
 
     // Workers.
+    let (shutdown_tx, _) = broadcast::channel(1);
     for _ in 0..cfg.dispatcher.worker_count {
         let deps = deps.clone();
         let lease = cfg.dispatcher.job_timeout_secs as i64;
-        tokio::spawn(async move { crate::dispatcher::worker::run_worker(deps, lease).await });
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            crate::dispatcher::worker::run_worker(deps, lease, shutdown_rx).await
+        });
     }
 
     // HTTP server.
@@ -158,6 +163,8 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
             }
         }
     }
+    // Broadcast shutdown to all workers
+    let _ = shutdown_tx.send(());
     server_task.abort();
     Ok(())
 }

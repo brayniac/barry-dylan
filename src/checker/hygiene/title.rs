@@ -45,7 +45,7 @@ mod tests {
             repo_cfg: Arc::new(cfg),
             owner: "o".into(),
             repo: "r".into(),
-            pr: PullRequest {
+            pr: Arc::new(PullRequest {
                 number: 1,
                 title: title.into(),
                 body: None,
@@ -63,7 +63,7 @@ mod tests {
                 additions: 0,
                 deletions: 0,
                 changed_files: 0,
-            },
+            }),
             files: vec![],
             prior_bot_reviews: vec![],
             prior_bot_comments: vec![],

@@ -147,7 +147,7 @@ pub struct CheckerCtx {
     pub repo_cfg: Arc<RepoConfig>,
     pub owner: String,
     pub repo: String,
-    pub pr: PullRequest,
+    pub pr: Arc<PullRequest>,
     pub files: Vec<ChangedFile>,
     pub prior_bot_reviews: Vec<BotComment>,
     pub prior_bot_comments: Vec<BotComment>,

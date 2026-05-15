@@ -75,7 +75,7 @@ mod tests {
             repo_cfg: Arc::new(cfg),
             owner: "o".into(),
             repo: "r".into(),
-            pr,
+            pr: Arc::new(pr),
             files: vec![],
             prior_bot_reviews: vec![],
             prior_bot_comments: vec![],
