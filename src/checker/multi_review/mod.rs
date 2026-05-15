@@ -32,8 +32,8 @@ pub struct MultiReviewChecker {
 
 #[async_trait]
 impl Checker for MultiReviewChecker {
-    fn name(&self) -> String {
-        CHECKER_NAME.to_string()
+    fn name(&self) -> &'static str {
+        CHECKER_NAME
     }
     fn enabled(&self, cfg: &RepoConfig) -> bool {
         cfg.multi_review.enabled
@@ -177,7 +177,7 @@ impl Checker for MultiReviewChecker {
         };
         tracing::info!(?status, "multi-review checker done");
         Ok(CheckerOutcome {
-            checker_name: CHECKER_NAME.to_string(),
+            checker_name: CHECKER_NAME,
             status,
             summary,
             text: None,

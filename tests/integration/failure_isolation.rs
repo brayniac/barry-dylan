@@ -9,8 +9,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 struct AlwaysFail;
 #[async_trait]
 impl Checker for AlwaysFail {
-    fn name(&self) -> String {
-        "barry/test.fail".to_string()
+    fn name(&self) -> &'static str {
+        "barry/test.fail"
     }
     fn enabled(&self, _: &RepoConfig) -> bool {
         true

@@ -7,8 +7,8 @@ pub struct TitleChecker;
 
 #[async_trait]
 impl Checker for TitleChecker {
-    fn name(&self) -> String {
-        "barry/hygiene.title".to_string()
+    fn name(&self) -> &'static str {
+        "barry/hygiene.title"
     }
     fn enabled(&self, cfg: &RepoConfig) -> bool {
         cfg.hygiene.title.enabled

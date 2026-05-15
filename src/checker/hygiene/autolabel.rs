@@ -8,8 +8,8 @@ pub struct AutolabelChecker;
 
 #[async_trait]
 impl Checker for AutolabelChecker {
-    fn name(&self) -> String {
-        "barry/hygiene.autolabel".to_string()
+    fn name(&self) -> &'static str {
+        "barry/hygiene.autolabel"
     }
     fn enabled(&self, cfg: &RepoConfig) -> bool {
         cfg.hygiene.autolabel.enabled

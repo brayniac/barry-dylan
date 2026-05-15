@@ -103,7 +103,7 @@ pub enum OutcomeStatus {
 /// Result of running a checker on a PR.
 #[derive(Debug, Clone)]
 pub struct CheckerOutcome {
-    pub checker_name: String,
+    pub checker_name: &'static str,
     pub status: OutcomeStatus,
     pub summary: String,
     pub text: Option<String>,
@@ -116,9 +116,9 @@ pub struct CheckerOutcome {
 }
 
 impl CheckerOutcome {
-    pub fn neutral(name: impl Into<String>, summary: impl Into<String>) -> Self {
+    pub fn neutral(name: &'static str, summary: impl Into<String>) -> Self {
         Self {
-            checker_name: name.into(),
+            checker_name: name,
             status: OutcomeStatus::Neutral,
             summary: summary.into(),
             text: None,
@@ -127,13 +127,13 @@ impl CheckerOutcome {
             add_labels: vec![],
         }
     }
-    pub fn success(name: impl Into<String>, summary: impl Into<String>) -> Self {
+    pub fn success(name: &'static str, summary: impl Into<String>) -> Self {
         Self {
             status: OutcomeStatus::Success,
             ..Self::neutral(name, summary)
         }
     }
-    pub fn failure(name: impl Into<String>, summary: impl Into<String>) -> Self {
+    pub fn failure(name: &'static str, summary: impl Into<String>) -> Self {
         Self {
             status: OutcomeStatus::Failure,
             ..Self::neutral(name, summary)
@@ -159,7 +159,7 @@ pub struct CheckerCtx {
 #[async_trait]
 pub trait Checker: Send + Sync {
     /// Name of the checker (used for logging and metrics).
-    fn name(&self) -> String;
+    fn name(&self) -> &'static str;
     /// Whether this checker is enabled for the given repo config.
     fn enabled(&self, cfg: &RepoConfig) -> bool;
     /// Run the checker on the PR and return an outcome.

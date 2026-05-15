@@ -6,8 +6,8 @@ pub struct SizeChecker;
 
 #[async_trait]
 impl Checker for SizeChecker {
-    fn name(&self) -> String {
-        "barry/hygiene.size".to_string()
+    fn name(&self) -> &'static str {
+        "barry/hygiene.size"
     }
     fn enabled(&self, cfg: &RepoConfig) -> bool {
         cfg.hygiene.size.enabled
