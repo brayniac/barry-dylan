@@ -6,8 +6,7 @@ pub fn init_tracing() {
         .unwrap_or_else(|_| EnvFilter::new("info,barry_dylan=debug"));
 
     // Human-readable text to stderr for operators reading in the terminal.
-    let text_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr);
+    let text_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
     // Structured JSON to stdout for log aggregation / monitoring.
     let json_layer = tracing_subscriber::fmt::layer().json();
