@@ -108,6 +108,7 @@ impl<'a> Orchestrator<'a> {
         let (ob_r1, ob_r1_tokens) = match ob_r1_res {
             Ok(t) => t,
             Err(e) => {
+                self.tracker.add_tokens(self.job_id, barry_r1_tokens.input, barry_r1_tokens.output);
                 tracing::warn!(?e, "Other Barry R1 synthesis failed; Barry posts alone");
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
@@ -488,8 +489,9 @@ mod tests {
 
     #[tokio::test]
     async fn ob_failure_yields_barry_alone() {
+        // Barry: 2 persona drafts + 1 R1 synthesis (OB draft fails so Barry synths alone)
         let c = clients(
-            vec![Ok(approve()), Ok(approve())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
             vec![Err("ob down")],
             vec![],
         );
