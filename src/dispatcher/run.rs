@@ -96,6 +96,11 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let prior_comments = pr_ctx.comments;
     let prior_reviews = pr_ctx.reviews;
 
+    if pr.state != "open" {
+        tracing::info!(state = %pr.state, "PR is no longer open; aborting review");
+        return Ok(());
+    }
+
     let perm = gh
         .author_permission(&job.repo_owner, &job.repo_name, &pr.user.login)
         .await
