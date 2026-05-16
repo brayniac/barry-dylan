@@ -10,7 +10,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     run_after INTEGER NOT NULL,
     leased_until INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
+    last_error TEXT,
+    -- GitHub login of the user who triggered the event. Set for issue_comment
+    -- commands (the comment author), null for system events. Used to authorize
+    -- /barry confer and /barry approve against the actual issuer rather than
+    -- relying on a last-commenter heuristic.
+    actor TEXT
 );
 
 -- Partial unique index: at most one pending job per (repo, pr, event_kind).

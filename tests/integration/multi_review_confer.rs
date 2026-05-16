@@ -126,6 +126,7 @@ async fn confer_summons_other_barry_after_barry_posted() {
         pr_number: 1,
         event_kind: "issue_comment.confer".into(),
         delivery_id: "d-confer".into(),
+        actor: Some("alice".into()),
     };
     store.enqueue(&job, 0, 0).await.unwrap();
     let leased = store.lease_next(0, 300).await.unwrap().unwrap();
@@ -207,6 +208,7 @@ async fn confer_rejected_when_max_per_pr_reached() {
         pr_number: 1,
         event_kind: "issue_comment.confer".into(),
         delivery_id: "d-confer-max".into(),
+        actor: Some("alice".into()),
     };
     store.enqueue(&job, 0, 0).await.unwrap();
     let leased = store.lease_next(0, 300).await.unwrap().unwrap();

@@ -219,7 +219,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                     duration_ms = dur.as_millis() as u64,
                     "checker completed"
                 );
-                if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome).await {
+                if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome, &cancel).await {
                     if let Some(GhError::RateLimited { reset_in_secs }) =
                         e.downcast_ref::<GhError>()
                     {
@@ -304,7 +304,21 @@ async fn handle_command(
 
     match cmd {
         BarryCommand::Approve => {
-            tracing::info!("approving PR for review");
+            // Only maintainers (write/admin) can trust an untrusted PR author.
+            // Authorize the issuer threaded through from the webhook.
+            let Some(actor) = job.actor.clone() else {
+                tracing::warn!("approve job missing actor field; ignoring");
+                return Ok(());
+            };
+            let perm = gh
+                .author_permission(&job.repo_owner, &job.repo_name, &actor)
+                .await
+                .unwrap_or_else(|_| "read".into());
+            if !matches!(perm.as_str(), "admin" | "maintain" | "write") {
+                tracing::info!(%actor, %perm, "approve rejected (unauthorized)");
+                return Ok(());
+            }
+            tracing::info!(%actor, "approving PR for review");
             gh.create_issue_comment(
                 &job.repo_owner,
                 &job.repo_name,
@@ -323,6 +337,7 @@ async fn handle_command(
                         pr_number: job.pr_number,
                         event_kind: "pull_request.opened".into(),
                         delivery_id: job.delivery_id.clone(),
+                        actor: None,
                     },
                     now,
                     now,
@@ -341,6 +356,7 @@ async fn handle_command(
                         pr_number: job.pr_number,
                         event_kind: "pull_request.opened".into(),
                         delivery_id: job.delivery_id.clone(),
+                        actor: None,
                     },
                     now,
                     now,
@@ -426,6 +442,7 @@ async fn post_outcome(
     job: &LeasedJob,
     pr: &PullRequest,
     o: &CheckerOutcome,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let span = tracing::info_span!(
         "checker.post_outcome",
@@ -440,6 +457,16 @@ async fn post_outcome(
         }
     );
     async {
+        // Re-check cancellation between each remote call. Without this, a close
+        // event arriving mid-`post_outcome` could leave us partially posted
+        // (e.g. a check-run created but no inline review or issue comment).
+        if cancel.is_cancelled() {
+            tracing::info!(
+                checker = o.checker_name,
+                "post_outcome cancelled before check-run"
+            );
+            return Ok(());
+        }
         let conclusion = match o.status {
             OutcomeStatus::Success => CheckConclusion::Success,
             OutcomeStatus::Neutral => CheckConclusion::Neutral,
@@ -460,6 +487,13 @@ async fn post_outcome(
             .create_check_run(&job.repo_owner, &job.repo_name, &input)
             .await?;
         tracing::debug!(checker = o.checker_name, conclusion = ?conclusion, "check-run posted");
+        if cancel.is_cancelled() {
+            tracing::info!(
+                checker = o.checker_name,
+                "post_outcome cancelled after check-run"
+            );
+            return Ok(());
+        }
         if !o.add_labels.is_empty() {
             gh.add_labels(
                 &job.repo_owner,
@@ -469,6 +503,13 @@ async fn post_outcome(
             )
             .await?;
             tracing::debug!(checker = o.checker_name, labels = ?o.add_labels, "labels added");
+            if cancel.is_cancelled() {
+                tracing::info!(
+                    checker = o.checker_name,
+                    "post_outcome cancelled after labels"
+                );
+                return Ok(());
+            }
         }
         if !o.inline_comments.is_empty() {
             let review = ReviewInput {
@@ -484,6 +525,13 @@ async fn post_outcome(
                 inline_comments = o.inline_comments.len(),
                 "pr review posted"
             );
+            if cancel.is_cancelled() {
+                tracing::info!(
+                    checker = o.checker_name,
+                    "post_outcome cancelled after review"
+                );
+                return Ok(());
+            }
         }
         if let Some(body) = &o.issue_comment {
             let _ = gh
@@ -509,9 +557,4 @@ fn status_str(s: OutcomeStatus) -> &'static str {
     }
 }
 
-fn now_ts() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
+use crate::util::now_ts;

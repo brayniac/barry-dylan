@@ -204,12 +204,7 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").chars().take(140).collect()
 }
 
-fn now_ts() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
+use crate::util::now_ts;
 
 fn installation_id_from_ctx(ctx: &CheckerCtx) -> anyhow::Result<i64> {
     ctx.installation_id

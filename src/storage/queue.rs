@@ -10,6 +10,10 @@ pub struct NewJob {
     pub pr_number: i64,
     pub event_kind: String,
     pub delivery_id: String,
+    /// GitHub login of the user who triggered the event. None for system
+    /// events (e.g. PR opened); Some(login) for `issue_comment` commands so
+    /// the dispatcher can authorize the issuer.
+    pub actor: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +26,7 @@ pub struct LeasedJob {
     pub event_kind: String,
     pub delivery_id: String,
     pub attempts: i64,
+    pub actor: Option<String>,
 }
 
 impl Store {
@@ -181,6 +186,7 @@ mod lease_tests {
             pr_number: pr,
             event_kind: "synchronize".into(),
             delivery_id: "d".into(),
+            actor: None,
         }
     }
 
@@ -270,6 +276,7 @@ mod tests {
             pr_number: pr,
             event_kind: kind.into(),
             delivery_id: delivery.into(),
+            actor: None,
         }
     }
 
