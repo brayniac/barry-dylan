@@ -19,6 +19,7 @@ use crate::checker::multi_review::posting::post_review;
 use crate::checker::{Checker, CheckerCtx, CheckerOutcome, OutcomeStatus};
 use crate::config::repo::RepoConfig;
 use crate::dispatcher::run::MultiGhFactory;
+use crate::telemetry::status::StatusTracker;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ pub struct MultiReviewChecker {
     pub clients: Arc<IdentityClients>,
     pub personas: Arc<Vec<Persona>>,
     pub gh_factory: Arc<dyn MultiGhFactory>,
+    pub status_tracker: Arc<StatusTracker>,
 }
 
 #[async_trait]
@@ -56,6 +58,8 @@ impl Checker for MultiReviewChecker {
         let orchestrator = Orchestrator {
             clients: &self.clients,
             personas: &self.personas,
+            tracker: self.status_tracker.clone(),
+            job_id: ctx.job_id,
         };
         let verdict = orchestrator.run(&ctx.files).await?;
         let orchestrator_duration = start.elapsed();

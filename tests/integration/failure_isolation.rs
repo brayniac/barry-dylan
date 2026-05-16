@@ -73,6 +73,7 @@ async fn one_checker_error_does_not_block_others() {
         gh_factory: Arc::new(crate::common::StaticGh { gh }),
         clients: None,
         personas: None,
+        status_tracker: Arc::new(barry_dylan::telemetry::status::StatusTracker::new()),
     });
 
     crate::common::enqueue_opened(&store, "o", "r", 1).await;

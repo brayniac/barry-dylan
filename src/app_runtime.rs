@@ -4,6 +4,7 @@ use crate::dispatcher::run::{GhFactory, JobDeps, MultiGhFactory, Pipeline};
 use crate::github::app::AppCreds;
 use crate::github::client::GitHub;
 use crate::storage::Store;
+use crate::telemetry::status::StatusTracker;
 use crate::webhook::server::AppState;
 use async_trait::async_trait;
 use std::path::Path;
@@ -93,6 +94,8 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
 
     let store = Store::open(&cfg.storage.sqlite_path).await?;
     let metrics = crate::telemetry::install_metrics();
+    let status_tracker = Arc::new(StatusTracker::new());
+    crate::telemetry::spawn_status_ticker(status_tracker.clone());
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
@@ -112,6 +115,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         clients.clone(),
         personas.clone(),
         gh_factory.clone(),
+        status_tracker.clone(),
     ));
     let deps = Arc::new(JobDeps {
         store: store.clone(),
@@ -120,6 +124,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         gh_factory: gh_factory.clone(),
         clients: Some(clients),
         personas: Some(personas),
+        status_tracker: status_tracker.clone(),
     });
 
     // Workers.
@@ -173,6 +178,7 @@ fn build_pipeline_with(
     clients: Arc<crate::checker::multi_review::clients::IdentityClients>,
     personas: Arc<Vec<crate::checker::multi_review::persona::Persona>>,
     gh_factory: Arc<dyn MultiGhFactory>,
+    status_tracker: Arc<StatusTracker>,
 ) -> Pipeline {
     let mut p = Pipeline::hygiene_only();
     p.checkers
@@ -180,6 +186,7 @@ fn build_pipeline_with(
             clients,
             personas,
             gh_factory,
+            status_tracker,
         }));
     p
 }

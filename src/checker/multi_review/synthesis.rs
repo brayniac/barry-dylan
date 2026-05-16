@@ -5,6 +5,12 @@ use crate::llm::{LlmClient, LlmError, LlmMessage, LlmRequest, Role};
 
 const SYNTHESIS_TEMPLATE: &str = include_str!("prompts/synthesis.md");
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokenCount {
+    pub input: u64,
+    pub output: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SynthesisError {
     #[error("llm: {0}")]
@@ -16,6 +22,7 @@ pub enum SynthesisError {
 pub struct PersonaDraft {
     pub persona: &'static str,
     pub raw: String,
+    pub tokens: TokenCount,
 }
 
 /// Run a single persona prompt over the diff and return its raw text output.
@@ -43,6 +50,10 @@ pub async fn run_persona(
     Ok(PersonaDraft {
         persona: persona.name,
         raw: resp.text,
+        tokens: TokenCount {
+            input: u64::from(resp.input_tokens.unwrap_or(0)),
+            output: u64::from(resp.output_tokens.unwrap_or(0)),
+        },
     })
 }
 
@@ -53,7 +64,7 @@ pub async fn synthesize(
     diff_block: &str,
     prior_peer_review: Option<&str>,
     max_tokens: u32,
-) -> Result<UnifiedReview, SynthesisError> {
+) -> Result<(UnifiedReview, TokenCount), SynthesisError> {
     let mut user = String::from(SYNTHESIS_TEMPLATE);
     user.push_str("\n\n=== persona drafts ===\n");
     for d in drafts {
@@ -74,7 +85,11 @@ pub async fn synthesize(
         temperature: 0.0,
     };
     let resp = client.complete(&req).await?;
-    Ok(parse(&resp.text)?)
+    let tokens = TokenCount {
+        input: u64::from(resp.input_tokens.unwrap_or(0)),
+        output: u64::from(resp.output_tokens.unwrap_or(0)),
+    };
+    Ok((parse(&resp.text)?, tokens))
 }
 
 /// Render a diff block from changed files, suitable for embedding in a user message.
@@ -161,13 +176,15 @@ mod tests {
             PersonaDraft {
                 persona: "security",
                 raw: "sec-draft".into(),
+                tokens: TokenCount::default(),
             },
             PersonaDraft {
                 persona: "style",
                 raw: "style-draft".into(),
+                tokens: TokenCount::default(),
             },
         ];
-        let r = synthesize(&client, &drafts, "DIFF-BLOCK", None, 1024)
+        let (r, _) = synthesize(&client, &drafts, "DIFF-BLOCK", None, 1024)
             .await
             .unwrap();
         assert_eq!(
@@ -194,6 +211,7 @@ mod tests {
         let drafts = vec![PersonaDraft {
             persona: "security",
             raw: "sd".into(),
+            tokens: TokenCount::default(),
         }];
         let _ = synthesize(&client, &drafts, "diff", Some("PEER-R1"), 1024)
             .await

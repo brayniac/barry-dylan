@@ -32,6 +32,8 @@ pub async fn run_worker(
             }
         };
         let id = leased.id;
+        deps.status_tracker
+            .begin(id, &leased.repo_owner, &leased.repo_name, leased.pr_number);
         tracing::info!(
             job_id = id, owner = %leased.repo_owner, repo = %leased.repo_name,
             pr = leased.pr_number, event_kind = %leased.event_kind,
@@ -46,6 +48,7 @@ pub async fn run_worker(
         match res {
             Ok(()) => {
                 let _ = deps.store.ack(id).await;
+                deps.status_tracker.complete(id);
                 metrics::counter!("barry_job_completed_total", "outcome" => "success").increment(1);
                 tracing::info!(
                     job_id = id, owner = %leased.repo_owner, repo = %leased.repo_name,
@@ -60,6 +63,7 @@ pub async fn run_worker(
                     let run_after = now_ts() + reset.max(0) + jitter;
                     let msg = format!("rate limited; reset_in={reset}s");
                     let _ = deps.store.reschedule_at(id, run_after, &msg).await;
+                    deps.status_tracker.complete(id);
                     metrics::counter!("barry_job_completed_total", "outcome" => "rate_limited")
                         .increment(1);
                     tracing::warn!(
@@ -80,6 +84,7 @@ pub async fn run_worker(
                     .await
                     .unwrap_or(false);
                 if alive {
+                    deps.status_tracker.complete(id);
                     metrics::counter!("barry_job_completed_total", "outcome" => "retry")
                         .increment(1);
                     tracing::warn!(
@@ -88,6 +93,7 @@ pub async fn run_worker(
                         "job scheduled for retry"
                     );
                 } else {
+                    deps.status_tracker.complete(id);
                     metrics::counter!("barry_job_completed_total", "outcome" => "dropped")
                         .increment(1);
                     tracing::error!(

@@ -3,8 +3,9 @@ use crate::checker::multi_review::identity::Identity;
 use crate::checker::multi_review::judge;
 use crate::checker::multi_review::persona::Persona;
 use crate::checker::multi_review::review::{Outcome, UnifiedReview};
-use crate::checker::multi_review::synthesis::{self, PersonaDraft};
+use crate::checker::multi_review::synthesis::{self, PersonaDraft, TokenCount};
 use crate::github::pr::ChangedFile;
+use crate::telemetry::status::StatusTracker;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -37,6 +38,8 @@ impl Verdict {
 pub struct Orchestrator<'a> {
     pub clients: &'a IdentityClients,
     pub personas: &'a [Persona],
+    pub tracker: Arc<StatusTracker>,
+    pub job_id: i64,
 }
 
 impl<'a> Orchestrator<'a> {
@@ -45,6 +48,7 @@ impl<'a> Orchestrator<'a> {
         let _enter = span.enter();
 
         tracing::info!("multi-review orchestration starting");
+        self.tracker.set_phase(self.job_id, "persona drafts");
         let diff = synthesis::render_diff_block(files);
 
         // Phase 1: persona drafts for both identities in parallel.
@@ -68,10 +72,18 @@ impl<'a> Orchestrator<'a> {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(?e, "Other Barry persona drafts failed; Barry posts alone");
-                let barry_r1 = self
+                let barry_draft_tokens: u64 = barry_drafts.iter().map(|d| d.tokens.input).sum();
+                let barry_draft_tokens_out: u64 =
+                    barry_drafts.iter().map(|d| d.tokens.output).sum();
+                self.tracker
+                    .add_tokens(self.job_id, barry_draft_tokens, barry_draft_tokens_out);
+                self.tracker.set_phase(self.job_id, "R1 synthesis");
+                let (barry_r1, r1_tokens) = self
                     .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
                     .await
                     .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
+                self.tracker
+                    .add_tokens(self.job_id, r1_tokens.input, r1_tokens.output);
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
                 return Ok(Verdict::BarryAlone {
@@ -80,21 +92,36 @@ impl<'a> Orchestrator<'a> {
                 });
             }
         };
+        let draft_tok_in: u64 = barry_drafts
+            .iter()
+            .chain(ob_drafts.iter())
+            .map(|d| d.tokens.input)
+            .sum();
+        let draft_tok_out: u64 = barry_drafts
+            .iter()
+            .chain(ob_drafts.iter())
+            .map(|d| d.tokens.output)
+            .sum();
+        self.tracker
+            .add_tokens(self.job_id, draft_tok_in, draft_tok_out);
 
         // Phase 2: R1 synthesis (no peer) in parallel.
+        self.tracker.set_phase(self.job_id, "R1 synthesis");
         tracing::debug!("R1 synthesis starting");
         let r1_start = std::time::Instant::now();
-        let (barry_r1, ob_r1) = tokio::join!(
+        let (barry_r1_res, ob_r1_res) = tokio::join!(
             self.synthesize_for(Identity::Barry, &diff, &barry_drafts, None),
             self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts, None),
         );
-        let barry_r1 = match barry_r1 {
-            Ok(r) => r,
+        let (barry_r1, barry_r1_tokens) = match barry_r1_res {
+            Ok(t) => t,
             Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
         };
-        let ob_r1 = match ob_r1 {
-            Ok(r) => r,
+        let (ob_r1, ob_r1_tokens) = match ob_r1_res {
+            Ok(t) => t,
             Err(e) => {
+                self.tracker
+                    .add_tokens(self.job_id, barry_r1_tokens.input, barry_r1_tokens.output);
                 tracing::warn!(?e, "Other Barry R1 synthesis failed; Barry posts alone");
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
@@ -110,6 +137,11 @@ impl<'a> Orchestrator<'a> {
             ob_outcome = ?ob_r1.outcome,
             "R1 synthesis complete"
         );
+        self.tracker.add_tokens(
+            self.job_id,
+            barry_r1_tokens.input + ob_r1_tokens.input,
+            barry_r1_tokens.output + ob_r1_tokens.output,
+        );
 
         // Phase 3: R2 synthesis — each identity reads the other's R1.
         // Reuses the R1 drafts; no fresh persona calls.
@@ -123,9 +155,10 @@ impl<'a> Orchestrator<'a> {
             "summary": ob_r1.summary,
         }))
         .unwrap_or_default();
+        self.tracker.set_phase(self.job_id, "R2 synthesis");
         tracing::debug!("R2 synthesis starting (drafts reused from R1)");
         let r2_start = std::time::Instant::now();
-        let (barry_r2, ob_r2) = tokio::join!(
+        let (barry_r2_res, ob_r2_res) = tokio::join!(
             self.synthesize_for(Identity::Barry, &diff, &barry_drafts, Some(&ob_r1_text)),
             self.synthesize_for(
                 Identity::OtherBarry,
@@ -134,16 +167,28 @@ impl<'a> Orchestrator<'a> {
                 Some(&barry_r1_text)
             ),
         );
-        let barry_r2 = barry_r2.unwrap_or(barry_r1);
-        let ob_r2 = ob_r2.unwrap_or(ob_r1);
+        let (barry_r2, barry_r2_tokens) = match barry_r2_res {
+            Ok(t) => t,
+            Err(_) => (barry_r1, TokenCount::default()),
+        };
+        let (ob_r2, ob_r2_tokens) = match ob_r2_res {
+            Ok(t) => t,
+            Err(_) => (ob_r1, TokenCount::default()),
+        };
         tracing::info!(
             duration_ms = r2_start.elapsed().as_millis() as u64,
             barry_outcome = ?barry_r2.outcome,
             ob_outcome = ?ob_r2.outcome,
             "R2 synthesis complete"
         );
+        self.tracker.add_tokens(
+            self.job_id,
+            barry_r2_tokens.input + ob_r2_tokens.input,
+            barry_r2_tokens.output + ob_r2_tokens.output,
+        );
 
         // Judge.
+        self.tracker.set_phase(self.job_id, "judge");
         tracing::debug!("judge starting");
         let judge_start = std::time::Instant::now();
         let verdict = match judge::judge(
@@ -173,6 +218,8 @@ impl<'a> Orchestrator<'a> {
             reason = %verdict.reason,
             "judge done"
         );
+        self.tracker
+            .add_tokens(self.job_id, verdict.tokens.input, verdict.tokens.output);
 
         if verdict.agree {
             tracing::info!(kind = "agree", outcome = ?barry_r2.outcome, "verdict");
@@ -258,7 +305,7 @@ impl<'a> Orchestrator<'a> {
         diff: &str,
         drafts: &[PersonaDraft],
         peer: Option<&str>,
-    ) -> anyhow::Result<UnifiedReview> {
+    ) -> anyhow::Result<(UnifiedReview, TokenCount)> {
         let round = if peer.is_some() { "R2" } else { "R1" };
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
@@ -269,14 +316,19 @@ impl<'a> Orchestrator<'a> {
             .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"));
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        tracing::info!(
-            identity = ?identity,
-            round,
-            duration_ms,
-            outcome = result.as_ref().ok().map(|r| format!("{:?}", r.outcome)),
-            "synthesis done"
-        );
-        result
+        match result {
+            Ok((review, tokens)) => {
+                tracing::info!(
+                    identity = ?identity,
+                    round,
+                    duration_ms,
+                    outcome = format!("{:?}", review.outcome),
+                    "synthesis done"
+                );
+                Ok((review, tokens))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -284,6 +336,7 @@ impl<'a> Orchestrator<'a> {
 mod tests {
     use super::*;
     use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse};
+    use crate::telemetry::status::StatusTracker;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -393,6 +446,8 @@ mod tests {
         let v = Orchestrator {
             clients: &c,
             personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
         }
         .run(&[file()])
         .await
@@ -426,6 +481,8 @@ mod tests {
         let v = Orchestrator {
             clients: &c,
             personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
         }
         .run(&[file()])
         .await
@@ -446,8 +503,9 @@ mod tests {
 
     #[tokio::test]
     async fn ob_failure_yields_barry_alone() {
+        // Barry: 2 persona drafts + 1 R1 synthesis (OB draft fails so Barry synths alone)
         let c = clients(
-            vec![Ok(approve()), Ok(approve())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
             vec![Err("ob down")],
             vec![],
         );
@@ -455,6 +513,8 @@ mod tests {
         let v = Orchestrator {
             clients: &c,
             personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
         }
         .run(&[file()])
         .await
@@ -473,6 +533,8 @@ mod tests {
         let v = Orchestrator {
             clients: &c,
             personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
         }
         .run(&[file()])
         .await
