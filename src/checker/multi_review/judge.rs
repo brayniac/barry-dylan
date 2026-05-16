@@ -70,8 +70,8 @@ pub async fn judge(
         agree: parsed.agree,
         reason: parsed.reason,
         tokens: TokenCount {
-            input: resp.input_tokens.unwrap_or(0) as u64,
-            output: resp.output_tokens.unwrap_or(0) as u64,
+            input: u64::from(resp.input_tokens.unwrap_or(0)),
+            output: u64::from(resp.output_tokens.unwrap_or(0)),
         },
     })
 }

@@ -51,8 +51,8 @@ pub async fn run_persona(
         persona: persona.name,
         raw: resp.text,
         tokens: TokenCount {
-            input: resp.input_tokens.unwrap_or(0) as u64,
-            output: resp.output_tokens.unwrap_or(0) as u64,
+            input: u64::from(resp.input_tokens.unwrap_or(0)),
+            output: u64::from(resp.output_tokens.unwrap_or(0)),
         },
     })
 }
@@ -86,8 +86,8 @@ pub async fn synthesize(
     };
     let resp = client.complete(&req).await?;
     let tokens = TokenCount {
-        input: resp.input_tokens.unwrap_or(0) as u64,
-        output: resp.output_tokens.unwrap_or(0) as u64,
+        input: u64::from(resp.input_tokens.unwrap_or(0)),
+        output: u64::from(resp.output_tokens.unwrap_or(0)),
     };
     Ok((parse(&resp.text)?, tokens))
 }
