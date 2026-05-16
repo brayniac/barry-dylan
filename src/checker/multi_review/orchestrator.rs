@@ -48,6 +48,7 @@ impl<'a> Orchestrator<'a> {
         let _enter = span.enter();
 
         tracing::info!("multi-review orchestration starting");
+        self.tracker.set_phase(self.job_id, "persona drafts");
         let diff = synthesis::render_diff_block(files);
 
         // Phase 1: persona drafts for both identities in parallel.
@@ -73,14 +74,13 @@ impl<'a> Orchestrator<'a> {
                 tracing::warn!(?e, "Other Barry persona drafts failed; Barry posts alone");
                 let barry_draft_tokens: u64 = barry_drafts.iter().map(|d| d.tokens.input).sum();
                 let barry_draft_tokens_out: u64 = barry_drafts.iter().map(|d| d.tokens.output).sum();
-                let _ = (barry_draft_tokens, barry_draft_tokens_out);
-                // TASK6: add draft tokens to tracker and set R1 synthesis phase here
+                self.tracker.add_tokens(self.job_id, barry_draft_tokens, barry_draft_tokens_out);
+                self.tracker.set_phase(self.job_id, "R1 synthesis");
                 let (barry_r1, r1_tokens) = self
                     .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
                     .await
                     .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
-                // TASK6: add r1_tokens to tracker here
-                let _ = r1_tokens;
+                self.tracker.add_tokens(self.job_id, r1_tokens.input, r1_tokens.output);
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
                 return Ok(Verdict::BarryAlone {
@@ -89,9 +89,12 @@ impl<'a> Orchestrator<'a> {
                 });
             }
         };
-        // TASK6: add draft token accumulation here (normal path)
+        let draft_tok_in: u64 = barry_drafts.iter().chain(ob_drafts.iter()).map(|d| d.tokens.input).sum();
+        let draft_tok_out: u64 = barry_drafts.iter().chain(ob_drafts.iter()).map(|d| d.tokens.output).sum();
+        self.tracker.add_tokens(self.job_id, draft_tok_in, draft_tok_out);
 
         // Phase 2: R1 synthesis (no peer) in parallel.
+        self.tracker.set_phase(self.job_id, "R1 synthesis");
         tracing::debug!("R1 synthesis starting");
         let r1_start = std::time::Instant::now();
         let (barry_r1_res, ob_r1_res) = tokio::join!(
@@ -120,7 +123,11 @@ impl<'a> Orchestrator<'a> {
             ob_outcome = ?ob_r1.outcome,
             "R1 synthesis complete"
         );
-        let _ = (barry_r1_tokens, ob_r1_tokens); // wired in Task 6
+        self.tracker.add_tokens(
+            self.job_id,
+            barry_r1_tokens.input + ob_r1_tokens.input,
+            barry_r1_tokens.output + ob_r1_tokens.output,
+        );
 
         // Phase 3: R2 synthesis — each identity reads the other's R1.
         // Reuses the R1 drafts; no fresh persona calls.
@@ -134,6 +141,7 @@ impl<'a> Orchestrator<'a> {
             "summary": ob_r1.summary,
         }))
         .unwrap_or_default();
+        self.tracker.set_phase(self.job_id, "R2 synthesis");
         tracing::debug!("R2 synthesis starting (drafts reused from R1)");
         let r2_start = std::time::Instant::now();
         let (barry_r2_res, ob_r2_res) = tokio::join!(
@@ -159,9 +167,14 @@ impl<'a> Orchestrator<'a> {
             ob_outcome = ?ob_r2.outcome,
             "R2 synthesis complete"
         );
-        let _ = (barry_r2_tokens, ob_r2_tokens); // wired in Task 6
+        self.tracker.add_tokens(
+            self.job_id,
+            barry_r2_tokens.input + ob_r2_tokens.input,
+            barry_r2_tokens.output + ob_r2_tokens.output,
+        );
 
         // Judge.
+        self.tracker.set_phase(self.job_id, "judge");
         tracing::debug!("judge starting");
         let judge_start = std::time::Instant::now();
         let verdict = match judge::judge(
@@ -191,6 +204,7 @@ impl<'a> Orchestrator<'a> {
             reason = %verdict.reason,
             "judge done"
         );
+        self.tracker.add_tokens(self.job_id, verdict.tokens.input, verdict.tokens.output);
 
         if verdict.agree {
             tracing::info!(kind = "agree", outcome = ?barry_r2.outcome, "verdict");
