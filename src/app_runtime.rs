@@ -1,10 +1,10 @@
 use crate::checker::multi_review::identity::Identity;
 use crate::config::Config;
-use crate::telemetry::status::StatusTracker;
 use crate::dispatcher::run::{GhFactory, JobDeps, MultiGhFactory, Pipeline};
 use crate::github::app::AppCreds;
 use crate::github::client::GitHub;
 use crate::storage::Store;
+use crate::telemetry::status::StatusTracker;
 use crate::webhook::server::AppState;
 use async_trait::async_trait;
 use std::path::Path;

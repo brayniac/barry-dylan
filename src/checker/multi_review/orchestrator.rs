@@ -73,14 +73,17 @@ impl<'a> Orchestrator<'a> {
             Err(e) => {
                 tracing::warn!(?e, "Other Barry persona drafts failed; Barry posts alone");
                 let barry_draft_tokens: u64 = barry_drafts.iter().map(|d| d.tokens.input).sum();
-                let barry_draft_tokens_out: u64 = barry_drafts.iter().map(|d| d.tokens.output).sum();
-                self.tracker.add_tokens(self.job_id, barry_draft_tokens, barry_draft_tokens_out);
+                let barry_draft_tokens_out: u64 =
+                    barry_drafts.iter().map(|d| d.tokens.output).sum();
+                self.tracker
+                    .add_tokens(self.job_id, barry_draft_tokens, barry_draft_tokens_out);
                 self.tracker.set_phase(self.job_id, "R1 synthesis");
                 let (barry_r1, r1_tokens) = self
                     .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
                     .await
                     .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
-                self.tracker.add_tokens(self.job_id, r1_tokens.input, r1_tokens.output);
+                self.tracker
+                    .add_tokens(self.job_id, r1_tokens.input, r1_tokens.output);
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
                 return Ok(Verdict::BarryAlone {
@@ -89,9 +92,18 @@ impl<'a> Orchestrator<'a> {
                 });
             }
         };
-        let draft_tok_in: u64 = barry_drafts.iter().chain(ob_drafts.iter()).map(|d| d.tokens.input).sum();
-        let draft_tok_out: u64 = barry_drafts.iter().chain(ob_drafts.iter()).map(|d| d.tokens.output).sum();
-        self.tracker.add_tokens(self.job_id, draft_tok_in, draft_tok_out);
+        let draft_tok_in: u64 = barry_drafts
+            .iter()
+            .chain(ob_drafts.iter())
+            .map(|d| d.tokens.input)
+            .sum();
+        let draft_tok_out: u64 = barry_drafts
+            .iter()
+            .chain(ob_drafts.iter())
+            .map(|d| d.tokens.output)
+            .sum();
+        self.tracker
+            .add_tokens(self.job_id, draft_tok_in, draft_tok_out);
 
         // Phase 2: R1 synthesis (no peer) in parallel.
         self.tracker.set_phase(self.job_id, "R1 synthesis");
@@ -108,7 +120,8 @@ impl<'a> Orchestrator<'a> {
         let (ob_r1, ob_r1_tokens) = match ob_r1_res {
             Ok(t) => t,
             Err(e) => {
-                self.tracker.add_tokens(self.job_id, barry_r1_tokens.input, barry_r1_tokens.output);
+                self.tracker
+                    .add_tokens(self.job_id, barry_r1_tokens.input, barry_r1_tokens.output);
                 tracing::warn!(?e, "Other Barry R1 synthesis failed; Barry posts alone");
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
@@ -205,7 +218,8 @@ impl<'a> Orchestrator<'a> {
             reason = %verdict.reason,
             "judge done"
         );
-        self.tracker.add_tokens(self.job_id, verdict.tokens.input, verdict.tokens.output);
+        self.tracker
+            .add_tokens(self.job_id, verdict.tokens.input, verdict.tokens.output);
 
         if verdict.agree {
             tracing::info!(kind = "agree", outcome = ?barry_r2.outcome, "verdict");

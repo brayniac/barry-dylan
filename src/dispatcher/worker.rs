@@ -32,7 +32,8 @@ pub async fn run_worker(
             }
         };
         let id = leased.id;
-        deps.status_tracker.begin(id, &leased.repo_owner, &leased.repo_name, leased.pr_number);
+        deps.status_tracker
+            .begin(id, &leased.repo_owner, &leased.repo_name, leased.pr_number);
         tracing::info!(
             job_id = id, owner = %leased.repo_owner, repo = %leased.repo_name,
             pr = leased.pr_number, event_kind = %leased.event_kind,
