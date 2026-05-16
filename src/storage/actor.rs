@@ -130,6 +130,12 @@ pub enum ActorCommand {
         sql: String,
         reply: Reply<Vec<Vec<(String, RawSqliteValue)>>>,
     },
+    CancelPrJobs {
+        repo_owner: String,
+        repo_name: String,
+        pr_number: i64,
+        reply: Reply<()>,
+    },
 }
 
 /// Maximum number of retries on SQLITE_BUSY.
@@ -660,6 +666,34 @@ pub(crate) fn run(
                     });
                     let duration_ms = start.elapsed().as_millis() as u64;
                     record_db_timing("append_audit", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::CancelPrJobs {
+                    repo_owner,
+                    repo_name,
+                    pr_number,
+                    reply,
+                } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || {
+                        let owner = repo_owner.clone();
+                        let repo = repo_name.clone();
+                        async move {
+                            sqlx::query(
+                                "DELETE FROM jobs \
+                                 WHERE repo_owner=?1 AND repo_name=?2 AND pr_number=?3 \
+                                   AND leased_until IS NULL",
+                            )
+                            .bind(owner)
+                            .bind(repo)
+                            .bind(pr_number)
+                            .execute(unsafe { &mut *raw })
+                            .await
+                            .map(|_| ())
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("cancel_pr_jobs", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::RawQuery { sql, reply } => {

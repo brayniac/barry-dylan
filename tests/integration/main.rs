@@ -1,6 +1,8 @@
+mod cancel;
 mod common;
 mod failure_isolation;
 mod happy_path;
+mod merged_pr;
 mod multi_review_agreement;
 mod multi_review_confer;
 mod multi_review_disagreement;
