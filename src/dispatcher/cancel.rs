@@ -3,6 +3,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+type TokenMap = Arc<Mutex<HashMap<(String, String, i64), CancellationToken>>>;
+
 /// In-memory registry mapping each active PR job to its cancellation token.
 ///
 /// When a `pull_request.closed` event arrives, `cancel()` fires the token for
@@ -10,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 /// without posting results.
 #[derive(Clone, Default)]
 pub struct CancelRegistry {
-    inner: Arc<Mutex<HashMap<(String, String, i64), CancellationToken>>>,
+    inner: TokenMap,
 }
 
 impl CancelRegistry {
