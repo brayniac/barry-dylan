@@ -152,6 +152,25 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                 now,
             ))
         }
+        InboundEvent::PullRequest(e) if e.action == "closed" => {
+            tracing::info!(
+                owner = %e.repository.owner.login,
+                repo = %e.repository.name,
+                pr = e.number,
+                "PR closed webhook received"
+            );
+            Some((
+                NewJob {
+                    installation_id: e.installation.id,
+                    repo_owner: e.repository.owner.login.clone(),
+                    repo_name: e.repository.name.clone(),
+                    pr_number: e.number,
+                    event_kind: "pull_request.closed".into(),
+                    delivery_id: delivery.clone(),
+                },
+                now,
+            ))
+        }
         _ => {
             tracing::debug!(event = evt, delivery_id = %delivery, "event dropped (not actionable)");
             None

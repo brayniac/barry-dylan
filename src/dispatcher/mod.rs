@@ -28,6 +28,7 @@
 //! - Untrusted authors require `/barry approve` from a maintainer
 //! - Approval is sticky via a bot comment marker
 
+pub mod cancel;
 pub mod debounce;
 pub mod run;
 pub mod trust;

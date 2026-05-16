@@ -117,6 +117,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         gh_factory.clone(),
         status_tracker.clone(),
     ));
+    let cancel_registry = crate::dispatcher::cancel::CancelRegistry::new();
     let deps = Arc::new(JobDeps {
         store: store.clone(),
         config: cfg.clone(),
@@ -125,6 +126,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         clients: Some(clients),
         personas: Some(personas),
         status_tracker: status_tracker.clone(),
+        cancel_registry,
     });
 
     // Workers.

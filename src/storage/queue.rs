@@ -123,6 +123,26 @@ impl Store {
         Ok(res)
     }
 
+    /// Delete all pending (non-leased) jobs for a PR. Used when a PR is closed.
+    pub async fn cancel_pr_jobs(
+        &self,
+        repo_owner: &str,
+        repo_name: &str,
+        pr_number: i64,
+    ) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::CancelPrJobs {
+                repo_owner: repo_owner.to_string(),
+                repo_name: repo_name.to_string(),
+                pr_number,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(())
+    }
+
     /// Mark a job as failed; if attempts < max_attempts, reschedule with backoff.
     /// Returns true if the job was rescheduled, false if it was dropped.
     pub async fn nack(

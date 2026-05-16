@@ -76,6 +76,7 @@ pub async fn fixture(server: &MockServer) -> (Store, Arc<JobDeps>) {
         clients: None,
         personas: None,
         status_tracker: Arc::new(barry_dylan::telemetry::status::StatusTracker::new()),
+        cancel_registry: barry_dylan::dispatcher::cancel::CancelRegistry::new(),
     });
     (store, deps)
 }
@@ -193,6 +194,7 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
         clients: Some(clients),
         personas: Some(personas),
         status_tracker,
+        cancel_registry: barry_dylan::dispatcher::cancel::CancelRegistry::new(),
     });
     (store, deps)
 }

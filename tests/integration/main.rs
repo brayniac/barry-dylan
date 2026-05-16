@@ -1,3 +1,4 @@
+mod cancel;
 mod common;
 mod failure_isolation;
 mod happy_path;

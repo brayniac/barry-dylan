@@ -41,6 +41,7 @@ pub struct JobDeps {
     /// Persona definitions used by multi-review and confer. None matches clients=None.
     pub personas: Option<Arc<Vec<crate::checker::multi_review::persona::Persona>>>,
     pub status_tracker: Arc<StatusTracker>,
+    pub cancel_registry: crate::dispatcher::cancel::CancelRegistry,
 }
 
 #[async_trait::async_trait]
@@ -71,6 +72,10 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let _enter = span.enter();
 
     tracing::info!("starting job processing");
+
+    if job.event_kind == "pull_request.closed" {
+        return handle_pr_closed(deps, job).await;
+    }
 
     let gh = deps
         .gh_factory
@@ -152,6 +157,14 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let pr_ref = &ctx.pr;
     let ctx_ref = &ctx;
     let rate_limit_reset: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
+
+    // Register a cancellation token for this PR. A concurrent `pull_request.closed`
+    // job will fire it, causing all checker tasks to abort before posting results.
+    let cancel = deps
+        .cancel_registry
+        .register(&job.repo_owner, &job.repo_name, job.pr_number)
+        .await;
+
     let mut tasks = Vec::new();
     for chk in &deps.pipeline.checkers {
         if !chk.enabled(&ctx.repo_cfg) {
@@ -160,6 +173,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         let chk = chk.clone();
         let rate_limit_reset = rate_limit_reset.clone();
         let checker_name = chk.name();
+        let cancel = cancel.clone();
         let span = tracing::info_span!(
             "checker.run",
             checker = checker_name,
@@ -171,20 +185,34 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
             async move {
                 tracing::debug!("checker starting");
                 let t = std::time::Instant::now();
-                let res = tokio::time::timeout(checker_timeout, chk.run(ctx_ref)).await;
+                // Level 3: race checker execution against cancellation.
+                let run_result = tokio::select! {
+                    res = tokio::time::timeout(checker_timeout, chk.run(ctx_ref)) => Some(res),
+                    _ = cancel.cancelled() => None,
+                };
                 let dur = t.elapsed();
-                let outcome = match res {
-                    Ok(Ok(o)) => o,
-                    Ok(Err(e)) => {
+                let outcome = match run_result {
+                    None => {
+                        tracing::info!(checker = checker_name, "checker cancelled: PR closed");
+                        return;
+                    }
+                    Some(Ok(Ok(o))) => o,
+                    Some(Ok(Err(e))) => {
                         tracing::error!(error = ?e, "checker failed");
                         CheckerOutcome::neutral(checker_name, "internal error (see logs)")
                     }
-                    Err(_) => {
+                    Some(Err(_)) => {
                         let timeout_msg = format!("timed out after {}s", checker_timeout.as_secs());
                         tracing::warn!(timeout_msg, "checker timed out");
                         CheckerOutcome::neutral(checker_name, &timeout_msg)
                     }
                 };
+                // Level 1: cancel may have fired in the window between run() returning
+                // and posting results.
+                if cancel.is_cancelled() {
+                    tracing::info!(checker = checker_name, "checker cancelled before posting");
+                    return;
+                }
                 tracing::info!(
                     checker = checker_name,
                     status = status_str(outcome.status),
@@ -219,10 +247,33 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         );
     }
     futures::future::join_all(tasks).await;
+
+    deps.cancel_registry
+        .remove(&job.repo_owner, &job.repo_name, job.pr_number)
+        .await;
+
     let reset_in_secs = rate_limit_reset.load(Ordering::SeqCst);
     if reset_in_secs > 0 {
         return Err(GhError::RateLimited { reset_in_secs }.into());
     }
+    Ok(())
+}
+
+async fn handle_pr_closed(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
+    // Level 2: delete any queued (not yet leased) review jobs for this PR.
+    deps.store
+        .cancel_pr_jobs(&job.repo_owner, &job.repo_name, job.pr_number)
+        .await?;
+    // Level 3: signal any in-flight checker tasks to abort.
+    deps.cancel_registry
+        .cancel(&job.repo_owner, &job.repo_name, job.pr_number)
+        .await;
+    tracing::info!(
+        owner = %job.repo_owner,
+        repo = %job.repo_name,
+        pr = job.pr_number,
+        "PR closed: purged queue and signalled in-flight cancellation"
+    );
     Ok(())
 }
 
