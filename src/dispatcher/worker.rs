@@ -2,17 +2,13 @@ use crate::dispatcher::run::{JobDeps, run_job};
 use crate::github::client::GhError;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
-pub async fn run_worker(
-    deps: Arc<JobDeps>,
-    lease_secs: i64,
-    mut shutdown: broadcast::Receiver<()>,
-) {
+pub async fn run_worker(deps: Arc<JobDeps>, lease_secs: i64, shutdown: CancellationToken) {
     let backoff = [60i64, 300, 1500];
     loop {
         let leased = tokio::select! {
-            _ = shutdown.recv() => {
+            _ = shutdown.cancelled() => {
                 tracing::info!("shutdown signal received; stopping worker");
                 break;
             }
