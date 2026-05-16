@@ -5,6 +5,7 @@ use crate::checker::multi_review::persona::Persona;
 use crate::checker::multi_review::review::{Outcome, UnifiedReview};
 use crate::checker::multi_review::synthesis::{self, PersonaDraft, TokenCount};
 use crate::github::pr::ChangedFile;
+use crate::telemetry::status::StatusTracker;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -37,6 +38,8 @@ impl Verdict {
 pub struct Orchestrator<'a> {
     pub clients: &'a IdentityClients,
     pub personas: &'a [Persona],
+    pub tracker: Arc<StatusTracker>,
+    pub job_id: i64,
 }
 
 impl<'a> Orchestrator<'a> {
@@ -304,6 +307,7 @@ impl<'a> Orchestrator<'a> {
 mod tests {
     use super::*;
     use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse};
+    use crate::telemetry::status::StatusTracker;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -413,6 +417,8 @@ mod tests {
         let v = Orchestrator {
             clients: &c,
             personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
         }
         .run(&[file()])
         .await
@@ -446,6 +452,8 @@ mod tests {
         let v = Orchestrator {
             clients: &c,
             personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
         }
         .run(&[file()])
         .await
@@ -475,6 +483,8 @@ mod tests {
         let v = Orchestrator {
             clients: &c,
             personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
         }
         .run(&[file()])
         .await
@@ -493,6 +503,8 @@ mod tests {
         let v = Orchestrator {
             clients: &c,
             personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
         }
         .run(&[file()])
         .await

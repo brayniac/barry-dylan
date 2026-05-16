@@ -7,6 +7,7 @@ use crate::github::client::{GhError, GitHub};
 use crate::github::pr::{BotComment, PullRequest, ReviewInput};
 use crate::storage::Store;
 use crate::storage::queue::LeasedJob;
+use crate::telemetry::status::StatusTracker;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -38,6 +39,7 @@ pub struct JobDeps {
     pub clients: Option<Arc<crate::checker::multi_review::clients::IdentityClients>>,
     /// Persona definitions used by multi-review and confer. None matches clients=None.
     pub personas: Option<Arc<Vec<crate::checker::multi_review::persona::Persona>>>,
+    pub status_tracker: Arc<StatusTracker>,
 }
 
 #[async_trait::async_trait]
@@ -134,6 +136,7 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         prior_bot_comments: bot_comments,
         store: deps.store.clone(),
         installation_id: Some(job.installation_id),
+        job_id: job.id,
     };
 
     let checker_timeout = Duration::from_secs(deps.config.dispatcher.checker_timeout_secs);

@@ -75,6 +75,7 @@ pub async fn fixture(server: &MockServer) -> (Store, Arc<JobDeps>) {
         gh_factory: Arc::new(StaticGh { gh }),
         clients: None,
         personas: None,
+        status_tracker: Arc::new(barry_dylan::telemetry::status::StatusTracker::new()),
     });
     (store, deps)
 }
@@ -176,10 +177,12 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
     let factory: Arc<dyn MultiGhFactory> = Arc::new(StaticGh { gh: gh.clone() });
 
     let mut pipeline = Pipeline::hygiene_only();
+    let status_tracker = Arc::new(barry_dylan::telemetry::status::StatusTracker::new());
     pipeline.checkers.push(Arc::new(MultiReviewChecker {
         clients: clients.clone(),
         personas: personas.clone(),
         gh_factory: factory.clone(),
+        status_tracker: status_tracker.clone(),
     }));
 
     let deps = Arc::new(JobDeps {
@@ -189,6 +192,7 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
         gh_factory: factory,
         clients: Some(clients),
         personas: Some(personas),
+        status_tracker,
     });
     (store, deps)
 }

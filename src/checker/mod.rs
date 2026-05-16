@@ -153,6 +153,7 @@ pub struct CheckerCtx {
     pub prior_bot_comments: Vec<BotComment>,
     pub store: crate::storage::Store,
     pub installation_id: Option<i64>,
+    pub job_id: i64,
 }
 
 /// Trait implemented by all checkers.

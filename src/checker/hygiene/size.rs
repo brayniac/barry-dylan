@@ -81,6 +81,7 @@ mod tests {
             prior_bot_comments: vec![],
             store: crate::storage::Store::in_memory().await.unwrap(),
             installation_id: None,
+            job_id: 0,
         }
     }
 
