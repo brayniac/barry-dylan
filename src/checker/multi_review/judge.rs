@@ -1,5 +1,6 @@
 use super::parse_util::locate_json;
 use crate::checker::multi_review::review::UnifiedReview;
+use crate::checker::multi_review::synthesis::TokenCount;
 use crate::llm::{LlmClient, LlmError, LlmMessage, LlmRequest, Role};
 use serde::Deserialize;
 
@@ -24,6 +25,7 @@ struct JudgeResp {
 pub struct JudgeVerdict {
     pub agree: bool,
     pub reason: String,
+    pub tokens: TokenCount,
 }
 
 pub async fn judge(
@@ -67,6 +69,10 @@ pub async fn judge(
     Ok(JudgeVerdict {
         agree: parsed.agree,
         reason: parsed.reason,
+        tokens: TokenCount {
+            input: resp.input_tokens.unwrap_or(0) as u64,
+            output: resp.output_tokens.unwrap_or(0) as u64,
+        },
     })
 }
 

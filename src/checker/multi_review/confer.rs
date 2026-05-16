@@ -176,7 +176,7 @@ async fn run_unified(
     for r in results {
         drafts.push(r.map_err(|e| anyhow::anyhow!("persona call failed: {e}"))?);
     }
-    let r = synthesis::synthesize(client, &drafts, diff, peer, max_tokens)
+    let (r, _tokens) = synthesis::synthesize(client, &drafts, diff, peer, max_tokens)
         .await
         .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"))?;
     Ok(r)

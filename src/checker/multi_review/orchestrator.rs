@@ -3,7 +3,7 @@ use crate::checker::multi_review::identity::Identity;
 use crate::checker::multi_review::judge;
 use crate::checker::multi_review::persona::Persona;
 use crate::checker::multi_review::review::{Outcome, UnifiedReview};
-use crate::checker::multi_review::synthesis::{self, PersonaDraft};
+use crate::checker::multi_review::synthesis::{self, PersonaDraft, TokenCount};
 use crate::github::pr::ChangedFile;
 use std::sync::Arc;
 
@@ -68,10 +68,16 @@ impl<'a> Orchestrator<'a> {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(?e, "Other Barry persona drafts failed; Barry posts alone");
-                let barry_r1 = self
+                let barry_draft_tokens: u64 = barry_drafts.iter().map(|d| d.tokens.input).sum();
+                let barry_draft_tokens_out: u64 = barry_drafts.iter().map(|d| d.tokens.output).sum();
+                let _ = (barry_draft_tokens, barry_draft_tokens_out);
+                // TASK6: add draft tokens to tracker and set R1 synthesis phase here
+                let (barry_r1, r1_tokens) = self
                     .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
                     .await
                     .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
+                // TASK6: add r1_tokens to tracker here
+                let _ = r1_tokens;
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
                 return Ok(Verdict::BarryAlone {
@@ -80,20 +86,21 @@ impl<'a> Orchestrator<'a> {
                 });
             }
         };
+        // TASK6: add draft token accumulation here (normal path)
 
         // Phase 2: R1 synthesis (no peer) in parallel.
         tracing::debug!("R1 synthesis starting");
         let r1_start = std::time::Instant::now();
-        let (barry_r1, ob_r1) = tokio::join!(
+        let (barry_r1_res, ob_r1_res) = tokio::join!(
             self.synthesize_for(Identity::Barry, &diff, &barry_drafts, None),
             self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts, None),
         );
-        let barry_r1 = match barry_r1 {
-            Ok(r) => r,
+        let (barry_r1, barry_r1_tokens) = match barry_r1_res {
+            Ok(t) => t,
             Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
         };
-        let ob_r1 = match ob_r1 {
-            Ok(r) => r,
+        let (ob_r1, ob_r1_tokens) = match ob_r1_res {
+            Ok(t) => t,
             Err(e) => {
                 tracing::warn!(?e, "Other Barry R1 synthesis failed; Barry posts alone");
                 tracing::info!(kind = "barry_alone", "verdict");
@@ -110,6 +117,7 @@ impl<'a> Orchestrator<'a> {
             ob_outcome = ?ob_r1.outcome,
             "R1 synthesis complete"
         );
+        let _ = (barry_r1_tokens, ob_r1_tokens); // wired in Task 6
 
         // Phase 3: R2 synthesis — each identity reads the other's R1.
         // Reuses the R1 drafts; no fresh persona calls.
@@ -125,7 +133,7 @@ impl<'a> Orchestrator<'a> {
         .unwrap_or_default();
         tracing::debug!("R2 synthesis starting (drafts reused from R1)");
         let r2_start = std::time::Instant::now();
-        let (barry_r2, ob_r2) = tokio::join!(
+        let (barry_r2_res, ob_r2_res) = tokio::join!(
             self.synthesize_for(Identity::Barry, &diff, &barry_drafts, Some(&ob_r1_text)),
             self.synthesize_for(
                 Identity::OtherBarry,
@@ -134,14 +142,21 @@ impl<'a> Orchestrator<'a> {
                 Some(&barry_r1_text)
             ),
         );
-        let barry_r2 = barry_r2.unwrap_or(barry_r1);
-        let ob_r2 = ob_r2.unwrap_or(ob_r1);
+        let (barry_r2, barry_r2_tokens) = match barry_r2_res {
+            Ok(t) => t,
+            Err(_) => (barry_r1, TokenCount::default()),
+        };
+        let (ob_r2, ob_r2_tokens) = match ob_r2_res {
+            Ok(t) => t,
+            Err(_) => (ob_r1, TokenCount::default()),
+        };
         tracing::info!(
             duration_ms = r2_start.elapsed().as_millis() as u64,
             barry_outcome = ?barry_r2.outcome,
             ob_outcome = ?ob_r2.outcome,
             "R2 synthesis complete"
         );
+        let _ = (barry_r2_tokens, ob_r2_tokens); // wired in Task 6
 
         // Judge.
         tracing::debug!("judge starting");
@@ -258,7 +273,7 @@ impl<'a> Orchestrator<'a> {
         diff: &str,
         drafts: &[PersonaDraft],
         peer: Option<&str>,
-    ) -> anyhow::Result<UnifiedReview> {
+    ) -> anyhow::Result<(UnifiedReview, TokenCount)> {
         let round = if peer.is_some() { "R2" } else { "R1" };
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
@@ -269,14 +284,19 @@ impl<'a> Orchestrator<'a> {
             .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"));
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        tracing::info!(
-            identity = ?identity,
-            round,
-            duration_ms,
-            outcome = result.as_ref().ok().map(|r| format!("{:?}", r.outcome)),
-            "synthesis done"
-        );
-        result
+        match result {
+            Ok((review, tokens)) => {
+                tracing::info!(
+                    identity = ?identity,
+                    round,
+                    duration_ms,
+                    outcome = format!("{:?}", review.outcome),
+                    "synthesis done"
+                );
+                Ok((review, tokens))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
