@@ -14,7 +14,7 @@ pub struct JobProgress {
     pub tokens_out: u64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct StatusTracker {
     jobs: Arc<RwLock<HashMap<i64, JobProgress>>>,
 }
