@@ -11,6 +11,7 @@ use crate::telemetry::status::StatusTracker;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
+use tracing::Instrument;
 
 pub struct Pipeline {
     pub checkers: Vec<Arc<dyn Checker>>,
@@ -154,60 +155,63 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         let chk = chk.clone();
         let rate_limit_reset = rate_limit_reset.clone();
         let checker_name = chk.name();
-        tasks.push(async move {
-            let span = tracing::info_span!(
-                "checker.run",
-                checker = checker_name,
-                pr = job_ref.pr_number,
-                owner = %job_ref.repo_owner,
-                repo = %job_ref.repo_name
-            );
-            let _enter = span.enter();
-
-            tracing::debug!("checker starting");
-            let t = std::time::Instant::now();
-            let res = tokio::time::timeout(checker_timeout, chk.run(ctx_ref)).await;
-            let dur = t.elapsed();
-            let outcome = match res {
-                Ok(Ok(o)) => o,
-                Ok(Err(e)) => {
-                    tracing::error!(error = ?e, "checker failed");
-                    CheckerOutcome::neutral(checker_name, "internal error (see logs)")
+        let span = tracing::info_span!(
+            "checker.run",
+            checker = checker_name,
+            pr = job_ref.pr_number,
+            owner = %job_ref.repo_owner,
+            repo = %job_ref.repo_name
+        );
+        tasks.push(
+            async move {
+                tracing::debug!("checker starting");
+                let t = std::time::Instant::now();
+                let res = tokio::time::timeout(checker_timeout, chk.run(ctx_ref)).await;
+                let dur = t.elapsed();
+                let outcome = match res {
+                    Ok(Ok(o)) => o,
+                    Ok(Err(e)) => {
+                        tracing::error!(error = ?e, "checker failed");
+                        CheckerOutcome::neutral(checker_name, "internal error (see logs)")
+                    }
+                    Err(_) => {
+                        let timeout_msg = format!("timed out after {}s", checker_timeout.as_secs());
+                        tracing::warn!(timeout_msg, "checker timed out");
+                        CheckerOutcome::neutral(checker_name, &timeout_msg)
+                    }
+                };
+                tracing::info!(
+                    checker = checker_name,
+                    status = status_str(outcome.status),
+                    duration_ms = dur.as_millis() as u64,
+                    "checker completed"
+                );
+                if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome).await {
+                    if let Some(GhError::RateLimited { reset_in_secs }) =
+                        e.downcast_ref::<GhError>()
+                    {
+                        rate_limit_reset.fetch_max(*reset_in_secs, Ordering::SeqCst);
+                        tracing::warn!(reset_in_secs, "post_outcome rate limited");
+                    } else {
+                        tracing::error!(error = ?e, "post_outcome failed");
+                    }
                 }
-                Err(_) => {
-                    let timeout_msg = format!("timed out after {}s", checker_timeout.as_secs());
-                    tracing::warn!(timeout_msg, "checker timed out");
-                    CheckerOutcome::neutral(checker_name, &timeout_msg)
-                }
-            };
-            tracing::info!(
-                checker = checker_name,
-                status = status_str(outcome.status),
-                duration_ms = dur.as_millis() as u64,
-                "checker completed"
-            );
-            if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome).await {
-                if let Some(GhError::RateLimited { reset_in_secs }) = e.downcast_ref::<GhError>() {
-                    rate_limit_reset.fetch_max(*reset_in_secs, Ordering::SeqCst);
-                    tracing::warn!(reset_in_secs, "post_outcome rate limited");
-                } else {
-                    tracing::error!(error = ?e, "post_outcome failed");
-                }
+                let _ = store
+                    .append_audit(&crate::storage::audit::AuditEntry {
+                        ts: now_ts(),
+                        delivery_id: Some(job_ref.delivery_id.clone()),
+                        repo_owner: Some(job_ref.repo_owner.clone()),
+                        repo_name: Some(job_ref.repo_name.clone()),
+                        pr_number: Some(job_ref.pr_number),
+                        checker_name: Some(checker_name.to_string()),
+                        outcome: status_str(outcome.status).to_string(),
+                        duration_ms: Some(dur.as_millis() as i64),
+                        details: None,
+                    })
+                    .await;
             }
-            let _ = store
-                .append_audit(&crate::storage::audit::AuditEntry {
-                    ts: now_ts(),
-                    delivery_id: Some(job_ref.delivery_id.clone()),
-                    repo_owner: Some(job_ref.repo_owner.clone()),
-                    repo_name: Some(job_ref.repo_name.clone()),
-                    pr_number: Some(job_ref.pr_number),
-                    checker_name: Some(checker_name.to_string()),
-                    outcome: status_str(outcome.status).to_string(),
-                    duration_ms: Some(dur.as_millis() as i64),
-                    details: None,
-                })
-                .await;
-        });
+            .instrument(span),
+        );
     }
     futures::future::join_all(tasks).await;
     let reset_in_secs = rate_limit_reset.load(Ordering::SeqCst);
@@ -379,64 +383,66 @@ async fn post_outcome(
             OutcomeStatus::Failure => CheckConclusion::Failure,
         }
     );
-    let _enter = span.enter();
-
-    let conclusion = match o.status {
-        OutcomeStatus::Success => CheckConclusion::Success,
-        OutcomeStatus::Neutral => CheckConclusion::Neutral,
-        OutcomeStatus::Failure => CheckConclusion::Failure,
-    };
-    let input = CheckRunInput {
-        name: o.checker_name.to_string(),
-        head_sha: pr.head.sha.clone(),
-        status: CheckStatus::Completed,
-        conclusion: Some(conclusion),
-        output: CheckOutput {
-            title: o.checker_name.to_string(),
-            summary: o.summary.clone(),
-            text: o.text.clone(),
-        },
-    };
-    let _ = gh
-        .create_check_run(&job.repo_owner, &job.repo_name, &input)
-        .await?;
-    tracing::debug!(checker = o.checker_name, conclusion = ?conclusion, "check-run posted");
-    if !o.add_labels.is_empty() {
-        gh.add_labels(
-            &job.repo_owner,
-            &job.repo_name,
-            job.pr_number,
-            &o.add_labels,
-        )
-        .await?;
-        tracing::debug!(checker = o.checker_name, labels = ?o.add_labels, "labels added");
-    }
-    if !o.inline_comments.is_empty() {
-        let review = ReviewInput {
-            body: &o.summary,
-            event: "COMMENT",
-            comments: &o.inline_comments,
-            commit_id: &pr.head.sha,
+    async {
+        let conclusion = match o.status {
+            OutcomeStatus::Success => CheckConclusion::Success,
+            OutcomeStatus::Neutral => CheckConclusion::Neutral,
+            OutcomeStatus::Failure => CheckConclusion::Failure,
+        };
+        let input = CheckRunInput {
+            name: o.checker_name.to_string(),
+            head_sha: pr.head.sha.clone(),
+            status: CheckStatus::Completed,
+            conclusion: Some(conclusion),
+            output: CheckOutput {
+                title: o.checker_name.to_string(),
+                summary: o.summary.clone(),
+                text: o.text.clone(),
+            },
         };
         let _ = gh
-            .create_review(&job.repo_owner, &job.repo_name, job.pr_number, &review)
+            .create_check_run(&job.repo_owner, &job.repo_name, &input)
             .await?;
-        tracing::info!(
-            inline_comments = o.inline_comments.len(),
-            "pr review posted"
-        );
-    }
-    if let Some(body) = &o.issue_comment {
-        let _ = gh
-            .create_issue_comment(&job.repo_owner, &job.repo_name, job.pr_number, body)
+        tracing::debug!(checker = o.checker_name, conclusion = ?conclusion, "check-run posted");
+        if !o.add_labels.is_empty() {
+            gh.add_labels(
+                &job.repo_owner,
+                &job.repo_name,
+                job.pr_number,
+                &o.add_labels,
+            )
             .await?;
-        tracing::debug!(
-            checker = o.checker_name,
-            body_chars = body.len(),
-            "issue comment posted"
-        );
+            tracing::debug!(checker = o.checker_name, labels = ?o.add_labels, "labels added");
+        }
+        if !o.inline_comments.is_empty() {
+            let review = ReviewInput {
+                body: &o.summary,
+                event: "COMMENT",
+                comments: &o.inline_comments,
+                commit_id: &pr.head.sha,
+            };
+            let _ = gh
+                .create_review(&job.repo_owner, &job.repo_name, job.pr_number, &review)
+                .await?;
+            tracing::info!(
+                inline_comments = o.inline_comments.len(),
+                "pr review posted"
+            );
+        }
+        if let Some(body) = &o.issue_comment {
+            let _ = gh
+                .create_issue_comment(&job.repo_owner, &job.repo_name, job.pr_number, body)
+                .await?;
+            tracing::debug!(
+                checker = o.checker_name,
+                body_chars = body.len(),
+                "issue comment posted"
+            );
+        }
+        Ok(())
     }
-    Ok(())
+    .instrument(span)
+    .await
 }
 
 fn status_str(s: OutcomeStatus) -> &'static str {

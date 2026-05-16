@@ -8,7 +8,10 @@ pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Human-readable text to stderr for operators reading in the terminal.
-    let text_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    // compact() keeps span names in the prefix but drops span field values, keeping lines readable.
+    let text_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .compact();
 
     // Structured JSON to stdout for log aggregation / monitoring.
     let json_layer = tracing_subscriber::fmt::layer().json();
