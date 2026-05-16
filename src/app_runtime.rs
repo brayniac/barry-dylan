@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 pub struct AppGhFactory {
     pub barry: Arc<AppCreds>,
@@ -127,15 +127,20 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         cancel_registry,
     });
 
+    // Shared cancellation token for graceful shutdown.
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
     // Workers.
-    let (shutdown_tx, _) = broadcast::channel(1);
+    let mut worker_handles = Vec::with_capacity(cfg.dispatcher.worker_count);
     for _ in 0..cfg.dispatcher.worker_count {
         let deps = deps.clone();
         let lease = cfg.dispatcher.job_timeout_secs as i64;
-        let shutdown_rx = shutdown_tx.subscribe();
-        tokio::spawn(async move {
-            crate::dispatcher::worker::run_worker(deps, lease, shutdown_rx).await
+        let shutdown = shutdown_clone.clone();
+        let handle = tokio::spawn(async move {
+            crate::dispatcher::worker::run_worker(deps, lease, shutdown).await
         });
+        worker_handles.push(handle);
     }
 
     // HTTP server.
@@ -149,10 +154,15 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.server.listen).await?;
     tracing::info!(addr = %cfg.server.listen, "barry-dylan listening");
 
-    let server = axum::serve(listener, router);
+    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+        shutdown_clone.cancelled().await;
+    });
 
-    let server_task = tokio::spawn(async move { server.await });
+    // SIGHUP — reload config. SIGTERM — graceful shutdown.
     let mut sighup = signal(SignalKind::hangup())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let server_task = tokio::spawn(async move { server.await });
+
     loop {
         tokio::select! {
             _ = sighup.recv() => {
@@ -162,15 +172,23 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
                     Err(e) => tracing::error!(?e, "reload failed; keeping previous config"),
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("ctrl-c; shutting down");
+            _ = sigterm.recv() => {
+                tracing::info!("SIGTERM received — shutting down gracefully");
+                shutdown.cancel();
                 break;
             }
         }
     }
-    // Broadcast shutdown to all workers
-    let _ = shutdown_tx.send(());
-    server_task.abort();
+
+    // Server drains in-flight requests via with_graceful_shutdown.
+    let _ = server_task.await;
+
+    // Workers finish their current job and exit the lease loop.
+    for handle in worker_handles {
+        let _ = handle.await;
+    }
+
+    tracing::info!("shutdown complete");
     Ok(())
 }
 
