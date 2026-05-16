@@ -23,7 +23,12 @@ impl LlmClient for LlmClientWithSemaphore {
         &self,
         req: &crate::llm::LlmRequest,
     ) -> Result<crate::llm::LlmResponse, crate::llm::LlmError> {
-        let _permit = self.semaphore.acquire().await.expect("semaphore closed");
+        // Semaphore::close is never called in this codebase, so an AcquireError
+        // here would indicate a bug. Surface it as a Shape error rather than
+        // panic so a single misuse can't take down the whole worker pool.
+        let _permit = self.semaphore.acquire().await.map_err(|e| {
+            crate::llm::LlmError::Shape(format!("llm concurrency semaphore closed: {e}"))
+        })?;
         self.inner.complete(req).await
     }
 

@@ -138,6 +138,21 @@ pub enum ActorCommand {
     },
 }
 
+/// RAII guard that logs when the actor thread exits. A normal shutdown drops
+/// it during stack unwind from the sender being dropped; a panic also runs the
+/// `Drop`, so either way the exit is visible in logs.
+struct ActorExitLogger;
+
+impl Drop for ActorExitLogger {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            tracing::error!("storage actor thread panicked; subsequent DB calls will fail");
+        } else {
+            tracing::info!("storage actor thread exiting");
+        }
+    }
+}
+
 /// Maximum number of retries on SQLITE_BUSY.
 const BUSY_RETRY_MAX: u32 = 3;
 /// Base delay for exponential backoff on SQLITE_BUSY (milliseconds).
@@ -159,7 +174,13 @@ fn record_db_timing(operation: &'static str, duration_ms: u64) {
 }
 
 /// Retry a closure with exponential backoff on SQLITE_BUSY.
-/// Takes a blocking closure that returns a future; uses Handle::block_on to run it.
+///
+/// The actor runs on a dedicated OS thread (not a Tokio worker), so calling
+/// `Handle::block_on` here is safe — it does not stall the runtime. The handle
+/// passed in MUST be the multi-threaded runtime's handle: blocking the current
+/// thread inside a worker thread would deadlock. Callers go through
+/// `storage::Store::open` / `Store::in_memory`, which capture `Handle::current()`
+/// from a multi-threaded runtime.
 fn retry_busy<F, Fut, T>(handle: &Handle, mut f: F) -> Result<T, DbError>
 where
     F: FnMut() -> Fut,
@@ -191,6 +212,11 @@ pub(crate) fn run(
     rt: Handle,
 ) -> thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // The actor owns the only handle to the SQLite connection; if this loop
+        // exits (channel closed or panic), every future Store::* call returns
+        // DbError::Closed and the app is effectively dead. We log on exit so the
+        // failure is visible rather than silent.
+        let _guard = ActorExitLogger;
         while let Ok(msg) = rx.recv() {
             let raw = conn.0.get();
             match msg {
@@ -212,7 +238,7 @@ pub(crate) fn run(
                                   LIMIT 1
                                 )
                                 RETURNING id, installation_id, repo_owner, repo_name, pr_number,
-                                          event_kind, delivery_id, attempts"#,
+                                          event_kind, delivery_id, attempts, actor"#,
                         )
                         .bind(now_ts + lease_secs)
                         .bind(now_ts)
@@ -228,6 +254,7 @@ pub(crate) fn run(
                         event_kind: row.get("event_kind"),
                         delivery_id: row.get("delivery_id"),
                         attempts: row.get("attempts"),
+                        actor: row.get("actor"),
                     });
                     let duration_ms = start.elapsed().as_millis() as u64;
                     metrics::histogram!("barry_db_duration_ms", "operation" => "lease_next")
@@ -337,7 +364,8 @@ pub(crate) fn run(
                             let updated = sqlx::query(
                                 r#"UPDATE jobs
                                    SET run_after = MAX(run_after, ?1),
-                                       delivery_id = ?2
+                                       delivery_id = ?2,
+                                       actor = ?7
                                    WHERE repo_owner = ?3 AND repo_name = ?4 AND pr_number = ?5
                                      AND event_kind = ?6 AND leased_until IS NULL"#,
                             )
@@ -347,6 +375,7 @@ pub(crate) fn run(
                             .bind(&job.repo_name)
                             .bind(job.pr_number)
                             .bind(&job.event_kind)
+                            .bind(&job.actor)
                             .execute(&mut *tx)
                             .await?
                             .rows_affected();
@@ -355,8 +384,8 @@ pub(crate) fn run(
                                 sqlx::query(
                                     r#"INSERT INTO jobs
                                         (installation_id, repo_owner, repo_name, pr_number, event_kind,
-                                         delivery_id, received_at, run_after)
-                                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+                                         delivery_id, received_at, run_after, actor)
+                                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
                                 )
                                 .bind(job.installation_id)
                                 .bind(&job.repo_owner)
@@ -366,6 +395,7 @@ pub(crate) fn run(
                                 .bind(&job.delivery_id)
                                 .bind(now_ts)
                                 .bind(run_after)
+                                .bind(&job.actor)
                                 .execute(&mut *tx)
                                 .await?;
                             }
@@ -537,27 +567,48 @@ pub(crate) fn run(
                     reply,
                 } => {
                     let start = std::time::Instant::now();
-                    let col = match identity.as_str() {
-                        "barry" => "barry_posted",
-                        "other_barry" => "other_barry_posted",
-                        "other_other_barry" => "other_other_barry_posted",
-                        _ => panic!("unknown identity: {identity}"),
+                    // Map identity to a fixed SQL string literal. Returning a typed
+                    // error on unknown values keeps a single bad input from killing
+                    // the actor thread and avoids any column-name interpolation
+                    // ambiguity around the bound `?` parameters.
+                    let sql: Option<&'static str> = match identity.as_str() {
+                        "barry" => Some(
+                            "INSERT INTO multi_review_runs
+                              (repo_owner, repo_name, pr_number, head_sha, barry_posted, last_outcome, updated_at)
+                             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
+                             ON CONFLICT(repo_owner, repo_name, pr_number, head_sha) DO UPDATE SET
+                               barry_posted = 1, last_outcome = excluded.last_outcome, updated_at = excluded.updated_at",
+                        ),
+                        "other_barry" => Some(
+                            "INSERT INTO multi_review_runs
+                              (repo_owner, repo_name, pr_number, head_sha, other_barry_posted, last_outcome, updated_at)
+                             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
+                             ON CONFLICT(repo_owner, repo_name, pr_number, head_sha) DO UPDATE SET
+                               other_barry_posted = 1, last_outcome = excluded.last_outcome, updated_at = excluded.updated_at",
+                        ),
+                        "other_other_barry" => Some(
+                            "INSERT INTO multi_review_runs
+                              (repo_owner, repo_name, pr_number, head_sha, other_other_barry_posted, last_outcome, updated_at)
+                             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
+                             ON CONFLICT(repo_owner, repo_name, pr_number, head_sha) DO UPDATE SET
+                               other_other_barry_posted = 1, last_outcome = excluded.last_outcome, updated_at = excluded.updated_at",
+                        ),
+                        _ => None,
                     };
-                    let sql = format!(
-                        "INSERT INTO multi_review_runs
-                          (repo_owner, repo_name, pr_number, head_sha, {col}, last_outcome, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
-                         ON CONFLICT(repo_owner, repo_name, pr_number, head_sha) DO UPDATE SET
-                           {col} = 1, last_outcome = excluded.last_outcome, updated_at = excluded.updated_at"
-                    );
+                    let Some(sql) = sql else {
+                        tracing::error!(%identity, "record_post called with unknown identity");
+                        reply.send(Err(DbError::Database(sqlx::Error::Protocol(format!(
+                            "unknown identity: {identity}"
+                        )))));
+                        continue;
+                    };
                     let result = retry_busy(&rt, || {
-                        let sql = sql.clone();
                         let owner = key.owner.clone();
                         let repo = key.repo.clone();
                         let head_sha = key.head_sha.clone();
                         let outcome = outcome.clone();
                         async move {
-                            sqlx::query(&sql)
+                            sqlx::query(sql)
                                 .bind(&owner)
                                 .bind(&repo)
                                 .bind(key.pr)
@@ -708,15 +759,32 @@ pub(crate) fn run(
                                 let cols = row.columns();
                                 for col in cols.iter() {
                                     let name = col.name().trim_end_matches('$');
-                                    // Best-effort: try i64, then f64, then String decode
-                                    let val = if let Ok(v) = row.try_get::<i64, _>(name) {
+                                    // Probe NULL first, then try each storage class in
+                                    // SQLite's native order. Decoding failure surfaces
+                                    // as an error rather than silently substituting
+                                    // an empty blob (which would corrupt test
+                                    // assertions about row contents).
+                                    let val = if matches!(
+                                        row.try_get::<Option<i64>, _>(name),
+                                        Ok(None)
+                                    ) {
+                                        RawSqliteValue::Null
+                                    } else if let Ok(v) = row.try_get::<i64, _>(name) {
                                         RawSqliteValue::Integer(v)
                                     } else if let Ok(v) = row.try_get::<f64, _>(name) {
                                         RawSqliteValue::Real(v)
                                     } else if let Ok(v) = row.try_get::<String, _>(name) {
                                         RawSqliteValue::Text(v)
+                                    } else if let Ok(v) = row.try_get::<Vec<u8>, _>(name) {
+                                        RawSqliteValue::Blob(v)
                                     } else {
-                                        RawSqliteValue::Blob(Vec::new())
+                                        return Err(sqlx::Error::ColumnDecode {
+                                            index: name.to_string(),
+                                            source: format!(
+                                                "raw_query: no decoder matched column '{name}'"
+                                            )
+                                            .into(),
+                                        });
                                     };
                                     row_vals.push((name.to_string(), val));
                                 }

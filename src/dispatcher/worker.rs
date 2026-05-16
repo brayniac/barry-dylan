@@ -107,9 +107,4 @@ pub async fn run_worker(
     }
 }
 
-fn now_ts() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
+use crate::util::now_ts;

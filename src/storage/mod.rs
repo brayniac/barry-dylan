@@ -146,6 +146,7 @@ impl Store {
         // Run migrations on the pool before detaching a connection.
         Self::migrate_installation_tokens(&pool).await;
         Self::migrate_schema(&pool).await;
+        Self::migrate_jobs_add_actor(&pool).await;
 
         // Create a single connection to hand to the actor.
         let conn = pool.acquire().await?.detach();
@@ -170,6 +171,7 @@ impl Store {
 
         Self::migrate_installation_tokens(&pool).await;
         Self::migrate_schema(&pool).await;
+        Self::migrate_jobs_add_actor(&pool).await;
 
         let conn = pool.acquire().await?.detach();
 
@@ -201,6 +203,24 @@ impl Store {
             .await;
     }
 
+    /// Add `actor` column to `jobs` if missing. New deployments get the column
+    /// from the CREATE TABLE statement; older deployments need this ALTER.
+    async fn migrate_jobs_add_actor(pool: &sqlx::Pool<sqlx::Sqlite>) {
+        use sqlx::Row;
+        let rows = sqlx::query("SELECT name FROM pragma_table_info('jobs')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        let cols: Vec<String> = rows.iter().map(|r| r.get::<String, _>("name")).collect();
+        if cols.iter().any(|c| c == "actor") {
+            return;
+        }
+        let _ = sqlx::query("ALTER TABLE jobs ADD COLUMN actor TEXT")
+            .execute(pool)
+            .await
+            .map_err(|e| tracing::error!("migrate_jobs_add_actor failed: {e}"));
+    }
+
     /// Run schema statements from SCHEMA.
     async fn migrate_schema(pool: &sqlx::Pool<sqlx::Sqlite>) {
         for stmt in SCHEMA.split(';') {
@@ -215,7 +235,14 @@ impl Store {
     }
 
     /// Execute a parameterless raw SQL query and return all rows as
-    /// (column_name, value) pairs. Used by tests to assert on DB state.
+    /// (column_name, value) pairs.
+    ///
+    /// **Test-only.** Production code MUST go through typed `ActorCommand`
+    /// variants so that parameter binding and timing metrics flow through
+    /// the actor's normal path. This entry point exists so integration
+    /// tests (which cannot see `#[cfg(test)]` items) can assert on raw DB
+    /// state — it is `#[doc(hidden)]` to discourage external callers.
+    #[doc(hidden)]
     pub async fn query_raw(&self, sql: &str) -> anyhow::Result<Vec<Vec<(String, RawSqliteValue)>>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.tx

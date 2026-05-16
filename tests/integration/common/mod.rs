@@ -255,6 +255,7 @@ pub fn enqueue_opened<'a>(
         pr_number: pr,
         event_kind: "pull_request.opened".into(),
         delivery_id: "d1".into(),
+        actor: None,
     };
     async move {
         store.enqueue(&job, 0, 0).await.unwrap();

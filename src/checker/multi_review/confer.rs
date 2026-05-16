@@ -21,20 +21,14 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         .await?;
     let head_sha = pr_ctx.pr.head.sha.clone();
 
-    // Authorize the commenter using the same permission lookup as the trust gate.
-    // The webhook does not yet thread the comment author into the job; for v1 we
-    // use the latest non-bot comment on the PR as a proxy.
-    let confer_author = match pr_ctx
-        .comments
-        .iter()
-        .rev()
-        .find(|c| !c.author.starts_with("barry-dylan"))
-    {
-        Some(c) => c.author.clone(),
-        None => {
-            tracing::warn!("confer received but no non-bot comment on PR; ignoring");
-            return Ok(());
-        }
+    // Authorize against the user who actually issued `/barry confer`, threaded
+    // through from the webhook. Older queued jobs may lack this field (pre-
+    // migration); in that case we conservatively reject rather than fall back
+    // to a guess at the commenter.
+    let Some(confer_author) = job.actor.clone() else {
+        tracing::warn!("confer job missing actor field; ignoring");
+        metrics::counter!("barry_confer_total", "outcome" => "rejected_unauthorized").increment(1);
+        return Ok(());
     };
     let perm = barry_gh
         .author_permission(&job.repo_owner, &job.repo_name, &confer_author)
@@ -107,7 +101,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
     let diff = synthesis::render_diff_block(&files);
     let prior_text = build_prior_context(&pr_ctx);
 
-    let review = run_unified(
+    let (review, tokens) = run_unified(
         clients.for_identity(summon).as_ref(),
         clients.max_tokens_for(summon),
         personas,
@@ -115,6 +109,8 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         Some(&prior_text),
     )
     .await?;
+    deps.status_tracker
+        .add_tokens(job.id, tokens.input, tokens.output);
 
     post_review(
         &deps.gh_factory,
@@ -130,10 +126,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
     )
     .await?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = crate::util::now_ts();
     deps.store
         .record_post(key.clone(), summon, outcome_str(review.outcome), now)
         .await?;
@@ -164,7 +157,7 @@ async fn run_unified(
     personas: &[Persona],
     diff: &str,
     peer: Option<&str>,
-) -> anyhow::Result<UnifiedReview> {
+) -> anyhow::Result<(UnifiedReview, synthesis::TokenCount)> {
     let mut futures = Vec::with_capacity(personas.len());
     for p in personas {
         let p = p.clone();
@@ -173,13 +166,19 @@ async fn run_unified(
     }
     let results = futures::future::join_all(futures).await;
     let mut drafts = Vec::with_capacity(results.len());
+    let mut total = synthesis::TokenCount::default();
     for r in results {
-        drafts.push(r.map_err(|e| anyhow::anyhow!("persona call failed: {e}"))?);
+        let draft = r.map_err(|e| anyhow::anyhow!("persona call failed: {e}"))?;
+        total.input += draft.tokens.input;
+        total.output += draft.tokens.output;
+        drafts.push(draft);
     }
-    let (r, _tokens) = synthesis::synthesize(client, &drafts, diff, peer, max_tokens)
+    let (r, synth_tokens) = synthesis::synthesize(client, &drafts, diff, peer, max_tokens)
         .await
         .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"))?;
-    Ok(r)
+    total.input += synth_tokens.input;
+    total.output += synth_tokens.output;
+    Ok((r, total))
 }
 
 fn build_prior_context(pr_ctx: &crate::github::pr::PrContext) -> String {

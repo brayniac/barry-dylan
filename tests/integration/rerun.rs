@@ -11,6 +11,7 @@ async fn synchronize_events_coalesce_into_one_job() {
         pr_number: 1,
         event_kind: "pull_request.synchronize".into(),
         delivery_id: "d".into(),
+        actor: None,
     };
     for (delivery, now) in [("d1", 100), ("d2", 110), ("d3", 120)] {
         let mut j = job.clone();

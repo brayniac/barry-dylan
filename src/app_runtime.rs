@@ -45,9 +45,7 @@ impl MultiGhFactory for AppGhFactory {
         identity: Identity,
         installation_id: i64,
     ) -> anyhow::Result<Arc<GitHub>> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64;
+        let now = crate::util::now_ts();
         let token = crate::github::app::get_or_mint_for(
             &self.store,
             &self.http,

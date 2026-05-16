@@ -114,6 +114,7 @@ pub mod github;
 pub mod llm;
 pub mod storage;
 pub mod telemetry;
+pub mod util;
 pub mod webhook;
 
 pub type Result<T, E = anyhow::Error> = std::result::Result<T, E>;

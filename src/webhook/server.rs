@@ -10,7 +10,6 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -66,10 +65,7 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
     };
     tracing::info!(event = evt, delivery_id = %delivery, "webhook received");
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = crate::util::now_ts();
     let debounce = s.debounce_secs as i64;
 
     let to_enqueue: Option<(NewJob, i64)> = match parsed {
@@ -106,6 +102,7 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                     pr_number: pr,
                     event_kind: format!("pull_request.{}", e.action),
                     delivery_id: delivery.clone(),
+                    actor: None,
                 },
                 if e.action == "synchronize" {
                     now + debounce
@@ -148,6 +145,7 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                     pr_number: pr,
                     event_kind: format!("issue_comment.{}", short_command(&e.comment.body)),
                     delivery_id: delivery.clone(),
+                    actor: Some(e.sender.login.clone()),
                 },
                 now,
             ))
@@ -167,6 +165,7 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                     pr_number: e.number,
                     event_kind: "pull_request.closed".into(),
                     delivery_id: delivery.clone(),
+                    actor: None,
                 },
                 now,
             ))

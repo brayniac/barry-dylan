@@ -85,6 +85,17 @@ pub struct DispatcherConfig {
     pub checker_timeout_secs: u64,
 }
 
+impl Default for DispatcherConfig {
+    fn default() -> Self {
+        Self {
+            debounce_secs: default_debounce(),
+            worker_count: default_workers(),
+            job_timeout_secs: default_job_timeout(),
+            checker_timeout_secs: default_checker_timeout(),
+        }
+    }
+}
+
 fn default_debounce() -> u64 {
     30
 }
