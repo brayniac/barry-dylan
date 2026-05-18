@@ -53,11 +53,19 @@ pub async fn judge(
         }))
         .unwrap_or_default(),
     );
+    judge_once(client, &user, max_tokens).await
+}
+
+async fn judge_once(
+    client: &dyn LlmClient,
+    user: &str,
+    max_tokens: u32,
+) -> Result<JudgeVerdict, JudgeError> {
     let req = LlmRequest {
         system: Some(JUDGE_TEMPLATE.to_string()),
         messages: vec![LlmMessage {
             role: Role::User,
-            content: user,
+            content: user.to_string(),
         }],
         max_tokens,
         temperature: 0.0,
