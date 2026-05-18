@@ -2,6 +2,7 @@ use crate::storage::DbError;
 use crate::storage::audit::AuditEntry;
 use crate::storage::multi_review::{RunKey, RunState};
 use crate::storage::queue::{LeasedJob, NewJob};
+use crate::storage::installation_cache::CachedInstallation;
 use crate::storage::tokens::CachedToken;
 use sqlx::{Column, Connection, Row};
 use std::cell::UnsafeCell;
@@ -93,6 +94,24 @@ pub enum ActorCommand {
         installation_id: i64,
         token: String,
         expires_at: i64,
+        reply: Reply<()>,
+    },
+    GetInstallation {
+        identity: String,
+        owner: String,
+        now_ts: i64,
+        reply: Reply<Option<CachedInstallation>>,
+    },
+    PutInstallation {
+        identity: String,
+        owner: String,
+        installation_id: Option<i64>,
+        cached_at: i64,
+        reply: Reply<()>,
+    },
+    InvalidateInstallation {
+        identity: String,
+        owner: String,
         reply: Reply<()>,
     },
     GetToken {
@@ -500,6 +519,101 @@ pub(crate) fn run(
                     });
                     let duration_ms = start.elapsed().as_millis() as u64;
                     record_db_timing("put_token_for", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::GetInstallation {
+                    identity,
+                    owner,
+                    now_ts,
+                    reply,
+                } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || {
+                        let identity = identity.clone();
+                        let owner = owner.clone();
+                        async move {
+                            let row = sqlx::query(
+                                "SELECT installation_id, cached_at FROM installation_cache \
+                                 WHERE identity = ?1 AND owner = ?2",
+                            )
+                            .bind(&identity)
+                            .bind(&owner)
+                            .fetch_optional(unsafe { &mut *raw })
+                            .await?;
+                            Ok(row.and_then(|r| {
+                                let id: Option<i64> = r.get("installation_id");
+                                let cached_at: i64 = r.get("cached_at");
+                                match id {
+                                    Some(installation_id) => Some(CachedInstallation::Cached {
+                                        installation_id,
+                                    }),
+                                    // Negative cache: 1h TTL.
+                                    None if now_ts - cached_at <= 3600 => {
+                                        Some(CachedInstallation::NotInstalled)
+                                    }
+                                    None => None, // stale negative → treat as miss
+                                }
+                            }))
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("get_installation", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::PutInstallation {
+                    identity,
+                    owner,
+                    installation_id,
+                    cached_at,
+                    reply,
+                } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || {
+                        let identity = identity.clone();
+                        let owner = owner.clone();
+                        async move {
+                            sqlx::query(
+                                r#"INSERT INTO installation_cache (identity, owner, installation_id, cached_at)
+                                   VALUES (?1, ?2, ?3, ?4)
+                                   ON CONFLICT(identity, owner) DO UPDATE SET
+                                     installation_id = excluded.installation_id,
+                                     cached_at = excluded.cached_at"#,
+                            )
+                            .bind(&identity)
+                            .bind(&owner)
+                            .bind(installation_id)
+                            .bind(cached_at)
+                            .execute(unsafe { &mut *raw })
+                            .await
+                            .map(|_| ())
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("put_installation", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::InvalidateInstallation {
+                    identity,
+                    owner,
+                    reply,
+                } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || {
+                        let identity = identity.clone();
+                        let owner = owner.clone();
+                        async move {
+                            sqlx::query(
+                                "DELETE FROM installation_cache WHERE identity = ?1 AND owner = ?2",
+                            )
+                            .bind(&identity)
+                            .bind(&owner)
+                            .execute(unsafe { &mut *raw })
+                            .await
+                            .map(|_| ())
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("invalidate_installation", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::GetToken {
