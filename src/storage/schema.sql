@@ -63,4 +63,12 @@ CREATE TABLE IF NOT EXISTS multi_review_runs (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS multi_review_runs_unique
-    ON multi_review_runs(repo_owner, repo_name, pr_number, head_sha)
+    ON multi_review_runs(repo_owner, repo_name, pr_number, head_sha);
+
+CREATE TABLE IF NOT EXISTS installation_cache (
+    identity        TEXT NOT NULL,
+    owner           TEXT NOT NULL,
+    installation_id INTEGER,
+    cached_at       INTEGER NOT NULL,
+    PRIMARY KEY (identity, owner)
+);
