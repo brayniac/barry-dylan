@@ -201,13 +201,11 @@ impl<'a> Orchestrator<'a> {
         {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(?e, "judge failed; defaulting to disagreement");
-                tracing::info!(kind = "disagree", "verdict");
-                metrics::counter!("barry_multi_review_judge_total", "verdict" => "disagree")
-                    .increment(1);
-                return Ok(Verdict::Disagree {
+                tracing::warn!(?e, "judge failed; posting Barry alone");
+                tracing::info!(kind = "barry_alone", "verdict");
+                metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
+                return Ok(Verdict::BarryAlone {
                     barry: barry_r2,
-                    other_barry: ob_r2,
                     reason: "judge unavailable".into(),
                 });
             }
@@ -523,11 +521,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn judge_failure_defaults_to_disagree() {
+    async fn judge_failure_returns_barry_alone() {
+        // Both reviewers run full pipeline; judge errors → orchestrator
+        // should fall back to BarryAlone, not Disagree.
         let c = clients(
-            vec![Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Err("judge down")],
+            vec![Ok(approve()), Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(comment()), Ok(comment()), Ok(comment()), Ok(comment())],
+            vec![Err("transport boom"), Err("transport boom")],
         );
         let p = personas();
         let v = Orchestrator {
@@ -539,6 +539,11 @@ mod tests {
         .run(&[file()])
         .await
         .unwrap();
-        assert!(matches!(v, Verdict::Disagree { .. }));
+        match v {
+            Verdict::BarryAlone { reason, .. } => {
+                assert_eq!(reason, "judge unavailable");
+            }
+            other => panic!("wanted BarryAlone, got {other:?}"),
+        }
     }
 }
