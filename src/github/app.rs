@@ -57,10 +57,11 @@ pub async fn fetch_installation_token(
     http: &reqwest::Client,
     creds: &AppCreds,
     installation_id: i64,
+    base_url: &str,
 ) -> anyhow::Result<(String, i64)> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let jwt = creds.mint_jwt(now)?;
-    let url = format!("https://api.github.com/app/installations/{installation_id}/access_tokens");
+    let url = format!("{base_url}/app/installations/{installation_id}/access_tokens");
     let resp = http
         .post(&url)
         .bearer_auth(&jwt)
@@ -127,6 +128,7 @@ pub async fn get_or_mint_for(
     identity: crate::checker::multi_review::identity::Identity,
     installation_id: i64,
     now_ts: i64,
+    base_url: &str,
 ) -> anyhow::Result<String> {
     if let Some(t) = store
         .get_installation_token_for(identity.slug(), installation_id, now_ts)
@@ -134,7 +136,7 @@ pub async fn get_or_mint_for(
     {
         return Ok(t.token);
     }
-    let (token, exp) = fetch_installation_token(http, creds, installation_id).await?;
+    let (token, exp) = fetch_installation_token(http, creds, installation_id, base_url).await?;
     store
         .put_installation_token_for(identity.slug(), installation_id, &token, exp)
         .await?;
@@ -157,6 +159,7 @@ pub async fn get_or_mint(
         crate::checker::multi_review::identity::Identity::Barry,
         installation_id,
         now_ts,
+        GITHUB_API_BASE,
     )
     .await
 }

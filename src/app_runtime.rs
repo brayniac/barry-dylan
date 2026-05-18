@@ -38,6 +38,10 @@ impl GhFactory for AppGhFactory {
         // (e.g., dispatcher leasing a job). Identity-based callers should use
         // for_identity() so OB and OOB get resolved correctly.
         let now = crate::util::now_ts();
+        let base = self
+            .gh_api_base
+            .as_deref()
+            .unwrap_or(crate::github::app::GITHUB_API_BASE);
         let token = crate::github::app::get_or_mint_for(
             &self.store,
             &self.http,
@@ -45,6 +49,7 @@ impl GhFactory for AppGhFactory {
             Identity::Barry,
             installation_id,
             now,
+            base,
         )
         .await?;
         Ok(Arc::new(GitHub::new(self.http.clone(), token)))
@@ -60,16 +65,50 @@ impl MultiGhFactory for AppGhFactory {
         repo: &str,
     ) -> Result<Arc<GitHub>, GhFactoryError> {
         let now = crate::util::now_ts();
+        let base = self
+            .gh_api_base
+            .as_deref()
+            .unwrap_or(crate::github::app::GITHUB_API_BASE);
+        let creds = self.creds_for(identity);
         let installation_id = self
             .resolve_installation(identity, owner, repo, now)
             .await?;
-        let creds = self.creds_for(identity);
-        let token = crate::github::app::get_or_mint_for(
-            &self.store, &self.http, creds, identity, installation_id, now,
+        match crate::github::app::get_or_mint_for(
+            &self.store,
+            &self.http,
+            creds,
+            identity,
+            installation_id,
+            now,
+            base,
         )
         .await
-        .map_err(|e| GhFactoryError::Other(e))?;
-        Ok(Arc::new(GitHub::new(self.http.clone(), token)))
+        {
+            Ok(token) => Ok(Arc::new(GitHub::new(self.http.clone(), token))),
+            Err(e) if is_unauthorized(&e) => {
+                // Stale positive cache: App was uninstalled. Invalidate, retry once.
+                self.store
+                    .invalidate_installation(identity.slug(), owner)
+                    .await
+                    .map_err(GhFactoryError::Other)?;
+                let installation_id = self
+                    .resolve_installation(identity, owner, repo, now)
+                    .await?;
+                let token = crate::github::app::get_or_mint_for(
+                    &self.store,
+                    &self.http,
+                    creds,
+                    identity,
+                    installation_id,
+                    now,
+                    base,
+                )
+                .await
+                .map_err(GhFactoryError::Other)?;
+                Ok(Arc::new(GitHub::new(self.http.clone(), token)))
+            }
+            Err(e) => Err(GhFactoryError::Other(e)),
+        }
     }
 
     async fn preflight_identity(
@@ -325,6 +364,12 @@ fn personas_from_cfg(
     }
 }
 
+fn is_unauthorized(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|re| re.status() == Some(reqwest::StatusCode::UNAUTHORIZED))
+}
+
 #[cfg(test)]
 mod factory_tests {
     use super::*;
@@ -422,5 +467,37 @@ mod factory_tests {
         f.preflight_identity(Identity::OtherBarry, "acme", "widget")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn token_mint_401_invalidates_cache_and_retries() {
+        let server = MockServer::start().await;
+        // 1) First /repos lookup → 200 with id=99 (seeds positive cache via for_identity).
+        // 2) /app/installations/99/access_tokens → 401 (install was removed).
+        // 3) After invalidation, /repos lookup is retried → 404 → NotInstalled.
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widget/installation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 99})))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/app/installations/99/access_tokens"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widget/installation"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let (f, _store) = factory_with(server.uri()).await;
+        match f
+            .for_identity(Identity::OtherBarry, "acme", "widget")
+            .await
+        {
+            Ok(_) => panic!("expected NotInstalled error"),
+            Err(err) => assert!(matches!(err, GhFactoryError::NotInstalled { .. })),
+        }
     }
 }
