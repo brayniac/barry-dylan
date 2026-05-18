@@ -235,6 +235,43 @@ impl<'a> Orchestrator<'a> {
         }
     }
 
+    /// Run Barry's pipeline alone (drafts + R1 synthesis). Used when OB is
+    /// known to be unavailable before any LLM calls (e.g., not installed).
+    /// No OB or judge calls are made.
+    pub async fn run_barry_only(
+        &self,
+        files: &[ChangedFile],
+        reason: String,
+    ) -> anyhow::Result<Verdict> {
+        let span = tracing::info_span!("orchestrator.run_barry_only", files = files.len());
+        let _enter = span.enter();
+
+        self.tracker.set_phase(self.job_id, "persona drafts");
+        let diff = synthesis::render_diff_block(files);
+        tracing::debug!("Barry-only drafts starting");
+        let barry_drafts = self
+            .run_persona_drafts(Identity::Barry, files)
+            .await
+            .map_err(|e| anyhow::anyhow!("barry drafts failed: {e}"))?;
+        let draft_tok_in: u64 = barry_drafts.iter().map(|d| d.tokens.input).sum();
+        let draft_tok_out: u64 = barry_drafts.iter().map(|d| d.tokens.output).sum();
+        self.tracker
+            .add_tokens(self.job_id, draft_tok_in, draft_tok_out);
+        self.tracker.set_phase(self.job_id, "R1 synthesis");
+        let (barry_r1, r1_tokens) = self
+            .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
+        self.tracker
+            .add_tokens(self.job_id, r1_tokens.input, r1_tokens.output);
+        tracing::info!(kind = "barry_alone", "verdict");
+        metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
+        Ok(Verdict::BarryAlone {
+            barry: barry_r1,
+            reason,
+        })
+    }
+
     /// Run every persona in parallel for one identity and collect raw drafts.
     /// Independent of peer review, so a single call's output is reusable in R1 and R2.
     async fn run_persona_drafts(
@@ -542,6 +579,34 @@ mod tests {
         match v {
             Verdict::BarryAlone { reason, .. } => {
                 assert_eq!(reason, "judge unavailable");
+            }
+            other => panic!("wanted BarryAlone, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_barry_only_skips_ob_and_judge() {
+        // Barry's drafts (security + rust) + R1 synth = 3 calls.
+        // OB and judge clients must not be called.
+        let c = clients(
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![], // OB client must not be called.
+            vec![], // Judge client must not be called.
+        );
+        let p = personas();
+        let v = Orchestrator {
+            clients: &c,
+            personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
+        }
+        .run_barry_only(&[file()], "Other Barry not installed".into())
+        .await
+        .unwrap();
+        match v {
+            Verdict::BarryAlone { barry, reason } => {
+                assert_eq!(barry.outcome, Outcome::Approve);
+                assert_eq!(reason, "Other Barry not installed");
             }
             other => panic!("wanted BarryAlone, got {other:?}"),
         }
