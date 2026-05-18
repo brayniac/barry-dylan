@@ -94,6 +94,13 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                 "processing pull request webhook"
             );
 
+            // Populate Barry's installation cache so downstream factory calls
+            // for (Barry, owner) are a free DB lookup.
+            let _ = s
+                .store
+                .put_installation("barry", &owner, Some(e.installation.id), now)
+                .await;
+
             Some((
                 NewJob {
                     installation_id: e.installation.id,
@@ -137,6 +144,13 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                 "processing /barry command"
             );
 
+            // Populate Barry's installation cache so downstream factory calls
+            // for (Barry, owner) are a free DB lookup.
+            let _ = s
+                .store
+                .put_installation("barry", &owner, Some(e.installation.id), now)
+                .await;
+
             Some((
                 NewJob {
                     installation_id: e.installation.id,
@@ -151,17 +165,27 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             ))
         }
         InboundEvent::PullRequest(e) if e.action == "closed" => {
+            let owner = e.repository.owner.login.clone();
+            let repo = e.repository.name.clone();
             tracing::info!(
-                owner = %e.repository.owner.login,
-                repo = %e.repository.name,
+                owner = %owner,
+                repo = %repo,
                 pr = e.number,
                 "PR closed webhook received"
             );
+
+            // Populate Barry's installation cache so downstream factory calls
+            // for (Barry, owner) are a free DB lookup.
+            let _ = s
+                .store
+                .put_installation("barry", &owner, Some(e.installation.id), now)
+                .await;
+
             Some((
                 NewJob {
                     installation_id: e.installation.id,
-                    repo_owner: e.repository.owner.login.clone(),
-                    repo_name: e.repository.name.clone(),
+                    repo_owner: owner,
+                    repo_name: repo,
                     pr_number: e.number,
                     event_kind: "pull_request.closed".into(),
                     delivery_id: delivery.clone(),

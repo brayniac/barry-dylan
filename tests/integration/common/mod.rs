@@ -57,9 +57,24 @@ impl GhFactory for StaticGh {
 
 #[async_trait]
 impl MultiGhFactory for StaticGh {
-    async fn for_identity(&self, _identity: Identity, _inst: i64) -> anyhow::Result<Arc<GitHub>> {
+    async fn for_identity(
+        &self,
+        _identity: Identity,
+        _owner: &str,
+        _repo: &str,
+    ) -> Result<Arc<GitHub>, barry_dylan::dispatcher::run::GhFactoryError> {
         // All identities share one mock GitHub in tests.
         Ok(self.gh.clone())
+    }
+
+    async fn preflight_identity(
+        &self,
+        _identity: Identity,
+        _owner: &str,
+        _repo: &str,
+    ) -> Result<(), barry_dylan::dispatcher::run::GhFactoryError> {
+        // In tests, all identities are considered installed.
+        Ok(())
     }
 }
 

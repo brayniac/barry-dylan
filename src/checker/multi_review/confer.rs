@@ -95,9 +95,37 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         return Ok(());
     };
 
-    let files = barry_gh
-        .list_pr_files(&job.repo_owner, &job.repo_name, job.pr_number)
-        .await?;
+    // Preflight: verify the summoned identity is installed before spending LLM tokens.
+    let owner = job.repo_owner.clone();
+    let repo = job.repo_name.clone();
+    match deps
+        .gh_factory
+        .preflight_identity(summon, &owner, &repo)
+        .await
+    {
+        Ok(()) => {}
+        Err(crate::dispatcher::run::GhFactoryError::NotInstalled { identity, .. }) => {
+            let identity_label = identity.label();
+            let body = format!(
+                "{identity_label} isn't installed on this repository, so I can't summon them. \
+                 Ask a maintainer to install the App."
+            );
+            barry_gh
+                .create_issue_comment(&owner, &repo, job.pr_number, &body)
+                .await?;
+            metrics::counter!(
+                "barry_confer_total",
+                "outcome" => "rejected_not_installed"
+            )
+            .increment(1);
+            return Ok(());
+        }
+        Err(crate::dispatcher::run::GhFactoryError::Other(e)) => {
+            return Err(e);
+        }
+    }
+
+    let files = barry_gh.list_pr_files(&owner, &repo, job.pr_number).await?;
     let diff = synthesis::render_diff_block(&files);
     let prior_text = build_prior_context(&pr_ctx);
 
@@ -114,17 +142,17 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
 
     post_review(
         &deps.gh_factory,
-        job.installation_id,
+        &owner,
+        &repo,
         summon,
-        &job.repo_owner,
-        &job.repo_name,
         job.pr_number,
         &head_sha,
         &files,
         &review,
         None,
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     let now = crate::util::now_ts();
     deps.store

@@ -1,6 +1,6 @@
 use crate::checker::multi_review::identity::Identity;
 use crate::checker::multi_review::review::UnifiedReview;
-use crate::dispatcher::run::MultiGhFactory;
+use crate::dispatcher::run::{GhFactoryError, MultiGhFactory};
 use crate::github::pr::{ChangedFile, ReviewCommentInput, ReviewInput};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,17 +31,16 @@ pub fn body_for(
 #[allow(clippy::too_many_arguments)]
 pub async fn post_review(
     factory: &Arc<dyn MultiGhFactory>,
-    installation_id: i64,
-    identity: Identity,
     owner: &str,
     repo: &str,
+    identity: Identity,
     pr_number: i64,
     head_sha: &str,
     files: &[ChangedFile],
     review: &UnifiedReview,
     peer_disagreement: Option<&str>,
-) -> anyhow::Result<()> {
-    let gh = factory.for_identity(identity, installation_id).await?;
+) -> Result<(), GhFactoryError> {
+    let gh = factory.for_identity(identity, owner, repo).await?;
     let inline = to_inline_comments(files, &review.findings);
     tracing::info!(
         ?identity,
@@ -62,7 +61,9 @@ pub async fn post_review(
         comments: &inline,
         commit_id: head_sha,
     };
-    let _ = gh.create_review(owner, repo, pr_number, &input).await?;
+    gh.create_review(owner, repo, pr_number, &input)
+        .await
+        .map_err(|e| GhFactoryError::Other(e.into()))?;
     tracing::info!(?identity, "review posted");
     Ok(())
 }

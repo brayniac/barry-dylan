@@ -26,6 +26,15 @@ impl AppCreds {
         })
     }
 
+    /// Test-only constructor — creates `AppCreds` from raw PEM bytes.
+    #[cfg(test)]
+    pub fn from_pem_bytes(app_id: u64, pem: Vec<u8>) -> Self {
+        Self {
+            app_id,
+            private_key_pem: pem,
+        }
+    }
+
     /// Mint a short-lived (10 minute) JWT signed with the App private key.
     pub fn mint_jwt(&self, now: u64) -> anyhow::Result<String> {
         let claims = Claims {
@@ -48,10 +57,11 @@ pub async fn fetch_installation_token(
     http: &reqwest::Client,
     creds: &AppCreds,
     installation_id: i64,
+    base_url: &str,
 ) -> anyhow::Result<(String, i64)> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let jwt = creds.mint_jwt(now)?;
-    let url = format!("https://api.github.com/app/installations/{installation_id}/access_tokens");
+    let url = format!("{base_url}/app/installations/{installation_id}/access_tokens");
     let resp = http
         .post(&url)
         .bearer_auth(&jwt)
@@ -70,6 +80,46 @@ pub async fn fetch_installation_token(
     Ok((resp.token, dt.unix_timestamp()))
 }
 
+/// Default GitHub API base URL. Tests pass a different URL pointing at wiremock.
+pub const GITHUB_API_BASE: &str = "https://api.github.com";
+
+/// Look up the App installation ID for a given owner/repo. Returns:
+/// - `Ok(Some(id))` if the App is installed on the repo.
+/// - `Ok(None)` if GitHub returns 404 (App is not installed on this owner).
+/// - `Err(_)` for any other failure (transport, 5xx, unparseable response).
+///
+/// `base_url` is the GitHub API base (use `GITHUB_API_BASE` in production).
+pub async fn resolve_installation_id_for_repo(
+    http: &reqwest::Client,
+    creds: &AppCreds,
+    owner: &str,
+    repo: &str,
+    base_url: &str,
+) -> anyhow::Result<Option<i64>> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let jwt = creds.mint_jwt(now)?;
+    let url = format!("{base_url}/repos/{owner}/{repo}/installation");
+    let resp = http
+        .get(&url)
+        .bearer_auth(&jwt)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "barry-dylan")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let resp = resp.error_for_status()?;
+    #[derive(serde::Deserialize)]
+    struct InstallationResponse {
+        id: i64,
+    }
+    let parsed: InstallationResponse = resp.json().await?;
+    Ok(Some(parsed.id))
+}
+
 /// Identity-scoped token cache lookup/mint. Uses `identity.slug()` as the cache key.
 pub async fn get_or_mint_for(
     store: &Store,
@@ -78,6 +128,7 @@ pub async fn get_or_mint_for(
     identity: crate::checker::multi_review::identity::Identity,
     installation_id: i64,
     now_ts: i64,
+    base_url: &str,
 ) -> anyhow::Result<String> {
     if let Some(t) = store
         .get_installation_token_for(identity.slug(), installation_id, now_ts)
@@ -85,7 +136,7 @@ pub async fn get_or_mint_for(
     {
         return Ok(t.token);
     }
-    let (token, exp) = fetch_installation_token(http, creds, installation_id).await?;
+    let (token, exp) = fetch_installation_token(http, creds, installation_id, base_url).await?;
     store
         .put_installation_token_for(identity.slug(), installation_id, &token, exp)
         .await?;
@@ -108,6 +159,7 @@ pub async fn get_or_mint(
         crate::checker::multi_review::identity::Identity::Barry,
         installation_id,
         now_ts,
+        GITHUB_API_BASE,
     )
     .await
 }
@@ -150,5 +202,65 @@ mod tests {
         // Decode using the public key embedded by stripping the private parts.
         // Just confirm it has 3 base64url segments.
         assert_eq!(token.split('.').count(), 3);
+    }
+
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_creds() -> AppCreds {
+        AppCreds {
+            app_id: 12345,
+            private_key_pem: test_key_pem(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_installation_id_returns_id_on_200() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widget/installation"))
+            .and(header("Accept", "application/vnd.github+json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42
+            })))
+            .mount(&server)
+            .await;
+        let http = reqwest::Client::new();
+        let result =
+            resolve_installation_id_for_repo(&http, &test_creds(), "acme", "widget", &server.uri())
+                .await
+                .unwrap();
+        assert_eq!(result, Some(42));
+    }
+
+    #[tokio::test]
+    async fn resolve_installation_id_returns_none_on_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widget/installation"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let http = reqwest::Client::new();
+        let result =
+            resolve_installation_id_for_repo(&http, &test_creds(), "acme", "widget", &server.uri())
+                .await
+                .unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_installation_id_errors_on_500() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widget/installation"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let http = reqwest::Client::new();
+        let result =
+            resolve_installation_id_for_repo(&http, &test_creds(), "acme", "widget", &server.uri())
+                .await;
+        assert!(result.is_err());
     }
 }

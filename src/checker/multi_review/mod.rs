@@ -18,7 +18,7 @@ use crate::checker::multi_review::persona::Persona;
 use crate::checker::multi_review::posting::post_review;
 use crate::checker::{Checker, CheckerCtx, CheckerOutcome, OutcomeStatus};
 use crate::config::repo::RepoConfig;
-use crate::dispatcher::run::MultiGhFactory;
+use crate::dispatcher::run::{GhFactoryError, MultiGhFactory};
 use crate::telemetry::status::StatusTracker;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -53,7 +53,6 @@ impl Checker for MultiReviewChecker {
         let _enter = span.enter();
 
         tracing::info!("multi-review checker starting");
-        let installation_id = installation_id_from_ctx(ctx)?;
         let start = std::time::Instant::now();
         let orchestrator = Orchestrator {
             clients: &self.clients,
@@ -61,7 +60,26 @@ impl Checker for MultiReviewChecker {
             tracker: self.status_tracker.clone(),
             job_id: ctx.job_id,
         };
-        let verdict = orchestrator.run(&ctx.files).await?;
+
+        // Pre-check: if OB isn't installed on this repo, skip OB's LLM phases
+        // entirely and run Barry alone. This avoids paying OB's token cost
+        // when we already know we can't post under that identity.
+        let ob_available = match self
+            .gh_factory
+            .preflight_identity(Identity::OtherBarry, &ctx.owner, &ctx.repo)
+            .await
+        {
+            Ok(()) => true,
+            Err(GhFactoryError::NotInstalled { .. }) => false,
+            Err(GhFactoryError::Other(e)) => return Err(e),
+        };
+        let mut verdict = if ob_available {
+            orchestrator.run(&ctx.files).await?
+        } else {
+            orchestrator
+                .run_barry_only(&ctx.files, "Other Barry not installed".into())
+                .await?
+        };
         let orchestrator_duration = start.elapsed();
 
         let verdict_kind = match &verdict {
@@ -80,17 +98,17 @@ impl Checker for MultiReviewChecker {
             Verdict::Agree { barry } | Verdict::BarryAlone { barry, .. } => {
                 post_review(
                     &self.gh_factory,
-                    installation_id,
-                    Identity::Barry,
                     &ctx.owner,
                     &ctx.repo,
+                    Identity::Barry,
                     ctx.pr.number,
                     &ctx.pr.head.sha,
                     &ctx.files,
                     barry,
                     None,
                 )
-                .await?;
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
             }
             Verdict::Disagree {
                 barry,
@@ -100,30 +118,47 @@ impl Checker for MultiReviewChecker {
                 let disagreement_msg = format!("I disagree with Barry: {reason}");
                 post_review(
                     &self.gh_factory,
-                    installation_id,
-                    Identity::Barry,
                     &ctx.owner,
                     &ctx.repo,
+                    Identity::Barry,
                     ctx.pr.number,
                     &ctx.pr.head.sha,
                     &ctx.files,
                     barry,
                     None,
                 )
-                .await?;
-                post_review(
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+                // OB post: NotInstalled here means OB was uninstalled between
+                // our pre-check and now. Downgrade to BarryAlone bookkeeping.
+                let downgrade = match post_review(
                     &self.gh_factory,
-                    installation_id,
-                    Identity::OtherBarry,
                     &ctx.owner,
                     &ctx.repo,
+                    Identity::OtherBarry,
                     ctx.pr.number,
                     &ctx.pr.head.sha,
                     &ctx.files,
                     other_barry,
                     Some(&disagreement_msg),
                 )
-                .await?;
+                .await
+                {
+                    Ok(()) => false,
+                    Err(GhFactoryError::NotInstalled { .. }) => {
+                        tracing::warn!("OB uninstalled mid-run; downgrading to BarryAlone");
+                        metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
+                        true
+                    }
+                    Err(GhFactoryError::Other(e)) => return Err(e),
+                };
+                if downgrade {
+                    let barry_clone = barry.clone();
+                    verdict = Verdict::BarryAlone {
+                        barry: barry_clone,
+                        reason: "Other Barry uninstalled mid-run".into(),
+                    };
+                }
             }
         }
 
@@ -206,7 +241,74 @@ fn first_line(s: &str) -> String {
 
 use crate::util::now_ts;
 
-fn installation_id_from_ctx(ctx: &CheckerCtx) -> anyhow::Result<i64> {
-    ctx.installation_id
-        .ok_or_else(|| anyhow::anyhow!("installation_id not available in CheckerCtx"))
+#[cfg(test)]
+mod checker_tests {
+    use super::*;
+    use crate::checker::multi_review::identity::Identity;
+    use crate::dispatcher::run::GhFactoryError;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    struct StubFactory {
+        ob_installed: bool,
+    }
+
+    #[async_trait]
+    impl crate::dispatcher::run::GhFactory for StubFactory {
+        async fn for_installation(
+            &self,
+            _installation_id: i64,
+        ) -> anyhow::Result<Arc<crate::github::client::GitHub>> {
+            anyhow::bail!("not used in this test")
+        }
+    }
+
+    #[async_trait]
+    impl crate::dispatcher::run::MultiGhFactory for StubFactory {
+        async fn for_identity(
+            &self,
+            identity: Identity,
+            owner: &str,
+            repo: &str,
+        ) -> Result<Arc<crate::github::client::GitHub>, GhFactoryError> {
+            if identity == Identity::OtherBarry && !self.ob_installed {
+                return Err(GhFactoryError::NotInstalled {
+                    identity,
+                    owner: owner.to_string(),
+                    repo: repo.to_string(),
+                });
+            }
+            Err(GhFactoryError::Other(anyhow::anyhow!(
+                "for_identity should not be reached in preflight-only tests"
+            )))
+        }
+
+        async fn preflight_identity(
+            &self,
+            identity: Identity,
+            owner: &str,
+            repo: &str,
+        ) -> Result<(), GhFactoryError> {
+            if identity == Identity::OtherBarry && !self.ob_installed {
+                return Err(GhFactoryError::NotInstalled {
+                    identity,
+                    owner: owner.to_string(),
+                    repo: repo.to_string(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stub_factory_compiles() {
+        let f = StubFactory {
+            ob_installed: false,
+        };
+        let err = f
+            .preflight_identity(Identity::OtherBarry, "acme", "widget")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GhFactoryError::NotInstalled { .. }));
+    }
 }

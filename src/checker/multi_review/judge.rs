@@ -53,11 +53,35 @@ pub async fn judge(
         }))
         .unwrap_or_default(),
     );
+    match judge_once(client, &user, max_tokens).await {
+        Ok(v) => Ok(v),
+        Err(JudgeError::Parse(raw)) => {
+            let truncated: String = raw.chars().take(2048).collect();
+            tracing::warn!(raw_text = %truncated, "judge parse failed; retrying once");
+            match judge_once(client, &user, max_tokens).await {
+                Ok(v) => Ok(v),
+                Err(JudgeError::Parse(raw2)) => {
+                    let truncated: String = raw2.chars().take(2048).collect();
+                    tracing::warn!(raw_text = %truncated, "judge parse failed on retry; giving up");
+                    Err(JudgeError::Parse(raw2))
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn judge_once(
+    client: &dyn LlmClient,
+    user: &str,
+    max_tokens: u32,
+) -> Result<JudgeVerdict, JudgeError> {
     let req = LlmRequest {
         system: Some(JUDGE_TEMPLATE.to_string()),
         messages: vec![LlmMessage {
             role: Role::User,
-            content: user,
+            content: user.to_string(),
         }],
         max_tokens,
         temperature: 0.0,
@@ -80,7 +104,7 @@ pub async fn judge(
 mod tests {
     use super::*;
     use crate::checker::multi_review::review::{Outcome, UnifiedReview};
-    use crate::llm::LlmResponse;
+    use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -184,5 +208,94 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, JudgeError::Parse(_)));
+    }
+
+    struct ScriptClient {
+        resps: Mutex<Vec<Result<LlmResponse, crate::llm::LlmError>>>,
+        recorded: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl crate::llm::LlmClient for ScriptClient {
+        async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, crate::llm::LlmError> {
+            self.recorded.lock().unwrap().push(req.clone());
+            let mut q = self.resps.lock().unwrap();
+            if q.is_empty() {
+                panic!("ScriptClient exhausted");
+            }
+            q.remove(0)
+        }
+    }
+
+    fn rev() -> UnifiedReview {
+        UnifiedReview {
+            outcome: Outcome::Comment,
+            summary: "x".into(),
+            findings: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_retries_once_on_parse_then_succeeds() {
+        let recorded = Arc::new(Mutex::new(vec![]));
+        let client = ScriptClient {
+            resps: Mutex::new(vec![
+                Ok(LlmResponse {
+                    text: "".into(),
+                    input_tokens: Some(10),
+                    output_tokens: Some(0),
+                }),
+                Ok(LlmResponse {
+                    text: r#"{"agree":true,"reason":"ok"}"#.into(),
+                    input_tokens: Some(11),
+                    output_tokens: Some(5),
+                }),
+            ]),
+            recorded: recorded.clone(),
+        };
+        let v = judge(&client, &rev(), &rev(), 256).await.unwrap();
+        assert!(v.agree);
+        // Second call (the successful one) is the one whose tokens we credit.
+        assert_eq!(v.tokens.input, 11);
+        assert_eq!(v.tokens.output, 5);
+        assert_eq!(recorded.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn judge_returns_parse_after_both_attempts_fail() {
+        let recorded = Arc::new(Mutex::new(vec![]));
+        let client = ScriptClient {
+            resps: Mutex::new(vec![
+                Ok(LlmResponse {
+                    text: "".into(),
+                    input_tokens: Some(1),
+                    output_tokens: Some(0),
+                }),
+                Ok(LlmResponse {
+                    text: "still garbage".into(),
+                    input_tokens: Some(1),
+                    output_tokens: Some(0),
+                }),
+            ]),
+            recorded: recorded.clone(),
+        };
+        let err = judge(&client, &rev(), &rev(), 256).await.unwrap_err();
+        assert!(matches!(err, JudgeError::Parse(_)));
+        assert_eq!(recorded.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn judge_does_not_retry_on_transport_errors() {
+        let recorded = Arc::new(Mutex::new(vec![]));
+        let client = ScriptClient {
+            resps: Mutex::new(vec![Err(crate::llm::LlmError::Api {
+                status: 500,
+                body: "boom".into(),
+            })]),
+            recorded: recorded.clone(),
+        };
+        let err = judge(&client, &rev(), &rev(), 256).await.unwrap_err();
+        assert!(matches!(err, JudgeError::Llm(_)));
+        assert_eq!(recorded.lock().unwrap().len(), 1);
     }
 }

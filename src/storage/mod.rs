@@ -87,6 +87,7 @@
 pub use self::actor::RawSqliteValue;
 pub(crate) use self::actor::run;
 pub use self::audit::AuditEntry;
+pub use self::installation_cache::CachedInstallation;
 pub use self::multi_review::RunKey;
 pub use self::multi_review::RunState;
 pub use self::queue::{LeasedJob, NewJob};
@@ -98,6 +99,7 @@ use crate::storage::cache::ReadCache;
 pub mod actor;
 pub mod audit;
 pub mod cache;
+pub mod installation_cache;
 pub mod multi_review;
 pub mod queue;
 pub mod tokens;
