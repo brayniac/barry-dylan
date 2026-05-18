@@ -26,6 +26,15 @@ impl AppCreds {
         })
     }
 
+    /// Test-only constructor — creates `AppCreds` from raw PEM bytes.
+    #[cfg(test)]
+    pub fn from_pem_bytes(app_id: u64, pem: Vec<u8>) -> Self {
+        Self {
+            app_id,
+            private_key_pem: pem,
+        }
+    }
+
     /// Mint a short-lived (10 minute) JWT signed with the App private key.
     pub fn mint_jwt(&self, now: u64) -> anyhow::Result<String> {
         let claims = Claims {

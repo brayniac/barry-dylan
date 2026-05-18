@@ -49,14 +49,39 @@ pub trait GhFactory: Send + Sync {
     async fn for_installation(&self, installation_id: i64) -> anyhow::Result<Arc<GitHub>>;
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum GhFactoryError {
+    #[error("{identity:?} is not installed on {owner}/{repo}")]
+    NotInstalled {
+        identity: Identity,
+        owner: String,
+        repo: String,
+    },
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 #[async_trait::async_trait]
 pub trait MultiGhFactory: GhFactory {
-    /// Mint a GitHub client authenticated as the given identity for this installation.
+    /// Mint a GitHub client authenticated as the given identity for the given
+    /// repo. Internally resolves the installation_id for (identity, owner).
+    /// Returns `Err(NotInstalled)` if the identity's App is not installed on
+    /// the owner.
     async fn for_identity(
         &self,
         identity: Identity,
-        installation_id: i64,
-    ) -> anyhow::Result<Arc<GitHub>>;
+        owner: &str,
+        repo: &str,
+    ) -> Result<Arc<GitHub>, GhFactoryError>;
+
+    /// Verify the identity's App is installed on the owner without minting a
+    /// token. Same cache writes and WARN+metric side effects as `for_identity`.
+    async fn preflight_identity(
+        &self,
+        identity: Identity,
+        owner: &str,
+        repo: &str,
+    ) -> Result<(), GhFactoryError>;
 }
 
 pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {

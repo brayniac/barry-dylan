@@ -41,7 +41,7 @@ pub async fn post_review(
     review: &UnifiedReview,
     peer_disagreement: Option<&str>,
 ) -> anyhow::Result<()> {
-    let gh = factory.for_identity(identity, installation_id).await?;
+    let gh = factory.for_identity(identity, owner, repo).await.map_err(|e| anyhow::anyhow!("{e}"))?;
     let inline = to_inline_comments(files, &review.findings);
     tracing::info!(
         ?identity,
