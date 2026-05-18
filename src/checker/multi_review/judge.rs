@@ -291,7 +291,10 @@ mod tests {
     async fn judge_does_not_retry_on_transport_errors() {
         let recorded = Arc::new(Mutex::new(vec![]));
         let client = ScriptClient {
-            resps: Mutex::new(vec![Err(crate::llm::LlmError::Shape("boom".into()))]),
+            resps: Mutex::new(vec![Err(crate::llm::LlmError::Api {
+                status: 500,
+                body: "boom".into(),
+            })]),
             recorded: recorded.clone(),
         };
         let err = judge(&client, &rev(), &rev(), 256).await.unwrap_err();
