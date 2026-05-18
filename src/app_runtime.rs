@@ -423,7 +423,9 @@ mod factory_tests {
             .unwrap();
         assert_eq!(
             v,
-            Some(crate::storage::CachedInstallation::Cached { installation_id: 99 })
+            Some(crate::storage::CachedInstallation::Cached {
+                installation_id: 99
+            })
         );
     }
 
@@ -492,10 +494,7 @@ mod factory_tests {
             .mount(&server)
             .await;
         let (f, _store) = factory_with(server.uri()).await;
-        match f
-            .for_identity(Identity::OtherBarry, "acme", "widget")
-            .await
-        {
+        match f.for_identity(Identity::OtherBarry, "acme", "widget").await {
             Ok(_) => panic!("expected NotInstalled error"),
             Err(err) => assert!(matches!(err, GhFactoryError::NotInstalled { .. })),
         }

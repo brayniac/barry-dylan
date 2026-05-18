@@ -226,15 +226,10 @@ mod tests {
             .mount(&server)
             .await;
         let http = reqwest::Client::new();
-        let result = resolve_installation_id_for_repo(
-            &http,
-            &test_creds(),
-            "acme",
-            "widget",
-            &server.uri(),
-        )
-        .await
-        .unwrap();
+        let result =
+            resolve_installation_id_for_repo(&http, &test_creds(), "acme", "widget", &server.uri())
+                .await
+                .unwrap();
         assert_eq!(result, Some(42));
     }
 
@@ -247,15 +242,10 @@ mod tests {
             .mount(&server)
             .await;
         let http = reqwest::Client::new();
-        let result = resolve_installation_id_for_repo(
-            &http,
-            &test_creds(),
-            "acme",
-            "widget",
-            &server.uri(),
-        )
-        .await
-        .unwrap();
+        let result =
+            resolve_installation_id_for_repo(&http, &test_creds(), "acme", "widget", &server.uri())
+                .await
+                .unwrap();
         assert_eq!(result, None);
     }
 
@@ -268,14 +258,9 @@ mod tests {
             .mount(&server)
             .await;
         let http = reqwest::Client::new();
-        let result = resolve_installation_id_for_repo(
-            &http,
-            &test_creds(),
-            "acme",
-            "widget",
-            &server.uri(),
-        )
-        .await;
+        let result =
+            resolve_installation_id_for_repo(&http, &test_creds(), "acme", "widget", &server.uri())
+                .await;
         assert!(result.is_err());
     }
 }

@@ -1,8 +1,8 @@
 use crate::storage::DbError;
 use crate::storage::audit::AuditEntry;
+use crate::storage::installation_cache::CachedInstallation;
 use crate::storage::multi_review::{RunKey, RunState};
 use crate::storage::queue::{LeasedJob, NewJob};
-use crate::storage::installation_cache::CachedInstallation;
 use crate::storage::tokens::CachedToken;
 use sqlx::{Column, Connection, Row};
 use std::cell::UnsafeCell;
@@ -544,9 +544,9 @@ pub(crate) fn run(
                                 let id: Option<i64> = r.get("installation_id");
                                 let cached_at: i64 = r.get("cached_at");
                                 match id {
-                                    Some(installation_id) => Some(CachedInstallation::Cached {
-                                        installation_id,
-                                    }),
+                                    Some(installation_id) => {
+                                        Some(CachedInstallation::Cached { installation_id })
+                                    }
                                     // Negative cache: 1h TTL.
                                     None if now_ts - cached_at <= 3600 => {
                                         Some(CachedInstallation::NotInstalled)

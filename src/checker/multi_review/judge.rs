@@ -217,10 +217,7 @@ mod tests {
 
     #[async_trait]
     impl crate::llm::LlmClient for ScriptClient {
-        async fn complete(
-            &self,
-            req: &LlmRequest,
-        ) -> Result<LlmResponse, crate::llm::LlmError> {
+        async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, crate::llm::LlmError> {
             self.recorded.lock().unwrap().push(req.clone());
             let mut q = self.resps.lock().unwrap();
             if q.is_empty() {

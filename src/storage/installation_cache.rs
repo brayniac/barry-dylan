@@ -58,11 +58,7 @@ impl Store {
 
     /// Delete any cached entry for (identity, owner). Used when a token mint
     /// returns 401 (App was uninstalled after we cached the positive entry).
-    pub async fn invalidate_installation(
-        &self,
-        identity: &str,
-        owner: &str,
-    ) -> anyhow::Result<()> {
+    pub async fn invalidate_installation(&self, identity: &str, owner: &str) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ActorCommand::InvalidateInstallation {
@@ -135,10 +131,7 @@ mod tests {
             .get_installation("other_barry", "acme", 100_000)
             .await
             .unwrap();
-        assert_eq!(
-            v,
-            Some(CachedInstallation::Cached { installation_id: 7 })
-        );
+        assert_eq!(v, Some(CachedInstallation::Cached { installation_id: 7 }));
     }
 
     #[tokio::test]
@@ -157,10 +150,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            b,
-            Some(CachedInstallation::Cached { installation_id: 1 })
-        );
+        assert_eq!(b, Some(CachedInstallation::Cached { installation_id: 1 }));
         assert_eq!(ob, Some(CachedInstallation::NotInstalled));
     }
 

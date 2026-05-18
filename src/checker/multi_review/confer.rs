@@ -125,9 +125,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         }
     }
 
-    let files = barry_gh
-        .list_pr_files(&owner, &repo, job.pr_number)
-        .await?;
+    let files = barry_gh.list_pr_files(&owner, &repo, job.pr_number).await?;
     let diff = synthesis::render_diff_block(&files);
     let prior_text = build_prior_context(&pr_ctx);
 

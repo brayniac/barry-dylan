@@ -146,11 +146,8 @@ impl Checker for MultiReviewChecker {
                 {
                     Ok(()) => false,
                     Err(GhFactoryError::NotInstalled { .. }) => {
-                        tracing::warn!(
-                            "OB uninstalled mid-run; downgrading to BarryAlone"
-                        );
-                        metrics::counter!("barry_multi_review_barry_alone_total")
-                            .increment(1);
+                        tracing::warn!("OB uninstalled mid-run; downgrading to BarryAlone");
+                        metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
                         true
                     }
                     Err(GhFactoryError::Other(e)) => return Err(e),
@@ -305,7 +302,9 @@ mod checker_tests {
 
     #[tokio::test]
     async fn stub_factory_compiles() {
-        let f = StubFactory { ob_installed: false };
+        let f = StubFactory {
+            ob_installed: false,
+        };
         let err = f
             .preflight_identity(Identity::OtherBarry, "acme", "widget")
             .await
