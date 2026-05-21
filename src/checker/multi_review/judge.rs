@@ -85,6 +85,7 @@ async fn judge_once(
         }],
         max_tokens,
         temperature: 0.0,
+        response_schema: Some(verdict_schema()),
     };
     let resp = client.complete(&req).await?;
     let slice = locate_json(&resp.text).ok_or_else(|| JudgeError::Parse(resp.text.clone()))?;
@@ -97,6 +98,18 @@ async fn judge_once(
             input: u64::from(resp.input_tokens.unwrap_or(0)),
             output: u64::from(resp.output_tokens.unwrap_or(0)),
         },
+    })
+}
+
+fn verdict_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "agree": { "type": "boolean" },
+            "reason": { "type": "string" }
+        },
+        "required": ["agree", "reason"],
+        "additionalProperties": false
     })
 }
 

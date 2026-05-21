@@ -68,13 +68,23 @@ impl OpenAiClient {
                 "content": m.content,
             }));
         }
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
             "messages": messages,
             "cache_prompt": true,
         });
+        if let Some(schema) = &req.response_schema {
+            body["response_format"] = serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "strict": true,
+                    "schema": schema
+                }
+            });
+        }
         let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
         let mut rb = self
             .http
@@ -146,6 +156,7 @@ mod tests {
                 }],
                 max_tokens: 32,
                 temperature: 0.0,
+                response_schema: None,
             })
             .await
             .unwrap();
@@ -171,6 +182,7 @@ mod tests {
                 }],
                 max_tokens: 32,
                 temperature: 0.0,
+                response_schema: None,
             })
             .await
             .err()
@@ -199,6 +211,7 @@ mod tests {
                 }],
                 max_tokens: 10,
                 temperature: 0.0,
+                response_schema: None,
             })
             .await
             .unwrap();
@@ -226,10 +239,45 @@ mod tests {
                 }],
                 max_tokens: 100,
                 temperature: 0.0,
+                response_schema: None,
             })
             .await
             .unwrap();
         assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Stop));
+    }
+
+    #[tokio::test]
+    async fn structured_output_sends_response_format() {
+        let server = MockServer::start().await;
+        // The mock will only match if we send the right request body
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{
+                    "message": { "content": r#"{"outcome":"approve","summary":"LGTM","findings":[]}"# },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 20 }
+            })))
+            .mount(&server)
+            .await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let schema = serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false, "required": []});
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 1024,
+                temperature: 0.0,
+                response_schema: Some(schema),
+            })
+            .await
+            .unwrap();
+        // response text is the JSON string from content
+        assert!(r.text.contains("approve"));
     }
 
     #[tokio::test]
@@ -252,6 +300,7 @@ mod tests {
                 }],
                 max_tokens: 32,
                 temperature: 0.0,
+                response_schema: None,
             })
             .await
             .unwrap();
