@@ -86,7 +86,7 @@ pub async fn synthesize(
         }],
         max_tokens,
         temperature: 0.0,
-        response_schema: None,
+        response_schema: Some(review_schema()),
     };
     let mut resp = client.complete(&req).await?;
     if matches!(resp.finish_reason, Some(FinishReason::Length)) {
@@ -119,6 +119,34 @@ pub fn review_from_drafts(drafts: &[PersonaDraft]) -> UnifiedReview {
         summary,
         findings: vec![],
     }
+}
+
+fn review_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "outcome": {
+                "type": "string",
+                "enum": ["approve", "comment", "request_changes"]
+            },
+            "summary": { "type": "string" },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file": { "type": "string" },
+                        "line": { "type": "integer" },
+                        "message": { "type": "string" }
+                    },
+                    "required": ["file", "line", "message"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["outcome", "summary", "findings"],
+        "additionalProperties": false
+    })
 }
 
 /// Render a diff block from changed files, suitable for embedding in a user message.
