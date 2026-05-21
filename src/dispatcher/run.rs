@@ -251,7 +251,10 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 let post_gh = match gh_factory.for_installation(installation_id).await {
                     Ok(g) => g,
                     Err(e) => {
-                        tracing::warn!(?e, "failed to re-mint token before post_outcome; using original");
+                        tracing::warn!(
+                            ?e,
+                            "failed to re-mint token before post_outcome; using original"
+                        );
                         Arc::clone(gh_ref)
                     }
                 };

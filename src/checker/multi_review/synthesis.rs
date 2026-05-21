@@ -288,13 +288,18 @@ mod tests {
     async fn synthesize_retries_once_on_length_then_succeeds() {
         let client = ScriptedClient(Mutex::new(vec![truncated(), ok_review()]));
         let (review, _) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
-        assert_eq!(review.outcome, crate::checker::multi_review::review::Outcome::Approve);
+        assert_eq!(
+            review.outcome,
+            crate::checker::multi_review::review::Outcome::Approve
+        );
     }
 
     #[tokio::test]
     async fn synthesize_returns_truncated_after_both_attempts_fail() {
         let client = ScriptedClient(Mutex::new(vec![truncated(), truncated()]));
-        let err = synthesize(&client, &[], "diff", None, 1024).await.unwrap_err();
+        let err = synthesize(&client, &[], "diff", None, 1024)
+            .await
+            .unwrap_err();
         assert!(matches!(err, SynthesisError::Truncated));
     }
 
@@ -302,7 +307,10 @@ mod tests {
     async fn synthesize_does_not_retry_on_stop() {
         let client = ScriptedClient(Mutex::new(vec![ok_review()]));
         let (review, _) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
-        assert_eq!(review.outcome, crate::checker::multi_review::review::Outcome::Approve);
+        assert_eq!(
+            review.outcome,
+            crate::checker::multi_review::review::Outcome::Approve
+        );
     }
 
     #[test]
@@ -320,7 +328,10 @@ mod tests {
             },
         ];
         let r = review_from_drafts(&drafts);
-        assert_eq!(r.outcome, crate::checker::multi_review::review::Outcome::Comment);
+        assert_eq!(
+            r.outcome,
+            crate::checker::multi_review::review::Outcome::Comment
+        );
         assert!(r.summary.contains("security"));
         assert!(r.summary.contains("looks fine"));
         assert!(r.summary.contains("rust"));

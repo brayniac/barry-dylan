@@ -84,7 +84,9 @@ impl<'a> Orchestrator<'a> {
                 {
                     Ok(t) => t,
                     Err(SynthesisError::Truncated) => {
-                        tracing::warn!("barry R1 synthesis truncated; using persona-draft fallback");
+                        tracing::warn!(
+                            "barry R1 synthesis truncated; using persona-draft fallback"
+                        );
                         metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis").increment(1);
                         return Ok(Verdict::BarryAlone {
                             barry: synthesis::review_from_drafts(&barry_drafts),
@@ -128,7 +130,8 @@ impl<'a> Orchestrator<'a> {
             Ok(t) => t,
             Err(SynthesisError::Truncated) => {
                 tracing::warn!("barry R1 synthesis truncated; using persona-draft fallback");
-                metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis").increment(1);
+                metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
+                    .increment(1);
                 return Ok(Verdict::BarryAlone {
                     barry: synthesis::review_from_drafts(&barry_drafts),
                     reason: "synthesis truncated".into(),
@@ -283,8 +286,11 @@ impl<'a> Orchestrator<'a> {
         {
             Ok(t) => t,
             Err(SynthesisError::Truncated) => {
-                tracing::warn!("barry R1 synthesis truncated in run_barry_only; using persona-draft fallback");
-                metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis").increment(1);
+                tracing::warn!(
+                    "barry R1 synthesis truncated in run_barry_only; using persona-draft fallback"
+                );
+                metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
+                    .increment(1);
                 return Ok(Verdict::BarryAlone {
                     barry: synthesis::review_from_drafts(&barry_drafts),
                     reason: "synthesis truncated".into(),
@@ -423,7 +429,12 @@ mod tests {
     }
 
     fn ok_resp(text: &'static str) -> LlmResponse {
-        LlmResponse { text: text.into(), input_tokens: None, output_tokens: None, finish_reason: None }
+        LlmResponse {
+            text: text.into(),
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
+        }
     }
 
     fn truncated_resp() -> LlmResponse {
@@ -435,19 +446,25 @@ mod tests {
         }
     }
 
-    fn approve() -> LlmResponse { ok_resp(r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#) }
-    fn comment() -> LlmResponse { ok_resp(r#"{"outcome":"comment","summary":"check this","findings":[]}"#) }
-    fn agree() -> LlmResponse { ok_resp(r#"{"agree":true,"reason":"same"}"#) }
-    fn disagree() -> LlmResponse { ok_resp(r#"{"agree":false,"reason":"diff"}"#) }
+    fn approve() -> LlmResponse {
+        ok_resp(r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#)
+    }
+    fn comment() -> LlmResponse {
+        ok_resp(r#"{"outcome":"comment","summary":"check this","findings":[]}"#)
+    }
+    fn agree() -> LlmResponse {
+        ok_resp(r#"{"agree":true,"reason":"same"}"#)
+    }
+    fn disagree() -> LlmResponse {
+        ok_resp(r#"{"agree":false,"reason":"diff"}"#)
+    }
 
     fn clients(
         barry: Vec<Result<LlmResponse, &'static str>>,
         ob: Vec<Result<LlmResponse, &'static str>>,
         judge: Vec<Result<LlmResponse, &'static str>>,
     ) -> IdentityClients {
-        let to_owned = |v: Vec<Result<LlmResponse, &'static str>>| {
-            Arc::new(Mutex::new(v))
-        };
+        let to_owned = |v: Vec<Result<LlmResponse, &'static str>>| Arc::new(Mutex::new(v));
         IdentityClients {
             barry: Arc::new(ScriptedClient(to_owned(barry))),
             other_barry: Arc::new(ScriptedClient(to_owned(ob))),
@@ -483,7 +500,6 @@ mod tests {
             patch: Some("@@ -1 +1 @@\n+x".into()),
         }
     }
-
 
     #[tokio::test]
     async fn agreement_returns_agree_with_barry() {

@@ -190,12 +190,18 @@ mod tests {
             .mount(&server)
             .await;
         let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
-        let r = c.complete(&LlmRequest {
-            system: None,
-            messages: vec![LlmMessage { role: Role::User, content: "go".into() }],
-            max_tokens: 10,
-            temperature: 0.0,
-        }).await.unwrap();
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 10,
+                temperature: 0.0,
+            })
+            .await
+            .unwrap();
         assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Length));
     }
 
@@ -211,12 +217,18 @@ mod tests {
             .mount(&server)
             .await;
         let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
-        let r = c.complete(&LlmRequest {
-            system: None,
-            messages: vec![LlmMessage { role: Role::User, content: "go".into() }],
-            max_tokens: 100,
-            temperature: 0.0,
-        }).await.unwrap();
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 100,
+                temperature: 0.0,
+            })
+            .await
+            .unwrap();
         assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Stop));
     }
 
