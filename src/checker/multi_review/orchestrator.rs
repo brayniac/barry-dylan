@@ -3,7 +3,7 @@ use crate::checker::multi_review::identity::Identity;
 use crate::checker::multi_review::judge;
 use crate::checker::multi_review::persona::Persona;
 use crate::checker::multi_review::review::{Outcome, UnifiedReview};
-use crate::checker::multi_review::synthesis::{self, PersonaDraft, TokenCount};
+use crate::checker::multi_review::synthesis::{self, PersonaDraft, SynthesisError, TokenCount};
 use crate::github::pr::ChangedFile;
 use crate::telemetry::status::StatusTracker;
 use std::sync::Arc;
@@ -78,10 +78,23 @@ impl<'a> Orchestrator<'a> {
                 self.tracker
                     .add_tokens(self.job_id, barry_draft_tokens, barry_draft_tokens_out);
                 self.tracker.set_phase(self.job_id, "R1 synthesis");
-                let (barry_r1, r1_tokens) = self
+                let (barry_r1, r1_tokens) = match self
                     .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
                     .await
-                    .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
+                {
+                    Ok(t) => t,
+                    Err(SynthesisError::Truncated) => {
+                        tracing::warn!(
+                            "barry R1 synthesis truncated; using persona-draft fallback"
+                        );
+                        metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis").increment(1);
+                        return Ok(Verdict::BarryAlone {
+                            barry: synthesis::review_from_drafts(&barry_drafts),
+                            reason: "synthesis truncated".into(),
+                        });
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
+                };
                 self.tracker
                     .add_tokens(self.job_id, r1_tokens.input, r1_tokens.output);
                 tracing::info!(kind = "barry_alone", "verdict");
@@ -115,6 +128,15 @@ impl<'a> Orchestrator<'a> {
         );
         let (barry_r1, barry_r1_tokens) = match barry_r1_res {
             Ok(t) => t,
+            Err(SynthesisError::Truncated) => {
+                tracing::warn!("barry R1 synthesis truncated; using persona-draft fallback");
+                metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
+                    .increment(1);
+                return Ok(Verdict::BarryAlone {
+                    barry: synthesis::review_from_drafts(&barry_drafts),
+                    reason: "synthesis truncated".into(),
+                });
+            }
             Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
         };
         let (ob_r1, ob_r1_tokens) = match ob_r1_res {
@@ -258,10 +280,24 @@ impl<'a> Orchestrator<'a> {
         self.tracker
             .add_tokens(self.job_id, draft_tok_in, draft_tok_out);
         self.tracker.set_phase(self.job_id, "R1 synthesis");
-        let (barry_r1, r1_tokens) = self
+        let (barry_r1, r1_tokens) = match self
             .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
             .await
-            .map_err(|e| anyhow::anyhow!("barry R1 failed: {e}"))?;
+        {
+            Ok(t) => t,
+            Err(SynthesisError::Truncated) => {
+                tracing::warn!(
+                    "barry R1 synthesis truncated in run_barry_only; using persona-draft fallback"
+                );
+                metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
+                    .increment(1);
+                return Ok(Verdict::BarryAlone {
+                    barry: synthesis::review_from_drafts(&barry_drafts),
+                    reason: "synthesis truncated".into(),
+                });
+            }
+            Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
+        };
         self.tracker
             .add_tokens(self.job_id, r1_tokens.input, r1_tokens.output);
         tracing::info!(kind = "barry_alone", "verdict");
@@ -340,15 +376,13 @@ impl<'a> Orchestrator<'a> {
         diff: &str,
         drafts: &[PersonaDraft],
         peer: Option<&str>,
-    ) -> anyhow::Result<(UnifiedReview, TokenCount)> {
+    ) -> Result<(UnifiedReview, TokenCount), synthesis::SynthesisError> {
         let round = if peer.is_some() { "R2" } else { "R1" };
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
         let start = std::time::Instant::now();
 
-        let result = synthesis::synthesize(client.as_ref(), drafts, diff, peer, max_tokens)
-            .await
-            .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"));
+        let result = synthesis::synthesize(client.as_ref(), drafts, diff, peer, max_tokens).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         match result {
@@ -375,40 +409,62 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
-    struct ScriptedClient(Arc<Mutex<Vec<Result<String, &'static str>>>>);
+    struct ScriptedClient(Arc<Mutex<Vec<Result<LlmResponse, &'static str>>>>);
+
     #[async_trait]
     impl LlmClient for ScriptedClient {
         async fn complete(&self, _req: &LlmRequest) -> Result<LlmResponse, LlmError> {
             let next = self.0.lock().unwrap().pop();
             match next {
-                Some(Ok(text)) => Ok(LlmResponse {
-                    text,
+                Some(Ok(resp)) => Ok(resp),
+                Some(Err(msg)) => Err(LlmError::Shape(msg.into())),
+                None => Ok(LlmResponse {
+                    text: r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#.into(),
                     input_tokens: None,
                     output_tokens: None,
+                    finish_reason: None,
                 }),
-                Some(Err(msg)) => Err(LlmError::Shape(msg.into())),
-                None => {
-                    // Return default response when exhausted
-                    Ok(LlmResponse {
-                        text: r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#.into(),
-                        input_tokens: None,
-                        output_tokens: None,
-                    })
-                }
             }
         }
     }
 
+    fn ok_resp(text: &'static str) -> LlmResponse {
+        LlmResponse {
+            text: text.into(),
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: None,
+        }
+    }
+
+    fn truncated_resp() -> LlmResponse {
+        LlmResponse {
+            text: "gibberish no json".into(),
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: Some(crate::llm::FinishReason::Length),
+        }
+    }
+
+    fn approve() -> LlmResponse {
+        ok_resp(r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#)
+    }
+    fn comment() -> LlmResponse {
+        ok_resp(r#"{"outcome":"comment","summary":"check this","findings":[]}"#)
+    }
+    fn agree() -> LlmResponse {
+        ok_resp(r#"{"agree":true,"reason":"same"}"#)
+    }
+    fn disagree() -> LlmResponse {
+        ok_resp(r#"{"agree":false,"reason":"diff"}"#)
+    }
+
     fn clients(
-        barry: Vec<Result<&'static str, &'static str>>,
-        ob: Vec<Result<&'static str, &'static str>>,
-        judge: Vec<Result<&'static str, &'static str>>,
+        barry: Vec<Result<LlmResponse, &'static str>>,
+        ob: Vec<Result<LlmResponse, &'static str>>,
+        judge: Vec<Result<LlmResponse, &'static str>>,
     ) -> IdentityClients {
-        let to_owned = |v: Vec<Result<&'static str, &'static str>>| {
-            Arc::new(Mutex::new(
-                v.into_iter().map(|r| r.map(|s| s.to_string())).collect(),
-            ))
-        };
+        let to_owned = |v: Vec<Result<LlmResponse, &'static str>>| Arc::new(Mutex::new(v));
         IdentityClients {
             barry: Arc::new(ScriptedClient(to_owned(barry))),
             other_barry: Arc::new(ScriptedClient(to_owned(ob))),
@@ -443,19 +499,6 @@ mod tests {
             changes: 1,
             patch: Some("@@ -1 +1 @@\n+x".into()),
         }
-    }
-
-    fn approve() -> &'static str {
-        r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#
-    }
-    fn comment() -> &'static str {
-        r#"{"outcome":"comment","summary":"check this","findings":[]}"#
-    }
-    fn agree() -> &'static str {
-        r#"{"agree":true,"reason":"same"}"#
-    }
-    fn disagree() -> &'static str {
-        r#"{"agree":false,"reason":"diff"}"#
     }
 
     #[tokio::test]
@@ -607,6 +650,72 @@ mod tests {
             Verdict::BarryAlone { barry, reason } => {
                 assert_eq!(barry.outcome, Outcome::Approve);
                 assert_eq!(reason, "Other Barry not installed");
+            }
+            other => panic!("wanted BarryAlone, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn barry_r1_truncation_returns_barry_alone_with_draft_content() {
+        // Barry: 2 persona drafts OK, then R1 synth fires twice (retry) and both truncate.
+        // OB: 2 persona drafts (run in parallel, wasted). Judge must not be called.
+        // Note: ScriptedClient uses pop() (LIFO), so last element is consumed first.
+        let c = clients(
+            vec![
+                Ok(truncated_resp()), // R1 synth retry (consumed second by synthesize)
+                Ok(truncated_resp()), // R1 synth first attempt (consumed first by synthesize)
+                Ok(approve()),        // rust draft
+                Ok(approve()),        // security draft
+            ],
+            vec![Ok(approve()), Ok(approve())],
+            vec![],
+        );
+        let p = personas();
+        let v = Orchestrator {
+            clients: &c,
+            personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
+        }
+        .run(&[file()])
+        .await
+        .unwrap();
+        match v {
+            Verdict::BarryAlone { barry, reason } => {
+                assert_eq!(reason, "synthesis truncated");
+                assert_eq!(barry.outcome, Outcome::Comment);
+            }
+            other => panic!("wanted BarryAlone, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_barry_only_truncation_returns_barry_alone_with_draft_content() {
+        // Barry: 2 persona drafts OK, then R1 synth fires twice and both truncate.
+        let c = clients(
+            vec![
+                Ok(truncated_resp()), // R1 synth retry
+                Ok(truncated_resp()), // R1 synth first attempt
+                Ok(approve()),        // rust draft
+                Ok(approve()),        // security draft
+            ],
+            vec![],
+            vec![],
+        );
+        let p = personas();
+        let v = Orchestrator {
+            clients: &c,
+            personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
+        }
+        .run_barry_only(&[file()], "OB not installed".into())
+        .await
+        .unwrap();
+        match v {
+            Verdict::BarryAlone { barry, reason } => {
+                assert_eq!(reason, "synthesis truncated");
+                assert_eq!(barry.outcome, Outcome::Comment);
             }
             other => panic!("wanted BarryAlone, got {other:?}"),
         }

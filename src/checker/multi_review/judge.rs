@@ -120,6 +120,7 @@ mod tests {
                 text: self.resp.clone(),
                 input_tokens: None,
                 output_tokens: None,
+                finish_reason: None,
             })
         }
     }
@@ -244,11 +245,13 @@ mod tests {
                     text: "".into(),
                     input_tokens: Some(10),
                     output_tokens: Some(0),
+                    finish_reason: None,
                 }),
                 Ok(LlmResponse {
                     text: r#"{"agree":true,"reason":"ok"}"#.into(),
                     input_tokens: Some(11),
                     output_tokens: Some(5),
+                    finish_reason: None,
                 }),
             ]),
             recorded: recorded.clone(),
@@ -270,11 +273,13 @@ mod tests {
                     text: "".into(),
                     input_tokens: Some(1),
                     output_tokens: Some(0),
+                    finish_reason: None,
                 }),
                 Ok(LlmResponse {
                     text: "still garbage".into(),
                     input_tokens: Some(1),
                     output_tokens: Some(0),
+                    finish_reason: None,
                 }),
             ]),
             recorded: recorded.clone(),

@@ -72,7 +72,7 @@
 //! - Misconfigurations are rejected at startup
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub mod anthropic;
 pub mod factory;
@@ -94,6 +94,23 @@ pub enum Role {
     Assistant,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum FinishReason {
+    Stop,
+    Length,
+    Other(String),
+}
+
+impl std::fmt::Display for FinishReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FinishReason::Stop => write!(f, "stop"),
+            FinishReason::Length => write!(f, "length"),
+            FinishReason::Other(s) => write!(f, "other:{s}"),
+        }
+    }
+}
+
 /// A request to complete an LLM conversation.
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
@@ -104,11 +121,12 @@ pub struct LlmRequest {
 }
 
 /// Response from an LLM.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LlmResponse {
     pub text: String,
     pub input_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
+    pub finish_reason: Option<FinishReason>,
 }
 
 /// Error from LLM operations.
@@ -183,5 +201,16 @@ mod tests {
     #[test]
     fn is_transient_rejects_shape() {
         assert!(!is_transient(&LlmError::Shape("bad json".into())));
+    }
+
+    #[test]
+    fn llm_response_has_finish_reason_field() {
+        let r = LlmResponse {
+            text: "hi".into(),
+            input_tokens: None,
+            output_tokens: None,
+            finish_reason: Some(FinishReason::Length),
+        };
+        assert!(matches!(r.finish_reason, Some(FinishReason::Length)));
     }
 }

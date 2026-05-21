@@ -29,6 +29,7 @@ impl AnthropicClient {
 struct Resp {
     content: Vec<ContentBlock>,
     usage: Option<Usage>,
+    stop_reason: Option<String>,
 }
 #[derive(Deserialize)]
 struct ContentBlock {
@@ -104,10 +105,16 @@ impl AnthropicClient {
             .map(|b| b.text)
             .collect::<Vec<_>>()
             .join("\n");
+        let finish_reason = r.stop_reason.map(|s| match s.as_str() {
+            "end_turn" => crate::llm::FinishReason::Stop,
+            "max_tokens" => crate::llm::FinishReason::Length,
+            other => crate::llm::FinishReason::Other(other.to_string()),
+        });
         Ok(LlmResponse {
             text,
             input_tokens: r.usage.as_ref().and_then(|u| u.input_tokens),
             output_tokens: r.usage.as_ref().and_then(|u| u.output_tokens),
+            finish_reason,
         })
     }
 }
@@ -151,5 +158,61 @@ mod tests {
             .unwrap();
         assert_eq!(r.text, "hi");
         assert_eq!(r.output_tokens, Some(2));
+    }
+
+    #[tokio::test]
+    async fn finish_reason_length_when_stop_reason_is_max_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [ { "type": "text", "text": "truncated" } ],
+                "stop_reason": "max_tokens",
+                "usage": { "input_tokens": 5, "output_tokens": 10 }
+            })))
+            .mount(&server)
+            .await;
+        let c = AnthropicClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 10,
+                temperature: 0.0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Length));
+    }
+
+    #[tokio::test]
+    async fn finish_reason_stop_when_stop_reason_is_end_turn() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [ { "type": "text", "text": "done" } ],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 5, "output_tokens": 3 }
+            })))
+            .mount(&server)
+            .await;
+        let c = AnthropicClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 100,
+                temperature: 0.0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Stop));
     }
 }

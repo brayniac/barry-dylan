@@ -33,6 +33,7 @@ struct Resp {
 #[derive(Deserialize)]
 struct Choice {
     message: Msg,
+    finish_reason: Option<String>,
 }
 #[derive(Deserialize)]
 struct Msg {
@@ -93,16 +94,21 @@ impl OpenAiClient {
             });
         }
         let r: Resp = resp.json().await?;
-        let text = r
+        let first = r
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
             .ok_or_else(|| LlmError::Shape("no choices".into()))?;
+        let finish_reason = first.finish_reason.map(|s| match s.as_str() {
+            "stop" => crate::llm::FinishReason::Stop,
+            "length" => crate::llm::FinishReason::Length,
+            other => crate::llm::FinishReason::Other(other.to_string()),
+        });
         Ok(LlmResponse {
-            text,
+            text: first.message.content,
             input_tokens: r.usage.as_ref().and_then(|u| u.prompt_tokens),
             output_tokens: r.usage.as_ref().and_then(|u| u.completion_tokens),
+            finish_reason,
         })
     }
 }
@@ -170,6 +176,60 @@ mod tests {
             .err()
             .unwrap();
         assert!(matches!(e, LlmError::Api { status: 400, .. }));
+    }
+
+    #[tokio::test]
+    async fn finish_reason_length_when_finish_reason_is_length() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [ { "message": { "content": "truncated" }, "finish_reason": "length" } ],
+                "usage": { "prompt_tokens": 5, "completion_tokens": 10 }
+            })))
+            .mount(&server)
+            .await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 10,
+                temperature: 0.0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Length));
+    }
+
+    #[tokio::test]
+    async fn finish_reason_stop_when_finish_reason_is_stop() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [ { "message": { "content": "done" }, "finish_reason": "stop" } ],
+                "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+            })))
+            .mount(&server)
+            .await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 100,
+                temperature: 0.0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Stop));
     }
 
     #[tokio::test]
