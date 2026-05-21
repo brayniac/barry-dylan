@@ -116,6 +116,7 @@ impl LlmClient for TimedClient {
                     duration_ms,
                     input_tokens = resp.input_tokens,
                     output_tokens = resp.output_tokens,
+                    finish_reason = resp.finish_reason.as_ref().map(|r| r.to_string()).as_deref().unwrap_or("unknown"),
                     "llm call completed"
                 );
             }
