@@ -47,6 +47,7 @@ pub async fn run_persona(
         }],
         max_tokens,
         temperature: 0.0,
+        response_schema: None,
     };
     let resp = client.complete(&req).await?;
     Ok(PersonaDraft {
@@ -85,6 +86,7 @@ pub async fn synthesize(
         }],
         max_tokens,
         temperature: 0.0,
+        response_schema: None,
     };
     let mut resp = client.complete(&req).await?;
     if matches!(resp.finish_reason, Some(FinishReason::Length)) {

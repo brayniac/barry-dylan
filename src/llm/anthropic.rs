@@ -153,6 +153,7 @@ mod tests {
                 }],
                 max_tokens: 64,
                 temperature: 0.0,
+                response_schema: None,
             })
             .await
             .unwrap();
@@ -182,6 +183,7 @@ mod tests {
                 }],
                 max_tokens: 10,
                 temperature: 0.0,
+                response_schema: None,
             })
             .await
             .unwrap();
@@ -210,6 +212,7 @@ mod tests {
                 }],
                 max_tokens: 100,
                 temperature: 0.0,
+                response_schema: None,
             })
             .await
             .unwrap();

@@ -118,6 +118,7 @@ pub struct LlmRequest {
     pub messages: Vec<LlmMessage>,
     pub max_tokens: u32,
     pub temperature: f32,
+    pub response_schema: Option<serde_json::Value>,
 }
 
 /// Response from an LLM.
@@ -212,5 +213,18 @@ mod tests {
             finish_reason: Some(FinishReason::Length),
         };
         assert!(matches!(r.finish_reason, Some(FinishReason::Length)));
+    }
+
+    #[test]
+    fn llm_request_has_response_schema_field() {
+        let schema = serde_json::json!({"type": "object"});
+        let req = LlmRequest {
+            system: None,
+            messages: vec![],
+            max_tokens: 100,
+            temperature: 0.0,
+            response_schema: Some(schema.clone()),
+        };
+        assert_eq!(req.response_schema, Some(schema));
     }
 }

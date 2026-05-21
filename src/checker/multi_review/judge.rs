@@ -85,6 +85,7 @@ async fn judge_once(
         }],
         max_tokens,
         temperature: 0.0,
+        response_schema: None,
     };
     let resp = client.complete(&req).await?;
     let slice = locate_json(&resp.text).ok_or_else(|| JudgeError::Parse(resp.text.clone()))?;
