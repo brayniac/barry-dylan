@@ -1,7 +1,7 @@
 use crate::checker::multi_review::persona::Persona;
 use crate::checker::multi_review::review::{ParseError, UnifiedReview, parse};
 use crate::github::pr::ChangedFile;
-use crate::llm::{LlmClient, LlmError, LlmMessage, LlmRequest, Role};
+use crate::llm::{FinishReason, LlmClient, LlmError, LlmMessage, LlmRequest, Role};
 
 const SYNTHESIS_TEMPLATE: &str = include_str!("prompts/synthesis.md");
 
@@ -17,6 +17,8 @@ pub enum SynthesisError {
     Llm(#[from] LlmError),
     #[error("parse: {0}")]
     Parse(#[from] ParseError),
+    #[error("truncated: model hit max_tokens on both attempts")]
+    Truncated,
 }
 
 pub struct PersonaDraft {
@@ -84,12 +86,37 @@ pub async fn synthesize(
         max_tokens,
         temperature: 0.0,
     };
-    let resp = client.complete(&req).await?;
+    let mut resp = client.complete(&req).await?;
+    if matches!(resp.finish_reason, Some(FinishReason::Length)) {
+        tracing::warn!(
+            input_tokens = resp.input_tokens,
+            output_tokens = resp.output_tokens,
+            "synthesis response truncated at max_tokens; retrying once"
+        );
+        resp = client.complete(&req).await?;
+        if matches!(resp.finish_reason, Some(FinishReason::Length)) {
+            tracing::warn!("synthesis truncated on retry; giving up");
+            return Err(SynthesisError::Truncated);
+        }
+    }
     let tokens = TokenCount {
         input: u64::from(resp.input_tokens.unwrap_or(0)),
         output: u64::from(resp.output_tokens.unwrap_or(0)),
     };
     Ok((parse(&resp.text)?, tokens))
+}
+
+pub fn review_from_drafts(drafts: &[PersonaDraft]) -> UnifiedReview {
+    let summary = drafts
+        .iter()
+        .map(|d| format!("**{}**\n{}", d.persona, d.raw))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    UnifiedReview {
+        outcome: crate::checker::multi_review::review::Outcome::Comment,
+        summary,
+        findings: vec![],
+    }
 }
 
 /// Render a diff block from changed files, suitable for embedding in a user message.
@@ -109,7 +136,7 @@ pub fn render_diff_block(files: &[ChangedFile]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::LlmResponse;
+    use crate::llm::{FinishReason, LlmResponse};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -227,5 +254,77 @@ mod tests {
         assert!(s.contains("File: a.rs"));
         assert!(s.contains("=== diff begins ==="));
         assert!(s.contains("=== diff ends ==="));
+    }
+
+    struct ScriptedClient(Mutex<Vec<LlmResponse>>);
+
+    #[async_trait]
+    impl LlmClient for ScriptedClient {
+        async fn complete(&self, _req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            let resp = self.0.lock().unwrap().remove(0);
+            Ok(resp)
+        }
+    }
+
+    fn truncated() -> LlmResponse {
+        LlmResponse {
+            text: "no json here, just gibberish".into(),
+            input_tokens: Some(10),
+            output_tokens: Some(1024),
+            finish_reason: Some(FinishReason::Length),
+        }
+    }
+
+    fn ok_review() -> LlmResponse {
+        LlmResponse {
+            text: r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#.into(),
+            input_tokens: Some(10),
+            output_tokens: Some(50),
+            finish_reason: Some(FinishReason::Stop),
+        }
+    }
+
+    #[tokio::test]
+    async fn synthesize_retries_once_on_length_then_succeeds() {
+        let client = ScriptedClient(Mutex::new(vec![truncated(), ok_review()]));
+        let (review, _) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
+        assert_eq!(review.outcome, crate::checker::multi_review::review::Outcome::Approve);
+    }
+
+    #[tokio::test]
+    async fn synthesize_returns_truncated_after_both_attempts_fail() {
+        let client = ScriptedClient(Mutex::new(vec![truncated(), truncated()]));
+        let err = synthesize(&client, &[], "diff", None, 1024).await.unwrap_err();
+        assert!(matches!(err, SynthesisError::Truncated));
+    }
+
+    #[tokio::test]
+    async fn synthesize_does_not_retry_on_stop() {
+        let client = ScriptedClient(Mutex::new(vec![ok_review()]));
+        let (review, _) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
+        assert_eq!(review.outcome, crate::checker::multi_review::review::Outcome::Approve);
+    }
+
+    #[test]
+    fn review_from_drafts_produces_comment_with_draft_text() {
+        let drafts = vec![
+            PersonaDraft {
+                persona: "security",
+                raw: "looks fine".into(),
+                tokens: TokenCount::default(),
+            },
+            PersonaDraft {
+                persona: "rust",
+                raw: "idiomatic".into(),
+                tokens: TokenCount::default(),
+            },
+        ];
+        let r = review_from_drafts(&drafts);
+        assert_eq!(r.outcome, crate::checker::multi_review::review::Outcome::Comment);
+        assert!(r.summary.contains("security"));
+        assert!(r.summary.contains("looks fine"));
+        assert!(r.summary.contains("rust"));
+        assert!(r.summary.contains("idiomatic"));
+        assert!(r.findings.is_empty());
     }
 }
