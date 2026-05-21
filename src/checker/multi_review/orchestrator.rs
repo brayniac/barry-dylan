@@ -385,6 +385,7 @@ mod tests {
                     text,
                     input_tokens: None,
                     output_tokens: None,
+                    finish_reason: None,
                 }),
                 Some(Err(msg)) => Err(LlmError::Shape(msg.into())),
                 None => {
@@ -393,6 +394,7 @@ mod tests {
                         text: r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#.into(),
                         input_tokens: None,
                         output_tokens: None,
+                        finish_reason: None,
                     })
                 }
             }

@@ -108,6 +108,7 @@ impl AnthropicClient {
             text,
             input_tokens: r.usage.as_ref().and_then(|u| u.input_tokens),
             output_tokens: r.usage.as_ref().and_then(|u| u.output_tokens),
+            finish_reason: None,
         })
     }
 }

@@ -103,6 +103,7 @@ impl OpenAiClient {
             text,
             input_tokens: r.usage.as_ref().and_then(|u| u.prompt_tokens),
             output_tokens: r.usage.as_ref().and_then(|u| u.completion_tokens),
+            finish_reason: None,
         })
     }
 }

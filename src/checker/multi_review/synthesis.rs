@@ -126,6 +126,7 @@ mod tests {
                 text,
                 input_tokens: None,
                 output_tokens: None,
+                finish_reason: None,
             })
         }
     }
