@@ -65,18 +65,12 @@ pub async fn synthesize(
     client: &dyn LlmClient,
     drafts: &[PersonaDraft],
     diff_block: &str,
-    prior_peer_review: Option<&str>,
     max_tokens: u32,
 ) -> Result<(UnifiedReview, TokenCount), SynthesisError> {
     let mut user = String::from(SYNTHESIS_TEMPLATE);
     user.push_str("\n\n=== persona drafts ===\n");
     for d in drafts {
         user.push_str(&format!("--- {} ---\n{}\n", d.persona, d.raw));
-    }
-    if let Some(peer) = prior_peer_review {
-        user.push_str("\n=== peer review (R1 from the other Barry) ===\n");
-        user.push_str(peer);
-        user.push_str("\nYou MAY revise your position based on the peer review. If you do, say so in summary.\n");
     }
     let req = LlmRequest {
         system: Some(diff_block.to_string()),
@@ -242,7 +236,7 @@ mod tests {
                 tokens: TokenCount::default(),
             },
         ];
-        let (r, _) = synthesize(&client, &drafts, "DIFF-BLOCK", None, 1024)
+        let (r, _) = synthesize(&client, &drafts, "DIFF-BLOCK", 1024)
             .await
             .unwrap();
         assert_eq!(
@@ -255,27 +249,6 @@ mod tests {
         assert!(user.contains("sec-draft"));
         assert!(user.contains("style-draft"));
         assert!(!user.contains("peer review"));
-    }
-
-    #[tokio::test]
-    async fn synthesize_includes_peer_when_provided() {
-        let recorded = Arc::new(Mutex::new(vec![]));
-        let client = StubClient {
-            responses: Mutex::new(vec![
-                r#"{"outcome":"comment","summary":"updated","findings":[]}"#.into(),
-            ]),
-            recorded: recorded.clone(),
-        };
-        let drafts = vec![PersonaDraft {
-            persona: "security",
-            raw: "sd".into(),
-            tokens: TokenCount::default(),
-        }];
-        let _ = synthesize(&client, &drafts, "diff", Some("PEER-R1"), 1024)
-            .await
-            .unwrap();
-        let r = recorded.lock().unwrap();
-        assert!(r[0].messages[0].content.contains("PEER-R1"));
     }
 
     #[test]
@@ -317,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn synthesize_retries_once_on_length_then_succeeds() {
         let client = ScriptedClient(Mutex::new(vec![truncated(), ok_review()]));
-        let (review, _) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
+        let (review, _) = synthesize(&client, &[], "diff", 1024).await.unwrap();
         assert_eq!(
             review.outcome,
             crate::checker::multi_review::review::Outcome::Approve
@@ -327,16 +300,14 @@ mod tests {
     #[tokio::test]
     async fn synthesize_returns_truncated_after_both_attempts_fail() {
         let client = ScriptedClient(Mutex::new(vec![truncated(), truncated()]));
-        let err = synthesize(&client, &[], "diff", None, 1024)
-            .await
-            .unwrap_err();
+        let err = synthesize(&client, &[], "diff", 1024).await.unwrap_err();
         assert!(matches!(err, SynthesisError::Truncated));
     }
 
     #[tokio::test]
     async fn synthesize_does_not_retry_on_stop() {
         let client = ScriptedClient(Mutex::new(vec![ok_review()]));
-        let (review, _) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
+        let (review, _) = synthesize(&client, &[], "diff", 1024).await.unwrap();
         assert_eq!(
             review.outcome,
             crate::checker::multi_review::review::Outcome::Approve

@@ -79,7 +79,7 @@ impl<'a> Orchestrator<'a> {
                     .add_tokens(self.job_id, barry_draft_tokens, barry_draft_tokens_out);
                 self.tracker.set_phase(self.job_id, "R1 synthesis");
                 let (barry_r1, r1_tokens) = match self
-                    .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
+                    .synthesize_for(Identity::Barry, &diff, &barry_drafts)
                     .await
                 {
                     Ok(t) => t,
@@ -123,8 +123,8 @@ impl<'a> Orchestrator<'a> {
         tracing::debug!("R1 synthesis starting");
         let r1_start = std::time::Instant::now();
         let (barry_r1_res, ob_r1_res) = tokio::join!(
-            self.synthesize_for(Identity::Barry, &diff, &barry_drafts, None),
-            self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts, None),
+            self.synthesize_for(Identity::Barry, &diff, &barry_drafts),
+            self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts),
         );
         let (barry_r1, barry_r1_tokens) = match barry_r1_res {
             Ok(t) => t,
@@ -165,58 +165,14 @@ impl<'a> Orchestrator<'a> {
             barry_r1_tokens.output + ob_r1_tokens.output,
         );
 
-        // Phase 3: R2 synthesis — each identity reads the other's R1.
-        // Reuses the R1 drafts; no fresh persona calls.
-        let barry_r1_text = serde_json::to_string(&serde_json::json!({
-            "outcome": barry_r1.outcome,
-            "summary": barry_r1.summary,
-        }))
-        .unwrap_or_default();
-        let ob_r1_text = serde_json::to_string(&serde_json::json!({
-            "outcome": ob_r1.outcome,
-            "summary": ob_r1.summary,
-        }))
-        .unwrap_or_default();
-        self.tracker.set_phase(self.job_id, "R2 synthesis");
-        tracing::debug!("R2 synthesis starting (drafts reused from R1)");
-        let r2_start = std::time::Instant::now();
-        let (barry_r2_res, ob_r2_res) = tokio::join!(
-            self.synthesize_for(Identity::Barry, &diff, &barry_drafts, Some(&ob_r1_text)),
-            self.synthesize_for(
-                Identity::OtherBarry,
-                &diff,
-                &ob_drafts,
-                Some(&barry_r1_text)
-            ),
-        );
-        let (barry_r2, barry_r2_tokens) = match barry_r2_res {
-            Ok(t) => t,
-            Err(_) => (barry_r1, TokenCount::default()),
-        };
-        let (ob_r2, ob_r2_tokens) = match ob_r2_res {
-            Ok(t) => t,
-            Err(_) => (ob_r1, TokenCount::default()),
-        };
-        tracing::info!(
-            duration_ms = r2_start.elapsed().as_millis() as u64,
-            barry_outcome = ?barry_r2.outcome,
-            ob_outcome = ?ob_r2.outcome,
-            "R2 synthesis complete"
-        );
-        self.tracker.add_tokens(
-            self.job_id,
-            barry_r2_tokens.input + ob_r2_tokens.input,
-            barry_r2_tokens.output + ob_r2_tokens.output,
-        );
-
         // Judge.
         self.tracker.set_phase(self.job_id, "judge");
         tracing::debug!("judge starting");
         let judge_start = std::time::Instant::now();
         let verdict = match judge::judge(
             self.clients.judge.as_ref(),
-            &barry_r2,
-            &ob_r2,
+            &barry_r1,
+            &ob_r1,
             self.clients.judge_max_tokens.min(512),
         )
         .await
@@ -227,7 +183,7 @@ impl<'a> Orchestrator<'a> {
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
                 return Ok(Verdict::BarryAlone {
-                    barry: barry_r2,
+                    barry: barry_r1,
                     reason: "judge unavailable".into(),
                 });
             }
@@ -242,16 +198,16 @@ impl<'a> Orchestrator<'a> {
             .add_tokens(self.job_id, verdict.tokens.input, verdict.tokens.output);
 
         if verdict.agree {
-            tracing::info!(kind = "agree", outcome = ?barry_r2.outcome, "verdict");
+            tracing::info!(kind = "agree", outcome = ?barry_r1.outcome, "verdict");
             metrics::counter!("barry_multi_review_judge_total", "verdict" => "agree").increment(1);
-            Ok(Verdict::Agree { barry: barry_r2 })
+            Ok(Verdict::Agree { barry: barry_r1 })
         } else {
             tracing::info!(kind = "disagree", "verdict");
             metrics::counter!("barry_multi_review_judge_total", "verdict" => "disagree")
                 .increment(1);
             Ok(Verdict::Disagree {
-                barry: barry_r2,
-                other_barry: ob_r2,
+                barry: barry_r1,
+                other_barry: ob_r1,
                 reason: verdict.reason,
             })
         }
@@ -281,13 +237,13 @@ impl<'a> Orchestrator<'a> {
             .add_tokens(self.job_id, draft_tok_in, draft_tok_out);
         self.tracker.set_phase(self.job_id, "R1 synthesis");
         let (barry_r1, r1_tokens) = match self
-            .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
+            .synthesize_for(Identity::Barry, &diff, &barry_drafts)
             .await
         {
             Ok(t) => t,
             Err(SynthesisError::Truncated) => {
                 tracing::warn!(
-                    "barry R1 synthesis truncated in run_barry_only; using persona-draft fallback"
+                    "barry synthesis truncated in run_barry_only; using persona-draft fallback"
                 );
                 metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
                     .increment(1);
@@ -296,7 +252,7 @@ impl<'a> Orchestrator<'a> {
                     reason: "synthesis truncated".into(),
                 });
             }
-            Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
+            Err(e) => return Err(anyhow::anyhow!("barry synthesis failed: {e}")),
         };
         self.tracker
             .add_tokens(self.job_id, r1_tokens.input, r1_tokens.output);
@@ -368,28 +324,24 @@ impl<'a> Orchestrator<'a> {
         synthesis::render_diff_block(&filtered)
     }
 
-    /// Synthesize a unified review from pre-computed persona drafts. Used for
-    /// both R1 (peer=None) and R2 (peer=Some(...)).
+    /// Synthesize a unified review from pre-computed persona drafts.
     async fn synthesize_for(
         &self,
         identity: Identity,
         diff: &str,
         drafts: &[PersonaDraft],
-        peer: Option<&str>,
     ) -> Result<(UnifiedReview, TokenCount), synthesis::SynthesisError> {
-        let round = if peer.is_some() { "R2" } else { "R1" };
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
         let start = std::time::Instant::now();
 
-        let result = synthesis::synthesize(client.as_ref(), drafts, diff, peer, max_tokens).await;
+        let result = synthesis::synthesize(client.as_ref(), drafts, diff, max_tokens).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         match result {
             Ok((review, tokens)) => {
                 tracing::info!(
                     identity = ?identity,
-                    round,
                     duration_ms,
                     outcome = format!("{:?}", review.outcome),
                     "synthesis done"
@@ -503,21 +455,10 @@ mod tests {
 
     #[tokio::test]
     async fn agreement_returns_agree_with_barry() {
-        // Per identity: 2 persona calls (security + rust), then synth R1, then synth R2.
-        // Responses are consumed in order: security draft, rust draft, synth R1, synth R2.
+        // Per identity: 2 persona calls (security + rust) then synthesis.
         let c = clients(
-            vec![
-                Ok(approve()),
-                Ok(approve()), // security + rust drafts for Barry
-                Ok(approve()), // synth R1
-                Ok(approve()), // synth R2 (reuses drafts)
-            ],
-            vec![
-                Ok(approve()),
-                Ok(approve()), // security + rust drafts for OB
-                Ok(approve()), // synth R1
-                Ok(approve()), // synth R2
-            ],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
             vec![Ok(agree())],
         );
         let p = personas();
@@ -538,21 +479,9 @@ mod tests {
 
     #[tokio::test]
     async fn disagreement_returns_both() {
-        // Barry: security→approve, rust→approve, synth→approve, synth→approve
-        // OB: security→comment, rust→comment, synth→comment, synth→comment
         let c = clients(
-            vec![
-                Ok(approve()),
-                Ok(approve()), // security + rust drafts for Barry
-                Ok(approve()), // synth R1
-                Ok(approve()), // synth R2
-            ],
-            vec![
-                Ok(comment()),
-                Ok(comment()), // security + rust drafts for OB
-                Ok(comment()), // synth R1
-                Ok(comment()), // synth R2
-            ],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(comment()), Ok(comment()), Ok(comment())],
             vec![Ok(disagree())],
         );
         let p = personas();
@@ -605,8 +534,8 @@ mod tests {
         // Both reviewers run full pipeline; judge errors → orchestrator
         // should fall back to BarryAlone, not Disagree.
         let c = clients(
-            vec![Ok(approve()), Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Ok(comment()), Ok(comment()), Ok(comment()), Ok(comment())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(comment()), Ok(comment()), Ok(comment())],
             vec![Err("transport boom"), Err("transport boom")],
         );
         let p = personas();

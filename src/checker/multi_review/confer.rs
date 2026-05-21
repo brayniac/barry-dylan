@@ -127,14 +127,11 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
 
     let files = barry_gh.list_pr_files(&owner, &repo, job.pr_number).await?;
     let diff = synthesis::render_diff_block(&files);
-    let prior_text = build_prior_context(&pr_ctx);
-
     let (review, tokens) = run_unified(
         clients.for_identity(summon).as_ref(),
         clients.max_tokens_for(summon),
         personas,
         &diff,
-        Some(&prior_text),
     )
     .await?;
     deps.status_tracker
@@ -184,7 +181,6 @@ async fn run_unified(
     max_tokens: u32,
     personas: &[Persona],
     diff: &str,
-    peer: Option<&str>,
 ) -> anyhow::Result<(UnifiedReview, synthesis::TokenCount)> {
     let mut futures = Vec::with_capacity(personas.len());
     for p in personas {
@@ -201,25 +197,12 @@ async fn run_unified(
         total.output += draft.tokens.output;
         drafts.push(draft);
     }
-    let (r, synth_tokens) = synthesis::synthesize(client, &drafts, diff, peer, max_tokens)
+    let (r, synth_tokens) = synthesis::synthesize(client, &drafts, diff, max_tokens)
         .await
         .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"))?;
     total.input += synth_tokens.input;
     total.output += synth_tokens.output;
     Ok((r, total))
-}
-
-fn build_prior_context(pr_ctx: &crate::github::pr::PrContext) -> String {
-    let mut s = String::from("=== prior reviews on this commit ===\n");
-    for r in &pr_ctx.reviews {
-        if r.body
-            .contains(crate::checker::multi_review::posting::REVIEW_MARKER_PREFIX)
-        {
-            s.push_str(&r.body);
-            s.push_str("\n---\n");
-        }
-    }
-    s
 }
 
 fn outcome_str(o: crate::checker::multi_review::review::Outcome) -> &'static str {
