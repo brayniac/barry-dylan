@@ -190,12 +190,16 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         .register(&job.repo_owner, &job.repo_name, job.pr_number)
         .await;
 
+    let gh_factory = deps.gh_factory.clone();
+    let installation_id = job.installation_id;
+
     let mut tasks = Vec::new();
     for chk in &deps.pipeline.checkers {
         if !chk.enabled(&ctx.repo_cfg) {
             continue;
         }
         let chk = chk.clone();
+        let gh_factory = gh_factory.clone();
         let rate_limit_reset = rate_limit_reset.clone();
         let checker_name = chk.name();
         let cancel = cancel.clone();
@@ -244,7 +248,14 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                     duration_ms = dur.as_millis() as u64,
                     "checker completed"
                 );
-                if let Err(e) = post_outcome(gh_ref, job_ref, pr_ref, &outcome, &cancel).await {
+                let post_gh = match gh_factory.for_installation(installation_id).await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::warn!(?e, "failed to re-mint token before post_outcome; using original");
+                        Arc::clone(gh_ref)
+                    }
+                };
+                if let Err(e) = post_outcome(&post_gh, job_ref, pr_ref, &outcome, &cancel).await {
                     if let Some(GhError::RateLimited { reset_in_secs }) =
                         e.downcast_ref::<GhError>()
                     {
