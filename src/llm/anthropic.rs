@@ -37,6 +37,7 @@ struct ContentBlock {
     kind: String,
     #[serde(default)]
     text: String,
+    input: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct Usage {
@@ -77,6 +78,14 @@ impl AnthropicClient {
         if let Some(sys) = &req.system {
             body["system"] = serde_json::Value::String(sys.clone());
         }
+        if let Some(schema) = &req.response_schema {
+            body["tools"] = serde_json::json!([{
+                "name": "submit",
+                "description": "Submit your structured response.",
+                "input_schema": schema
+            }]);
+            body["tool_choice"] = serde_json::json!({"type": "tool", "name": "submit"});
+        }
 
         let url = format!("{}/v1/messages", self.endpoint.trim_end_matches('/'));
         let mut rb = self
@@ -98,13 +107,21 @@ impl AnthropicClient {
             });
         }
         let r: Resp = resp.json().await?;
-        let text = r
-            .content
-            .into_iter()
-            .filter(|b| b.kind == "text")
-            .map(|b| b.text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = if req.response_schema.is_some() {
+            r.content
+                .into_iter()
+                .find(|b| b.kind == "tool_use")
+                .and_then(|b| b.input)
+                .map(|v| v.to_string())
+                .ok_or_else(|| LlmError::Shape("no tool_use block in response".into()))?
+        } else {
+            r.content
+                .into_iter()
+                .filter(|b| b.kind == "text")
+                .map(|b| b.text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         let finish_reason = r.stop_reason.map(|s| match s.as_str() {
             "end_turn" => crate::llm::FinishReason::Stop,
             "max_tokens" => crate::llm::FinishReason::Length,
@@ -188,6 +205,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Length));
+    }
+
+    #[tokio::test]
+    async fn structured_output_extracts_tool_use_input() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu_123",
+                    "name": "submit",
+                    "input": { "outcome": "approve", "summary": "LGTM", "findings": [] }
+                }],
+                "stop_reason": "tool_use",
+                "usage": { "input_tokens": 10, "output_tokens": 20 }
+            })))
+            .mount(&server)
+            .await;
+        let c = AnthropicClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let schema = serde_json::json!({"type": "object"});
+        let r = c.complete(&LlmRequest {
+            system: None,
+            messages: vec![LlmMessage { role: Role::User, content: "go".into() }],
+            max_tokens: 1024,
+            temperature: 0.0,
+            response_schema: Some(schema),
+        }).await.unwrap();
+        // text should be the JSON-serialized input object
+        let parsed: serde_json::Value = serde_json::from_str(&r.text).unwrap();
+        assert_eq!(parsed["outcome"], "approve");
+        assert_eq!(parsed["summary"], "LGTM");
     }
 
     #[tokio::test]
