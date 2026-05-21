@@ -263,13 +263,19 @@ mod tests {
             .await;
         let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
         let schema = serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false, "required": []});
-        let r = c.complete(&LlmRequest {
-            system: None,
-            messages: vec![LlmMessage { role: Role::User, content: "go".into() }],
-            max_tokens: 1024,
-            temperature: 0.0,
-            response_schema: Some(schema),
-        }).await.unwrap();
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 1024,
+                temperature: 0.0,
+                response_schema: Some(schema),
+            })
+            .await
+            .unwrap();
         // response text is the JSON string from content
         assert!(r.text.contains("approve"));
     }

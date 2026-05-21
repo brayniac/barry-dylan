@@ -226,13 +226,19 @@ mod tests {
             .await;
         let c = AnthropicClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
         let schema = serde_json::json!({"type": "object"});
-        let r = c.complete(&LlmRequest {
-            system: None,
-            messages: vec![LlmMessage { role: Role::User, content: "go".into() }],
-            max_tokens: 1024,
-            temperature: 0.0,
-            response_schema: Some(schema),
-        }).await.unwrap();
+        let r = c
+            .complete(&LlmRequest {
+                system: None,
+                messages: vec![LlmMessage {
+                    role: Role::User,
+                    content: "go".into(),
+                }],
+                max_tokens: 1024,
+                temperature: 0.0,
+                response_schema: Some(schema),
+            })
+            .await
+            .unwrap();
         // text should be the JSON-serialized input object
         let parsed: serde_json::Value = serde_json::from_str(&r.text).unwrap();
         assert_eq!(parsed["outcome"], "approve");
