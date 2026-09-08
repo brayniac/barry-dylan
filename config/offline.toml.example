@@ -1,0 +1,33 @@
+# Configuration for `barry-dylan review-offline`.
+#
+# This is NOT barry.toml. Producing a review needs one model endpoint and
+# optional persona prompts -- no GitHub app credentials, no database, no
+# listen address. That matters because this runs as a batch job spec, and a
+# job spec should not have to carry private key paths to run a model.
+#
+#   barry-dylan review-offline \
+#     --config offline.toml \
+#     --files changed-files.json \
+#     --out review.json
+#
+# `--files` is a JSON array of ChangedFile -- the same shape barry already
+# gets from the GitHub API, so no diff parsing is involved:
+#
+#   [{"filename":"src/a.rs","status":"modified","additions":1,
+#     "deletions":0,"changes":1,"patch":"@@ -1,2 +1,3 @@\n..."}]
+#
+# The review is written to `--out` as JSON. Nothing is posted anywhere; the
+# caller decides what to do with it.
+
+[llm]
+provider = "openai"
+endpoint = "http://127.0.0.1:8080/v1"
+model = "qwen2.5-coder-32b"
+max_tokens = 8192
+request_timeout_secs = 300
+# api_key_env = "LOCAL_LLM_API_KEY"   # omit for an unauthenticated local server
+
+# Optional: replace a built-in persona prompt with your own. Omitted personas
+# use the prompts compiled into the binary.
+# [personas.rust]
+# prompt_path = "/etc/barry/personas/rust.md"
