@@ -20,6 +20,16 @@ pub struct PersonaOverrides {
     pub rust: Option<PathBuf>,
 }
 
+/// Map the TOML persona-override config into the resolver's input type.
+pub fn overrides_from_config(p: &crate::config::PersonaOverridesConfig) -> PersonaOverrides {
+    PersonaOverrides {
+        security: p.security.as_ref().and_then(|x| x.prompt_path.clone()),
+        correctness: p.correctness.as_ref().and_then(|x| x.prompt_path.clone()),
+        style: p.style.as_ref().and_then(|x| x.prompt_path.clone()),
+        rust: p.rust.as_ref().and_then(|x| x.prompt_path.clone()),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PersonaError {
     #[error("reading persona prompt {path}: {source}")]
@@ -110,5 +120,32 @@ mod tests {
         let prompt = rust_persona.prompt.to_lowercase();
         assert!(prompt.contains("ownership"));
         assert!(prompt.contains("clone"));
+    }
+
+    #[test]
+    fn overrides_from_config_maps_prompt_paths() {
+        let cfg = crate::config::PersonaOverridesConfig {
+            security: Some(crate::config::PersonaOverride {
+                prompt_path: Some(PathBuf::from("/tmp/sec.md")),
+            }),
+            correctness: None,
+            style: None,
+            rust: None,
+        };
+
+        let o = overrides_from_config(&cfg);
+
+        assert_eq!(o.security, Some(PathBuf::from("/tmp/sec.md")));
+        assert_eq!(o.correctness, None);
+        assert_eq!(o.style, None);
+        assert_eq!(o.rust, None);
+    }
+
+    #[test]
+    fn resolve_returns_four_personas_with_defaults() {
+        let personas = resolve(&PersonaOverrides::default()).unwrap();
+        let names: Vec<&str> = personas.iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["security", "correctness", "style", "rust"]);
+        assert!(personas.iter().all(|p| !p.prompt.is_empty()));
     }
 }

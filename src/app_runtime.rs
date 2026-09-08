@@ -251,7 +251,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     });
 
     let clients = Arc::new(crate::checker::multi_review::clients::build(&cfg)?);
-    let overrides = personas_from_cfg(&cfg.personas);
+    let overrides = crate::checker::multi_review::persona::overrides_from_config(&cfg.personas);
     let personas = Arc::new(crate::checker::multi_review::persona::resolve(&overrides)?);
     let pipeline = Arc::new(build_pipeline_with(
         clients.clone(),
@@ -351,17 +351,6 @@ fn build_pipeline_with(
             status_tracker,
         }));
     p
-}
-
-fn personas_from_cfg(
-    p: &crate::config::PersonaOverridesConfig,
-) -> crate::checker::multi_review::persona::PersonaOverrides {
-    crate::checker::multi_review::persona::PersonaOverrides {
-        security: p.security.as_ref().and_then(|x| x.prompt_path.clone()),
-        correctness: p.correctness.as_ref().and_then(|x| x.prompt_path.clone()),
-        style: p.style.as_ref().and_then(|x| x.prompt_path.clone()),
-        rust: p.rust.as_ref().and_then(|x| x.prompt_path.clone()),
-    }
 }
 
 fn is_unauthorized(err: &anyhow::Error) -> bool {
