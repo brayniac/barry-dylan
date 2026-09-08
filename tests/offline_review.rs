@@ -58,6 +58,12 @@ request_timeout_secs = 10
 
     assert_eq!(review.summary, "unwrap can panic");
     assert!(!review.findings.is_empty());
+
+    // Four persona drafts plus one synthesis. Asserted because the two checks
+    // above constrain only the synthesis result: if the persona stage stopped
+    // running, synthesis would still be called with an empty draft slice, still
+    // return this body, and they would both still pass on a one-call run.
+    assert_eq!(server.received_requests().await.unwrap().len(), 5);
 }
 
 #[tokio::test]
