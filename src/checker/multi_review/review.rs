@@ -20,7 +20,7 @@ impl Outcome {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UnifiedReview {
     /// One of "approve", "comment", "request_changes".
     pub outcome: Outcome,
@@ -31,7 +31,7 @@ pub struct UnifiedReview {
     pub findings: Vec<UnifiedFinding>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UnifiedFinding {
     pub file: String,
     pub line: u32,
@@ -104,5 +104,24 @@ mod tests {
             Outcome::RequestChanges.check_conclusion(),
             CheckConclusion::Failure
         ));
+    }
+
+    #[test]
+    fn unified_review_round_trips_through_json() {
+        let original = parse(
+            r#"{"outcome":"request_changes","summary":"needs work",
+                "findings":[{"file":"src/a.rs","line":12,"message":"unwrap on None"}]}"#,
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&original).unwrap();
+        let back = parse(&json).unwrap();
+
+        assert_eq!(back.outcome, Outcome::RequestChanges);
+        assert_eq!(back.summary, "needs work");
+        assert_eq!(back.findings.len(), 1);
+        assert_eq!(back.findings[0].file, "src/a.rs");
+        assert_eq!(back.findings[0].line, 12);
+        assert_eq!(back.findings[0].message, "unwrap on None");
     }
 }

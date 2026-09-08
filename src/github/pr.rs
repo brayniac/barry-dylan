@@ -29,7 +29,7 @@ pub struct User {
     pub login: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct ChangedFile {
     pub filename: String,
     pub status: String,
