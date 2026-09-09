@@ -113,6 +113,7 @@ pub mod dispatcher;
 pub mod github;
 pub mod llm;
 pub mod offline;
+pub mod rack;
 pub mod storage;
 pub mod telemetry;
 pub mod util;
