@@ -143,8 +143,10 @@ impl Reviewer {
     }
 }
 
+/// A review sends whole patches, so context is usually scarcer than
+/// parameters: a 9B q4 leaves roughly 18 GB of a 24 GB card for KV cache.
 fn default_context_size() -> u32 {
-    32768
+    65536
 }
 
 fn default_max_tokens() -> u32 {
@@ -188,7 +190,7 @@ model_name = "llama-3.1-8b"
     fn a_minimal_config_parses_with_defaults() {
         let cfg: RackConfig = toml::from_str(MINIMAL).unwrap();
         assert_eq!(cfg.shape, "z2.g.medium");
-        assert_eq!(cfg.context_size, 32768);
+        assert_eq!(cfg.context_size, 65536);
         assert_eq!(cfg.max_tokens, 4096);
         assert_eq!(cfg.poll_interval_secs, 10);
     }

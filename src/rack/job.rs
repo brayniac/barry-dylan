@@ -43,10 +43,21 @@ barry-dylan --version
         "echo '{files_b64}' | base64 -d > /tmp/changed.json\n\n"
     ));
 
-    for r in reviewers {
-        s.push_str(&format!(
-            r#"# ---- {identity} ----
-rm -rf /tmp/model
+    for (i, r) in reviewers.iter().enumerate() {
+        // Reviewers sharing a model share the server. Two identities on the
+        // same weights is a normal configuration -- the diversity is then in
+        // the sampling rather than the model -- and pulling 16 GB twice and
+        // reloading it to serve the identical file would be pure waste.
+        let start_server = i == 0 || reviewers[i - 1].model != r.model;
+        let stop_server = reviewers
+            .get(i + 1)
+            .is_none_or(|next| next.model != r.model);
+
+        s.push_str(&format!("# ---- {} ----\n", r.identity));
+
+        if start_server {
+            s.push_str(&format!(
+                r#"rm -rf /tmp/model
 slipway pull '{model}' /tmp/model
 GGUF=$(find /tmp/model -name '*.gguf' | head -1)
 test -n "$GGUF" || {{ echo "no gguf materialised from {model}"; exit 1; }}
@@ -65,7 +76,15 @@ done
 curl -sf http://127.0.0.1:8080/health >/dev/null \
     || {{ tail -40 /tmp/llama-{identity}.log; exit 1; }}
 
-cat > /tmp/offline-{identity}.toml <<'OFFLINE'
+"#,
+                identity = r.identity,
+                model = r.model,
+                context = cfg.context_size,
+            ));
+        }
+
+        s.push_str(&format!(
+            r#"cat > /tmp/offline-{identity}.toml <<'OFFLINE'
 [llm]
 provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
@@ -79,20 +98,24 @@ barry-dylan review-offline \
     --files /tmp/changed.json \
     --out /tmp/{artifact}
 
-# Free the whole card before the next model loads. Two 14B q4 models at this
-# context do not fit on one 24 GB card together, and a partially offloaded
+"#,
+            identity = r.identity,
+            model_name = r.model_name,
+            max_tokens = cfg.max_tokens,
+            artifact = r.artifact(),
+        ));
+
+        if stop_server {
+            s.push_str(
+                r#"# Free the whole card before the next model loads. Two large q4 models at
+# this context do not fit on one 24 GB card together, and a partially offloaded
 # second model would silently review at a fraction of the speed.
 kill $SERVER_PID
 wait $SERVER_PID 2>/dev/null || true
 
 "#,
-            identity = r.identity,
-            model = r.model,
-            model_name = r.model_name,
-            context = cfg.context_size,
-            max_tokens = cfg.max_tokens,
-            artifact = r.artifact(),
-        ));
+            );
+        }
     }
 
     Ok(s)
@@ -270,6 +293,42 @@ model_name = "llama-3.1-8b"
         assert!(p.contains("--out /tmp/review-other_barry.json"));
         assert!(p.contains(&c.reviewers[0].model));
         assert!(p.contains(&c.reviewers[1].model));
+    }
+
+    #[test]
+    fn reviewers_sharing_a_model_share_the_server() {
+        // Two identities on the same weights is a normal configuration -- the
+        // diversity is then in the sampling rather than the model. Pulling
+        // 16 GB twice and reloading it to serve the identical file would be
+        // pure waste, and the pull is the expensive part of a rack review.
+        let c: RackConfig = toml::from_str(
+            r#"
+systemslab = "http://systemslab"
+host_tags = ["z2.baremetal"]
+shape = "z2.g.medium"
+image = "img"
+
+[[reviewers]]
+identity = "barry"
+model = "Qwen/Qwen3.5-27B@latest/gguf/q4_k_m@latest"
+model_name = "qwen3.5-27b"
+
+[[reviewers]]
+identity = "other_barry"
+model = "Qwen/Qwen3.5-27B@latest/gguf/q4_k_m@latest"
+model_name = "qwen3.5-27b"
+"#,
+        )
+        .unwrap();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+
+        assert_eq!(p.matches("slipway pull").count(), 1, "pulled twice");
+        assert_eq!(p.matches("llama-server -m").count(), 1, "served twice");
+        assert_eq!(p.matches("kill $SERVER_PID").count(), 1, "stopped twice");
+        // Both reviews still happen, and still into their own artifacts.
+        assert_eq!(p.matches("review-offline").count(), 2);
+        assert!(p.contains("--out /tmp/review-barry.json"));
+        assert!(p.contains("--out /tmp/review-other_barry.json"));
     }
 
     #[test]

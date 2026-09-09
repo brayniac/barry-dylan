@@ -62,25 +62,31 @@ image = "spool/images/debian-13-gpu@golden"
 # API -- llama-server serves one model and does not route on it, but it is
 # echoed back into logs.
 #
-# The point of two reviewers is that they disagree, so give them different
-# models.
+# Reviewers that share a model share the server: the weights are pulled and
+# loaded once, and both reviews run against it. The diversity is then in the
+# sampling rather than the model, which is weaker than two genuinely different
+# models but costs nothing -- the pull is the expensive part of a rack review.
 [[reviewers]]
 identity = "barry"
-model = "Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest"
-model_name = "qwen2.5-coder-14b"
+model = "Qwen/Qwen3.5-9B@latest/gguf/q4_k_m@latest"
+model_name = "qwen3.5-9b"
 
 [[reviewers]]
 identity = "other_barry"
-model = "meta-llama/Llama-3.1-8B@latest/gguf/q5_k_m@latest"
-model_name = "llama-3.1-8b"
+model = "Qwen/Qwen3.5-9B@latest/gguf/q4_k_m@latest"
+model_name = "qwen3.5-9b"
 # Under `concurrent` this reviewer lands on the other hypervisor, which is a
 # different generation, so it needs its own shape and matching tags. Under
 # `sequential` both of these are ignored.
 # shape = "z1.g.medium"
 # host_tags = ["z1.baremetal"]
 
-# llama-server context window. A review sends whole patches.
-# context_size = 32768
+# llama-server context window. A review sends whole patches, so context is
+# usually the scarce resource rather than parameters -- a 9B q4 is 5.4 GiB on a
+# 24 GB card, leaving ~18 GB for KV cache, where a 27B q4 is 15.7 GiB and leaves
+# ~8 GB. Prefer the smaller model and the bigger window unless the reviews
+# themselves are visibly weak.
+# context_size = 65536
 
 # Cap on a single completion inside the guest.
 # max_tokens = 4096
