@@ -10,6 +10,19 @@ path = "src/lib.rs"
 name = "barry-dylan"
 path = "src/main.rs"
 
+# Packaged so `review-offline` can run inside an ephemeral guest. The job
+# installs it at run time from the rack's internal apt repo rather than it
+# being baked into a guest image, so shipping a new barry does not mean
+# rebuilding a 7.5 GB image.
+[package.metadata.deb]
+maintainer = "Brian Martin <brian@brayniac.com>"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/barry-dylan", "usr/bin/", "755"],
+]
+depends = "libc6"
+
 [dependencies]
 anyhow = "1"
 thiserror = "2"
