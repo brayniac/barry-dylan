@@ -1,0 +1,61 @@
+# Configuration for `barry-dylan review-rack`.
+#
+# A rack review is a systemslab experiment: it acquires a GPU host, creates an
+# ephemeral VM, pulls the model from slipway, serves it with llama-server, runs
+# `barry-dylan review-offline` inside the guest, and returns the review as an
+# artifact.
+#
+#   barry-dylan review-rack \
+#     --config rack.toml \
+#     --files changed-files.json \
+#     --out review.json
+#
+# Same inputs and same output as `review-offline` -- only where the model runs
+# differs. Barry never speaks to the model, so the GPU host needs no GitHub
+# credentials and the guest is destroyed the moment the review is done.
+#
+# The alternative, a resident llama-server, would hold a GPU host out of the
+# measurement pool permanently. That is the trade this exists to avoid.
+
+systemslab = "http://systemslab"
+
+# Which hypervisor the job may land on. These pick the HOST and must agree with
+# `shape`: a z2. shape cannot run on a Zen1 host.
+#   z2.baremetal -> hv01 (Zen2)      z1.baremetal -> hv02 (Zen1)
+host_tags = ["z2.baremetal"]
+
+# anvil instance type. The `g` class is what gets a GPU passed through;
+# `medium` is 8 cores / 16 threads and 64 GB.
+shape = "z2.g.medium"
+
+# Guest image. debian-13-gpu carries the NVIDIA driver, CUDA, llama-server and
+# slipway. barry-dylan itself is NOT in the image -- the job installs it from
+# the rack's internal apt repo at run time, so shipping a new barry does not
+# mean rebuilding a 7.5 GB image.
+image = "spool/images/debian-13-gpu@golden"
+
+# slipway reference for the weights. `slipway ls` on delta lists what exists;
+# most entries are safetensors, which llama.cpp cannot serve, so filter for
+# /gguf/.
+model = "Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest"
+
+# What to call the model over the OpenAI-compatible API. llama-server serves one
+# model and does not route on this, but it is echoed back into logs.
+model_name = "qwen2.5-coder-14b"
+
+# llama-server context window. A review sends whole patches.
+# context_size = 32768
+
+# Cap on a single completion inside the guest.
+# max_tokens = 4096
+
+# How often to ask whether the experiment has finished.
+# poll_interval_secs = 10
+
+# Give up on the experiment after this long. Covers scheduling, instance
+# creation, a multi-gigabyte model pull, model load and the review itself.
+# job_timeout_secs = 3600
+
+# Bound on the payload inside the guest. Deliberately shorter than
+# job_timeout_secs, which also covers time spent queued behind another job.
+# payload_timeout_secs = 3000
