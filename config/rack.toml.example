@@ -44,8 +44,9 @@ systemslab = "http://systemslab"
 host_tags = ["z2.baremetal"]
 
 # anvil instance type, and the default for every reviewer. The `g` class is what
-# gets a GPU passed through; `medium` is 8 cores / 16 threads and 64 GB.
-shape = "z2.g.medium"
+# gets a GPU passed through. Sizes were removed on 2026-09-09, so an instance
+# takes its whole host.
+shape = "z2.g"
 
 # Guest image. debian-13-gpu carries the NVIDIA driver, CUDA, llama-server and
 # slipway. barry-dylan itself is NOT in the image -- the job installs it from
@@ -78,7 +79,7 @@ model_name = "qwen3.5-9b"
 # Under `concurrent` this reviewer lands on the other hypervisor, which is a
 # different generation, so it needs its own shape and matching tags. Under
 # `sequential` both of these are ignored.
-# shape = "z1.g.medium"
+# shape = "z1.g"
 # host_tags = ["z1.baremetal"]
 
 # llama-server context window. A review sends whole patches, so context is
