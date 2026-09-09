@@ -19,13 +19,32 @@
 
 systemslab = "http://systemslab"
 
+# Where the reviewers run.
+#
+#   sequential  (default) one guest, models served in turn. Uses one GPU host
+#               and leaves the other free.
+#   concurrent  one guest per reviewer, as separate jobs in the same
+#               experiment. systemslab schedules them onto different
+#               hypervisors, so each pulls over its own link -- roughly halving
+#               wall clock, at the cost of occupying both of the rack's GPUs.
+#
+# Measured here: create-to-reachable ~20 s, a 9 GB model pull ~79 s, and
+# llama-server loads a 14B q4 in ~4 s from a warm page cache. So the model
+# RELOAD between two reviewers is nearly free -- the pull is what costs, and on
+# one host the two pulls share a single 1 GbE link. Giving guests the X710
+# ports is what actually fixes this: at 10 Gb/s the pull is seconds.
+#
+# NOTE: this must appear BEFORE the [[reviewers]] tables. A top-level key
+# written after them belongs to the last table.
+# placement = "sequential"
+
 # Which hypervisor the job may land on. These pick the HOST and must agree with
 # `shape`: a z2. shape cannot run on a Zen1 host.
 #   z2.baremetal -> hv01 (Zen2)      z1.baremetal -> hv02 (Zen1)
 host_tags = ["z2.baremetal"]
 
-# anvil instance type. The `g` class is what gets a GPU passed through;
-# `medium` is 8 cores / 16 threads and 64 GB.
+# anvil instance type, and the default for every reviewer. The `g` class is what
+# gets a GPU passed through; `medium` is 8 cores / 16 threads and 64 GB.
 shape = "z2.g.medium"
 
 # Guest image. debian-13-gpu carries the NVIDIA driver, CUDA, llama-server and
@@ -34,14 +53,31 @@ shape = "z2.g.medium"
 # mean rebuilding a 7.5 GB image.
 image = "spool/images/debian-13-gpu@golden"
 
-# slipway reference for the weights. `slipway ls` on delta lists what exists;
+# One block per reviewer. `identity` matches barry's own identity slugs, and the
+# review comes back keyed by it. Order is the order they run in when sequential.
+#
+# `model` is a slipway reference: `slipway ls` on delta lists what exists, and
 # most entries are safetensors, which llama.cpp cannot serve, so filter for
-# /gguf/.
+# /gguf/. `model_name` is what the model is called over the OpenAI-compatible
+# API -- llama-server serves one model and does not route on it, but it is
+# echoed back into logs.
+#
+# The point of two reviewers is that they disagree, so give them different
+# models.
+[[reviewers]]
+identity = "barry"
 model = "Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest"
-
-# What to call the model over the OpenAI-compatible API. llama-server serves one
-# model and does not route on this, but it is echoed back into logs.
 model_name = "qwen2.5-coder-14b"
+
+[[reviewers]]
+identity = "other_barry"
+model = "meta-llama/Llama-3.1-8B@latest/gguf/q5_k_m@latest"
+model_name = "llama-3.1-8b"
+# Under `concurrent` this reviewer lands on the other hypervisor, which is a
+# different generation, so it needs its own shape and matching tags. Under
+# `sequential` both of these are ignored.
+# shape = "z1.g.medium"
+# host_tags = ["z1.baremetal"]
 
 # llama-server context window. A review sends whole patches.
 # context_size = 32768

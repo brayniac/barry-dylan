@@ -27,14 +27,12 @@ pub struct RackConfig {
     /// Guest image, e.g. `spool/images/debian-13-gpu@golden`.
     pub image: String,
 
-    /// slipway reference for the model weights, e.g.
-    /// `Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest`.
-    pub model: String,
+    /// The reviewers to run. Order is the order they run in when sequential.
+    pub reviewers: Vec<Reviewer>,
 
-    /// What to call the model over the OpenAI-compatible API. llama-server
-    /// serves one model and does not route on this, but it is echoed back and
-    /// ends up in logs, so it should say something true.
-    pub model_name: String,
+    /// Whether the reviewers share one guest or get one each.
+    #[serde(default)]
+    pub placement: Placement,
 
     /// llama-server context window. A review sends whole patches, so this wants
     /// to be generous.
@@ -60,6 +58,89 @@ pub struct RackConfig {
     /// started.
     #[serde(default = "default_payload_timeout_secs")]
     pub payload_timeout_secs: u64,
+}
+
+/// Where the reviewers run.
+///
+/// Measured on this rack: instance create to reachable is ~20 s, a 9 GB model
+/// pull is ~79 s, and llama-server loads a 14B q4 in ~4 s from a warm page
+/// cache. So the model *reload* between two reviewers is nearly free; the pull
+/// is what costs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// One guest, models served in turn.
+    ///
+    /// The two pulls share one hypervisor's 1 GbE link, so they cannot overlap
+    /// usefully -- 18 GB is ~167 s however it is split. In exchange this uses
+    /// one GPU host and leaves the other free, which is the premise the whole
+    /// VM-as-job design rests on.
+    #[default]
+    Sequential,
+    /// One guest per reviewer, as separate jobs in the same experiment.
+    ///
+    /// systemslab schedules the jobs independently, so each reviewer lands on
+    /// its own hypervisor and pulls over that host's own link -- roughly
+    /// halving wall clock. The cost is that one review occupies both of the
+    /// rack's GPUs.
+    ///
+    /// Each reviewer needs a `shape` and `host_tags` that agree with each
+    /// other, since the two hypervisors are different generations: a `z2.`
+    /// shape cannot run on the Zen1 host.
+    ///
+    /// Keeping the jobs in one experiment means one state to poll and
+    /// all-or-nothing semantics, rather than two submissions that can disagree
+    /// about whether the review happened.
+    Concurrent,
+}
+
+/// One identity's review, and the model that produces it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reviewer {
+    /// Which of barry's identities this review belongs to. Matches
+    /// [`crate::checker::multi_review::identity::Identity`]'s slug.
+    pub identity: String,
+
+    /// slipway reference for the weights, e.g.
+    /// `Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest`.
+    pub model: String,
+
+    /// What to call the model over the OpenAI-compatible API. llama-server
+    /// serves one model and does not route on this, but it is echoed back and
+    /// ends up in logs, so it should say something true.
+    pub model_name: String,
+
+    /// Instance type for this reviewer, overriding the top-level `shape`.
+    /// Required in practice for `concurrent`, where the two reviewers land on
+    /// hypervisors of different generations.
+    #[serde(default)]
+    pub shape: Option<String>,
+
+    /// Host tags for this reviewer, overriding the top-level `host_tags`. Must
+    /// agree with `shape`.
+    #[serde(default)]
+    pub host_tags: Option<Vec<String>>,
+}
+
+impl Reviewer {
+    /// The artifact this reviewer's review is written to and collected as.
+    pub fn artifact(&self) -> String {
+        format!("review-{}.json", self.identity)
+    }
+
+    /// The systemslab job name carrying this reviewer, when concurrent.
+    pub fn job_name(&self) -> String {
+        format!("review-{}", self.identity)
+    }
+
+    pub fn shape<'a>(&'a self, cfg: &'a RackConfig) -> &'a str {
+        self.shape.as_deref().unwrap_or(&cfg.shape)
+    }
+
+    pub fn host_tags<'a>(&'a self, cfg: &'a RackConfig) -> &'a [String] {
+        self.host_tags.as_deref().unwrap_or(&cfg.host_tags)
+    }
 }
 
 fn default_context_size() -> u32 {
@@ -91,8 +172,16 @@ systemslab = "http://systemslab"
 host_tags = ["z2.baremetal"]
 shape = "z2.g.medium"
 image = "spool/images/debian-13-gpu@golden"
+
+[[reviewers]]
+identity = "barry"
 model = "Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest"
 model_name = "qwen2.5-coder-14b"
+
+[[reviewers]]
+identity = "other_barry"
+model = "meta-llama/Llama-3.1-8B@latest/gguf/q5_k_m@latest"
+model_name = "llama-3.1-8b"
 "#;
 
     #[test]
@@ -102,6 +191,19 @@ model_name = "qwen2.5-coder-14b"
         assert_eq!(cfg.context_size, 32768);
         assert_eq!(cfg.max_tokens, 4096);
         assert_eq!(cfg.poll_interval_secs, 10);
+    }
+
+    #[test]
+    fn reviewers_keep_their_order_and_get_distinct_artifacts() {
+        // Order is the order they run in the guest, and each writes its own
+        // file -- one artifact reused would leave the second review silently
+        // overwriting the first.
+        let cfg: RackConfig = toml::from_str(MINIMAL).unwrap();
+        assert_eq!(cfg.reviewers[0].identity, "barry");
+        assert_eq!(cfg.reviewers[1].identity, "other_barry");
+        assert_eq!(cfg.reviewers[0].artifact(), "review-barry.json");
+        assert_eq!(cfg.reviewers[1].artifact(), "review-other_barry.json");
+        assert_ne!(cfg.reviewers[0].artifact(), cfg.reviewers[1].artifact());
     }
 
     #[test]

@@ -12,7 +12,7 @@
 pub mod config;
 pub mod job;
 
-pub use config::RackConfig;
+pub use config::{Placement, RackConfig, Reviewer};
 
 use crate::checker::multi_review::review::UnifiedReview;
 use crate::github::pr::ChangedFile;
@@ -92,13 +92,16 @@ fn find_artifact<'a>(artifacts: &'a [ArtifactRef], name: &str) -> Option<&'a Art
     artifacts.iter().rev().find(|a| a.name == name)
 }
 
-/// Run a review on the rack and return it.
+/// One review per configured reviewer, keyed by identity slug.
+pub type Reviews = std::collections::BTreeMap<String, UnifiedReview>;
+
+/// Run every configured reviewer on the rack and return their reviews.
 pub async fn review(
     cfg: &RackConfig,
     http: &reqwest::Client,
     files: &[ChangedFile],
     name: &str,
-) -> Result<UnifiedReview, RackError> {
+) -> Result<Reviews, RackError> {
     if files.is_empty() {
         return Err(RackError::Other(anyhow::anyhow!(
             "no changed files supplied; nothing to review"
@@ -126,7 +129,12 @@ pub async fn review(
         serde_json::from_str(&body).map_err(|e| RackError::Submit(format!("{e}: {body}")))?;
     let id = submitted.id;
 
-    tracing::info!(experiment = %id, shape = %cfg.shape, "rack review submitted");
+    tracing::info!(
+        experiment = %id,
+        placement = ?cfg.placement,
+        reviewers = cfg.reviewers.len(),
+        "rack review submitted"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(cfg.job_timeout_secs);
     let mut last = String::from("unknown");
@@ -185,33 +193,42 @@ pub async fn review(
             cause: e.to_string(),
         })?;
 
-    let artifact = find_artifact(&artifacts, job::REVIEW_ARTIFACT).ok_or_else(|| {
-        RackError::MissingArtifact {
-            id: id.clone(),
-            name: job::REVIEW_ARTIFACT.to_string(),
-        }
-    })?;
+    // Every reviewer must have produced a review. A partial set would let a
+    // judge compare one real review against nothing and call it agreement.
+    let mut reviews = Reviews::new();
+    for r in &cfg.reviewers {
+        let want = r.artifact();
+        let artifact =
+            find_artifact(&artifacts, &want).ok_or_else(|| RackError::MissingArtifact {
+                id: id.clone(),
+                name: want.clone(),
+            })?;
 
-    let text = http
-        .get(format!("{base}/api/v1/artifact/{}", artifact.id))
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| RackError::Poll {
-            id: id.clone(),
-            cause: e.to_string(),
-        })?
-        .text()
-        .await
-        .map_err(|e| RackError::Poll {
-            id: id.clone(),
-            cause: e.to_string(),
-        })?;
+        let text = http
+            .get(format!("{base}/api/v1/artifact/{}", artifact.id))
+            .send()
+            .await
+            .and_then(|resp| resp.error_for_status())
+            .map_err(|e| RackError::Poll {
+                id: id.clone(),
+                cause: e.to_string(),
+            })?
+            .text()
+            .await
+            .map_err(|e| RackError::Poll {
+                id: id.clone(),
+                cause: e.to_string(),
+            })?;
 
-    serde_json::from_str(&text).map_err(|e| RackError::BadReview {
-        id,
-        cause: e.to_string(),
-    })
+        let review: UnifiedReview =
+            serde_json::from_str(&text).map_err(|e| RackError::BadReview {
+                id: id.clone(),
+                cause: format!("{want}: {e}"),
+            })?;
+        reviews.insert(r.identity.clone(), review);
+    }
+
+    Ok(reviews)
 }
 
 #[cfg(test)]

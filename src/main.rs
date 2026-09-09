@@ -91,11 +91,13 @@ async fn review_rack(
     // No global timeout here: the config's job_timeout_secs already bounds the
     // wait, and it is the one that knows how long a model pull takes.
     let http = reqwest::Client::new();
-    let review = barry_dylan::rack::review(&cfg, &http, &changed, name).await?;
+    let reviews = barry_dylan::rack::review(&cfg, &http, &changed, name).await?;
 
-    let json = serde_json::to_string_pretty(&review)?;
+    // Keyed by identity, because there is more than one when several reviewers
+    // are configured and the caller has to be able to tell them apart.
+    let json = serde_json::to_string_pretty(&reviews)?;
     std::fs::write(out, json)
-        .map_err(|e| anyhow::anyhow!("writing review {}: {e}", out.display()))?;
+        .map_err(|e| anyhow::anyhow!("writing reviews {}: {e}", out.display()))?;
     Ok(())
 }
 
