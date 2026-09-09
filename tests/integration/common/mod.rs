@@ -199,6 +199,10 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
         personas: personas.clone(),
         gh_factory: factory.clone(),
         status_tracker: status_tracker.clone(),
+        // These tests drive the local pipeline; rack reviews are exercised
+        // against the real control plane, not a mock of it.
+        rack: None,
+        http: reqwest::Client::new(),
     }));
 
     let deps = Arc::new(JobDeps {

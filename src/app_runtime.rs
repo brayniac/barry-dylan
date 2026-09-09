@@ -253,11 +253,21 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
     let clients = Arc::new(crate::checker::multi_review::clients::build(&cfg)?);
     let overrides = crate::checker::multi_review::persona::overrides_from_config(&cfg.personas);
     let personas = Arc::new(crate::checker::multi_review::persona::resolve(&overrides)?);
+    let rack = cfg.rack.clone().map(Arc::new);
+    if let Some(r) = &rack {
+        tracing::info!(
+            systemslab = %r.systemslab,
+            placement = ?r.placement,
+            reviewers = r.reviewers.len(),
+            "reviews will run on the rack"
+        );
+    }
     let pipeline = Arc::new(build_pipeline_with(
         clients.clone(),
         personas.clone(),
         gh_factory.clone(),
         status_tracker.clone(),
+        rack,
     ));
     let cancel_registry = crate::dispatcher::cancel::CancelRegistry::new();
     let deps = Arc::new(JobDeps {
@@ -341,6 +351,7 @@ fn build_pipeline_with(
     personas: Arc<Vec<crate::checker::multi_review::persona::Persona>>,
     gh_factory: Arc<dyn MultiGhFactory>,
     status_tracker: Arc<StatusTracker>,
+    rack: Option<Arc<crate::rack::RackConfig>>,
 ) -> Pipeline {
     let mut p = Pipeline::hygiene_only();
     p.checkers
@@ -349,6 +360,8 @@ fn build_pipeline_with(
             personas,
             gh_factory,
             status_tracker,
+            rack,
+            http: reqwest::Client::new(),
         }));
     p
 }

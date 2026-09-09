@@ -30,6 +30,63 @@ pub struct MultiReviewChecker {
     pub personas: Arc<Vec<Persona>>,
     pub gh_factory: Arc<dyn MultiGhFactory>,
     pub status_tracker: Arc<StatusTracker>,
+    /// When set, the reviewers run on the rack instead of against the
+    /// configured LLM endpoints. The judge still runs here — it is a small
+    /// remote model and reconciling two finished reviews needs no GPU.
+    pub rack: Option<Arc<crate::rack::RackConfig>>,
+    /// Used only for talking to systemslab, and only when `rack` is set.
+    pub http: reqwest::Client,
+}
+
+impl MultiReviewChecker {
+    /// Produce a verdict from reviews run on the rack.
+    ///
+    /// Both reviewer identities get their review from an ephemeral GPU guest;
+    /// the judge still runs here, against its own small remote model, because
+    /// reconciling two finished reviews needs no GPU and the rack job only ever
+    /// returns finished reviews.
+    ///
+    /// When Other Barry is not installed on the repo its reviewer is dropped
+    /// before submitting. Running it anyway would spend a GPU host producing a
+    /// review that cannot be posted.
+    async fn run_on_rack(
+        &self,
+        rack: &Arc<crate::rack::RackConfig>,
+        orchestrator: &Orchestrator<'_>,
+        ctx: &CheckerCtx,
+        ob_available: bool,
+    ) -> anyhow::Result<Verdict> {
+        let barry_slug = Identity::Barry.slug();
+        let ob_slug = Identity::OtherBarry.slug();
+
+        let mut cfg = (**rack).clone();
+        if !ob_available {
+            cfg.reviewers.retain(|r| r.identity != ob_slug);
+        }
+        if !cfg.reviewers.iter().any(|r| r.identity == barry_slug) {
+            anyhow::bail!("rack is configured but has no `{barry_slug}` reviewer");
+        }
+
+        self.status_tracker.set_phase(ctx.job_id, "rack review");
+        let name = format!("barry review {}/{} #{}", ctx.owner, ctx.repo, ctx.pr.number);
+        let mut reviews = crate::rack::review(&cfg, &self.http, &ctx.files, &name).await?;
+
+        let barry = reviews
+            .remove(barry_slug)
+            .ok_or_else(|| anyhow::anyhow!("rack returned no review for {barry_slug}"))?;
+
+        match reviews.remove(ob_slug) {
+            Some(other) => Ok(orchestrator.judge_reviews(barry, other).await),
+            None => Ok(Verdict::BarryAlone {
+                barry,
+                reason: if ob_available {
+                    "Other Barry has no rack reviewer configured".into()
+                } else {
+                    "Other Barry not installed".into()
+                },
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -73,12 +130,17 @@ impl Checker for MultiReviewChecker {
             Err(GhFactoryError::NotInstalled { .. }) => false,
             Err(GhFactoryError::Other(e)) => return Err(e),
         };
-        let mut verdict = if ob_available {
-            orchestrator.run(&ctx.files).await?
-        } else {
-            orchestrator
-                .run_barry_only(&ctx.files, "Other Barry not installed".into())
-                .await?
+        let mut verdict = match &self.rack {
+            Some(rack) => {
+                self.run_on_rack(rack, &orchestrator, ctx, ob_available)
+                    .await?
+            }
+            None if ob_available => orchestrator.run(&ctx.files).await?,
+            None => {
+                orchestrator
+                    .run_barry_only(&ctx.files, "Other Barry not installed".into())
+                    .await?
+            }
         };
         let orchestrator_duration = start.elapsed();
 
@@ -310,5 +372,93 @@ mod checker_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, GhFactoryError::NotInstalled { .. }));
+    }
+}
+
+#[cfg(test)]
+mod rack_tests {
+    use crate::checker::multi_review::identity::Identity;
+    use crate::rack::RackConfig;
+
+    fn cfg() -> RackConfig {
+        toml::from_str(
+            r#"
+systemslab = "http://systemslab"
+host_tags = ["z2.baremetal"]
+shape = "z2.g.medium"
+image = "img"
+
+[[reviewers]]
+identity = "barry"
+model = "m1"
+model_name = "n1"
+
+[[reviewers]]
+identity = "other_barry"
+model = "m2"
+model_name = "n2"
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reviewer_identities_match_the_identity_slugs() {
+        // run_on_rack looks reviews up by slug. If a config used a different
+        // spelling the reviews would be produced, paid for on a GPU, and then
+        // not found.
+        let c = cfg();
+        assert!(
+            c.reviewers
+                .iter()
+                .any(|r| r.identity == Identity::Barry.slug())
+        );
+        assert!(
+            c.reviewers
+                .iter()
+                .any(|r| r.identity == Identity::OtherBarry.slug())
+        );
+    }
+
+    #[test]
+    fn dropping_other_barry_leaves_a_runnable_config() {
+        // When OB is not installed on the repo its reviewer is dropped before
+        // submitting, rather than spending a GPU host on a review that cannot
+        // be posted.
+        let mut c = cfg();
+        c.reviewers
+            .retain(|r| r.identity != Identity::OtherBarry.slug());
+        assert_eq!(c.reviewers.len(), 1);
+        assert_eq!(c.reviewers[0].identity, Identity::Barry.slug());
+        // Still a valid experiment: something to run, and an artifact to fetch.
+        assert!(
+            crate::rack::job::spec(
+                &c,
+                &[crate::github::pr::ChangedFile {
+                    filename: "a".into(),
+                    status: "modified".into(),
+                    additions: 1,
+                    deletions: 0,
+                    changes: 1,
+                    patch: Some("@@".into()),
+                }],
+                "t"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_config_without_barry_is_rejected_before_submitting() {
+        // Barry is the identity that posts. A rack config that cannot produce
+        // his review has nothing useful to run, and finding that out after a
+        // GPU job is the expensive way to learn it.
+        let mut c = cfg();
+        c.reviewers.retain(|r| r.identity != Identity::Barry.slug());
+        assert!(
+            !c.reviewers
+                .iter()
+                .any(|r| r.identity == Identity::Barry.slug())
+        );
     }
 }

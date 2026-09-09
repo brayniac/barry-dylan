@@ -165,14 +165,26 @@ impl<'a> Orchestrator<'a> {
             barry_r1_tokens.output + ob_r1_tokens.output,
         );
 
-        // Judge.
+        Ok(self.judge_reviews(barry_r1, ob_r1).await)
+    }
+
+    /// Reconcile two finished reviews into a verdict.
+    ///
+    /// Separate from [`Self::run`] because where the reviews came from does not
+    /// change how they are reconciled: the same judge runs over reviews
+    /// produced locally and over reviews produced by a rack job, which only
+    /// ever returns finished reviews and never the drafts behind them.
+    ///
+    /// A judge that fails is not fatal. Barry posts alone rather than the whole
+    /// review being lost to a reconciliation step.
+    pub async fn judge_reviews(&self, barry: UnifiedReview, other: UnifiedReview) -> Verdict {
         self.tracker.set_phase(self.job_id, "judge");
         tracing::debug!("judge starting");
         let judge_start = std::time::Instant::now();
         let verdict = match judge::judge(
             self.clients.judge.as_ref(),
-            &barry_r1,
-            &ob_r1,
+            &barry,
+            &other,
             self.clients.judge_max_tokens.min(512),
         )
         .await
@@ -182,10 +194,10 @@ impl<'a> Orchestrator<'a> {
                 tracing::warn!(?e, "judge failed; posting Barry alone");
                 tracing::info!(kind = "barry_alone", "verdict");
                 metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
-                return Ok(Verdict::BarryAlone {
-                    barry: barry_r1,
+                return Verdict::BarryAlone {
+                    barry,
                     reason: "judge unavailable".into(),
-                });
+                };
             }
         };
         tracing::info!(
@@ -198,18 +210,18 @@ impl<'a> Orchestrator<'a> {
             .add_tokens(self.job_id, verdict.tokens.input, verdict.tokens.output);
 
         if verdict.agree {
-            tracing::info!(kind = "agree", outcome = ?barry_r1.outcome, "verdict");
+            tracing::info!(kind = "agree", outcome = ?barry.outcome, "verdict");
             metrics::counter!("barry_multi_review_judge_total", "verdict" => "agree").increment(1);
-            Ok(Verdict::Agree { barry: barry_r1 })
+            Verdict::Agree { barry }
         } else {
             tracing::info!(kind = "disagree", "verdict");
             metrics::counter!("barry_multi_review_judge_total", "verdict" => "disagree")
                 .increment(1);
-            Ok(Verdict::Disagree {
-                barry: barry_r1,
-                other_barry: ob_r1,
+            Verdict::Disagree {
+                barry,
+                other_barry: other,
                 reason: verdict.reason,
-            })
+            }
         }
     }
 

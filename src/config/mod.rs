@@ -15,6 +15,12 @@ pub struct Config {
     pub personas: PersonaOverridesConfig,
     #[serde(default)]
     pub defaults: Option<crate::config::repo::RepoConfig>,
+    /// When present, the reviewer identities produce their reviews on the rack
+    /// -- an ephemeral GPU VM per review -- instead of calling an LLM endpoint
+    /// directly. The judge is unaffected: it reconciles two finished reviews
+    /// and needs no GPU.
+    #[serde(default)]
+    pub rack: Option<crate::rack::RackConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

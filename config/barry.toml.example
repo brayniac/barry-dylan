@@ -54,6 +54,34 @@ model = "gpt-4o"
 max_tokens = 8192
 request_timeout_secs = 300
 
+# Optional: run the reviewer identities on the rack instead of calling their
+# endpoints directly. Each review happens in an ephemeral GPU VM that is
+# destroyed afterwards, rather than against a resident llama-server holding a
+# measurement host out of the pool.
+#
+# When present, [llm.barry] and [llm.other_barry] above are not used to produce
+# reviews -- the rack reviewers replace them. [llm.judge] IS still used:
+# reconciling two finished reviews needs no GPU.
+#
+# See config/rack.toml.example for every key. The same file works with
+# `barry-dylan review-rack` for a one-off review outside the webhook path.
+#
+# [rack]
+# systemslab = "http://systemslab"
+# host_tags = ["z2.baremetal"]
+# shape = "z2.g.medium"
+# image = "spool/images/debian-13-gpu@golden"
+#
+# [[rack.reviewers]]
+# identity = "barry"
+# model = "Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest"
+# model_name = "qwen2.5-coder-14b"
+#
+# [[rack.reviewers]]
+# identity = "other_barry"
+# model = "meta-llama/Llama-3.1-8B@latest/gguf/q5_k_m@latest"
+# model_name = "llama-3.1-8b"
+
 # The judge reconciles Barry and Other Barry. Use a small, fast model.
 [llm.judge]
 provider = "anthropic"
