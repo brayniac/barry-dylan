@@ -348,11 +348,30 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
 
     loop {
         tokio::select! {
+            // SIGHUP CHECKS the config; it does not apply it. Nothing here is
+            // rebuilt from a new Config -- not the worker pool, not the GitHub
+            // clients, not the relay, not the repository allowlist -- so
+            // pretending otherwise would be worse than not reloading at all:
+            // the operator who changes `repos`, sends SIGHUP, reads "reloaded"
+            // and walks away has been told their change is live when it is
+            // not. (It said exactly that until 2026-09-15.)
+            //
+            // As a check it still earns its keep: it is the only way to find
+            // out whether the config on disk will start, without stopping the
+            // process that is running the old one.
             _ = sighup.recv() => {
-                tracing::info!("SIGHUP — reloading config");
                 match Config::load(config_path) {
-                    Ok(new_cfg) => tracing::info!(workers = new_cfg.dispatcher.worker_count, "reloaded"),
-                    Err(e) => tracing::error!(?e, "reload failed; keeping previous config"),
+                    Ok(new_cfg) => tracing::info!(
+                        repos = ?new_cfg.repos.as_ref().map(|r| r.len()),
+                        workers = new_cfg.dispatcher.worker_count,
+                        "SIGHUP — config on disk is valid, and NOT applied; \
+                         `systemctl restart barry-dylan` to run it"
+                    ),
+                    Err(e) => tracing::error!(
+                        ?e,
+                        "SIGHUP — config on disk is INVALID; the running process is \
+                         unaffected, but a restart would fail"
+                    ),
                 }
             }
             _ = sigterm.recv() => {

@@ -171,6 +171,13 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 
 Fetched from the repo's HEAD at runtime, allows overriding hygiene rules and disabling multi-review per repository. See `config/.barry.toml.example` for format.
 
+## Signals
+
+| signal | effect |
+|---|---|
+| `SIGHUP` | **checks** the config on disk and reports whether it is valid. It does not apply it — nothing is rebuilt from a new config. Restart to apply a change. |
+| `SIGTERM` | graceful shutdown: the HTTP server drains, workers finish the job in hand. |
+
 ## Slash Commands
 
 | Command | Who | Behavior |
