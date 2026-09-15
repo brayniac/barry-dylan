@@ -41,14 +41,16 @@ pub struct MultiReviewChecker {
 impl MultiReviewChecker {
     /// Produce a verdict from reviews run on the rack.
     ///
-    /// Both reviewer identities get their review from an ephemeral GPU guest;
-    /// the judge still runs here, against its own small remote model, because
-    /// reconciling two finished reviews needs no GPU and the rack job only ever
-    /// returns finished reviews.
+    /// Both reviewer identities get their review from an ephemeral GPU guest.
+    /// The judge runs there too when `[rack] judge` says so, against the model
+    /// already loaded; otherwise it runs here against `[llm.judge]`, and a
+    /// guest that was asked to judge but could not falls back to the same
+    /// place.
     ///
     /// When Other Barry is not installed on the repo its reviewer is dropped
     /// before submitting. Running it anyway would spend a GPU host producing a
-    /// review that cannot be posted.
+    /// review that cannot be posted. Dropping it also drops the in-guest judge:
+    /// one review has nothing to be reconciled with.
     async fn run_on_rack(
         &self,
         rack: &Arc<crate::rack::RackConfig>,
@@ -69,14 +71,22 @@ impl MultiReviewChecker {
 
         self.status_tracker.set_phase(ctx.job_id, "rack review");
         let name = format!("barry review {}/{} #{}", ctx.owner, ctx.repo, ctx.pr.number);
-        let mut reviews = crate::rack::review(&cfg, &self.http, &ctx.files, &name).await?;
+        if !ob_available {
+            // Nothing to reconcile, so do not pay for a reconciliation.
+            cfg.judge = false;
+        }
+        let outcome = crate::rack::review(&cfg, &self.http, &ctx.files, &name).await?;
+        let mut reviews = outcome.reviews;
 
         let barry = reviews
             .remove(barry_slug)
             .ok_or_else(|| anyhow::anyhow!("rack returned no review for {barry_slug}"))?;
 
         match reviews.remove(ob_slug) {
-            Some(other) => Ok(orchestrator.judge_reviews(barry, other).await),
+            Some(other) => match outcome.verdict {
+                Some(v) => Ok(orchestrator.verdict_from(barry, other, v.agree, v.reason)),
+                None => Ok(orchestrator.judge_reviews(barry, other).await),
+            },
             None => Ok(Verdict::BarryAlone {
                 barry,
                 reason: if ob_available {

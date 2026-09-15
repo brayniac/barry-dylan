@@ -37,6 +37,33 @@ impl LlmClient for LlmClientWithSemaphore {
     }
 }
 
+/// Stands in for an identity with no `[llm.*]` profile.
+///
+/// Only reachable when `[rack]` is configured, where the reviewers' endpoints
+/// are unused and requiring them would mean carrying a remote model's address
+/// and key purely to satisfy startup. Anything that does call it gets a message
+/// naming the section to add, rather than a panic or a confusing HTTP error.
+struct Unconfigured {
+    name: &'static str,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for Unconfigured {
+    async fn complete(
+        &self,
+        _req: &crate::llm::LlmRequest,
+    ) -> Result<crate::llm::LlmResponse, crate::llm::LlmError> {
+        Err(crate::llm::LlmError::Shape(format!(
+            "no [llm.{}] profile is configured, and something asked for one",
+            self.name
+        )))
+    }
+
+    fn name(&self) -> &'static str {
+        "unconfigured"
+    }
+}
+
 pub struct IdentityClients {
     pub barry: Arc<dyn LlmClient>,
     pub other_barry: Arc<dyn LlmClient>,
@@ -87,42 +114,37 @@ pub fn build(cfg: &Config) -> anyhow::Result<IdentityClients> {
             .map_err(anyhow::Error::from)
     };
 
-    let pick = |name: &str| -> anyhow::Result<&crate::config::LlmProfile> {
-        cfg.llm
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("missing [llm.{name}]"))
-    };
-
-    let b = pick("barry")?;
-    let ob = pick("other_barry")?;
-    let oob = pick("other_other_barry")?;
-    let judge = pick("judge")?;
-
     let llm_semaphore = Arc::new(Semaphore::new(10));
 
-    let clients = IdentityClients {
-        barry: Arc::new(LlmClientWithSemaphore::new(
-            crate::llm::factory::build(b, http(b.request_timeout_secs)?)?,
+    // Which profiles must exist is [`crate::config::Config::validate`]'s
+    // decision, made once, with the rack config in view. By here a profile is
+    // either present or deliberately absent.
+    let client = |name: &'static str| -> anyhow::Result<Arc<dyn LlmClient>> {
+        let Some(profile) = cfg.llm.get(name) else {
+            return Ok(Arc::new(Unconfigured { name }));
+        };
+        Ok(Arc::new(LlmClientWithSemaphore::new(
+            crate::llm::factory::build(profile, http(profile.request_timeout_secs)?)?,
             llm_semaphore.clone(),
-        )),
-        other_barry: Arc::new(LlmClientWithSemaphore::new(
-            crate::llm::factory::build(ob, http(ob.request_timeout_secs)?)?,
-            llm_semaphore.clone(),
-        )),
-        other_other_barry: Arc::new(LlmClientWithSemaphore::new(
-            crate::llm::factory::build(oob, http(oob.request_timeout_secs)?)?,
-            llm_semaphore.clone(),
-        )),
-        judge: Arc::new(LlmClientWithSemaphore::new(
-            crate::llm::factory::build(judge, http(judge.request_timeout_secs)?)?,
-            llm_semaphore,
-        )),
-        barry_max_tokens: b.max_tokens,
-        other_barry_max_tokens: ob.max_tokens,
-        other_other_barry_max_tokens: oob.max_tokens,
-        judge_max_tokens: judge.max_tokens,
+        )))
     };
-    Ok(clients)
+    let max_tokens = |name: &str| {
+        cfg.llm
+            .get(name)
+            .map(|p| p.max_tokens)
+            .unwrap_or(crate::config::DEFAULT_MAX_TOKENS)
+    };
+
+    Ok(IdentityClients {
+        barry: client("barry")?,
+        other_barry: client("other_barry")?,
+        other_other_barry: client("other_other_barry")?,
+        judge: client("judge")?,
+        barry_max_tokens: max_tokens("barry"),
+        other_barry_max_tokens: max_tokens("other_barry"),
+        other_other_barry_max_tokens: max_tokens("other_other_barry"),
+        judge_max_tokens: max_tokens("judge"),
+    })
 }
 
 #[cfg(test)]
@@ -168,8 +190,11 @@ mod tests {
         let _ = build(&cfg).unwrap();
     }
 
+    /// Startup no longer rejects this -- `Config::validate` does, and only when
+    /// the rack is not covering it. What `build` must not do is panic or
+    /// silently produce a client that talks to the wrong endpoint.
     #[test]
-    fn build_rejects_missing_judge() {
+    fn a_missing_profile_becomes_a_client_that_explains_itself() {
         let toml = r#"
             [server]
             listen = "0.0.0.0:0"
@@ -200,7 +225,18 @@ mod tests {
             model = "x"
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let err = build(&cfg).unwrap_err();
-        assert!(format!("{err}").contains("judge"));
+        let clients = build(&cfg).unwrap();
+        let err = tokio_test::block_on(clients.judge.complete(&crate::llm::LlmRequest {
+            system: None,
+            messages: vec![],
+            max_tokens: 1,
+            temperature: 0.0,
+            response_schema: None,
+        }))
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("[llm.judge]"),
+            "unexpected error: {err}"
+        );
     }
 }

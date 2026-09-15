@@ -77,6 +77,34 @@ pub async fn run(cfg: &OfflineConfig, files: &[ChangedFile]) -> anyhow::Result<U
     }
 }
 
+/// Reconcile two finished reviews against the offline model.
+///
+/// The counterpart to [`run`] for the rack: the guest that produced both
+/// reviews still has the weights loaded, so it can answer "do these two
+/// materially agree" without delta holding an LLM credential at all.
+///
+/// Capped at 512 output tokens like the in-process judge — a verdict is a
+/// boolean and a sentence, and a judge given room to ramble writes an essay
+/// instead of an answer.
+pub async fn judge(
+    cfg: &OfflineConfig,
+    a: &UnifiedReview,
+    b: &UnifiedReview,
+) -> anyhow::Result<crate::rack::RackVerdict> {
+    let clients = clients_from_profile(&cfg.llm)?;
+    let verdict = crate::checker::multi_review::judge::judge(
+        clients.judge.as_ref(),
+        a,
+        b,
+        cfg.llm.max_tokens.min(512),
+    )
+    .await?;
+    Ok(crate::rack::RackVerdict {
+        agree: verdict.agree,
+        reason: verdict.reason,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

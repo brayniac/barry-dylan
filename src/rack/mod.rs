@@ -12,7 +12,7 @@
 pub mod config;
 pub mod job;
 
-pub use config::{Placement, RackConfig, Reviewer};
+pub use config::{Placement, RackConfig, Reviewer, VERDICT_ARTIFACT};
 
 use crate::checker::multi_review::review::UnifiedReview;
 use crate::github::pr::ChangedFile;
@@ -95,13 +95,37 @@ fn find_artifact<'a>(artifacts: &'a [ArtifactRef], name: &str) -> Option<&'a Art
 /// One review per configured reviewer, keyed by identity slug.
 pub type Reviews = std::collections::BTreeMap<String, UnifiedReview>;
 
+/// What the in-guest judge decided, when it ran.
+///
+/// Deliberately not [`crate::checker::multi_review::judge::JudgeVerdict`]: that
+/// carries a token count, which belongs to the process that spent the tokens.
+/// This crosses a job boundary as JSON and should carry only the decision.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct RackVerdict {
+    pub agree: bool,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// What a rack job produced.
+///
+/// `verdict` is `None` whenever the guest was not asked to judge, or was asked
+/// and could not -- a judge that fails writes an error into its artifact rather
+/// than failing the job, because two good reviews are worth more than the
+/// reconciliation. The caller reconciles them itself in that case.
+#[derive(Debug)]
+pub struct RackOutcome {
+    pub reviews: Reviews,
+    pub verdict: Option<RackVerdict>,
+}
+
 /// Run every configured reviewer on the rack and return their reviews.
 pub async fn review(
     cfg: &RackConfig,
     http: &reqwest::Client,
     files: &[ChangedFile],
     name: &str,
-) -> Result<Reviews, RackError> {
+) -> Result<RackOutcome, RackError> {
     if files.is_empty() {
         return Err(RackError::Other(anyhow::anyhow!(
             "no changed files supplied; nothing to review"
@@ -204,21 +228,7 @@ pub async fn review(
                 name: want.clone(),
             })?;
 
-        let text = http
-            .get(format!("{base}/api/v1/artifact/{}", artifact.id))
-            .send()
-            .await
-            .and_then(|resp| resp.error_for_status())
-            .map_err(|e| RackError::Poll {
-                id: id.clone(),
-                cause: e.to_string(),
-            })?
-            .text()
-            .await
-            .map_err(|e| RackError::Poll {
-                id: id.clone(),
-                cause: e.to_string(),
-            })?;
+        let text = fetch_artifact(http, base, &id, &artifact.id).await?;
 
         let review: UnifiedReview =
             serde_json::from_str(&text).map_err(|e| RackError::BadReview {
@@ -228,7 +238,99 @@ pub async fn review(
         reviews.insert(r.identity.clone(), review);
     }
 
-    Ok(reviews)
+    // The verdict, when one was asked for. Unlike a review, a missing or
+    // unparseable verdict is not an error: the caller still has both reviews
+    // and can reconcile them itself, which is what it did before the guest
+    // could judge at all.
+    let verdict = if cfg.judge {
+        read_verdict(http, base, &id, &artifacts).await
+    } else {
+        None
+    };
+
+    Ok(RackOutcome { reviews, verdict })
+}
+
+/// Fetch one artifact's body.
+async fn fetch_artifact(
+    http: &reqwest::Client,
+    base: &str,
+    experiment: &str,
+    artifact_id: &str,
+) -> Result<String, RackError> {
+    http.get(format!("{base}/api/v1/artifact/{artifact_id}"))
+        .send()
+        .await
+        .and_then(|resp| resp.error_for_status())
+        .map_err(|e| RackError::Poll {
+            id: experiment.to_string(),
+            cause: e.to_string(),
+        })?
+        .text()
+        .await
+        .map_err(|e| RackError::Poll {
+            id: experiment.to_string(),
+            cause: e.to_string(),
+        })
+}
+
+/// Read the in-guest verdict, or explain in the log why there is none.
+///
+/// Every failure here degrades to `None` rather than propagating: the reviews
+/// are already in hand, and losing them to a failed reconciliation would be a
+/// far worse outcome than reconciling on delta after all.
+async fn read_verdict(
+    http: &reqwest::Client,
+    base: &str,
+    experiment: &str,
+    artifacts: &[ArtifactRef],
+) -> Option<RackVerdict> {
+    let outcome = |o: &str| {
+        metrics::counter!("barry_rack_judge_total", "outcome" => o.to_string()).increment(1)
+    };
+
+    let Some(artifact) = find_artifact(artifacts, VERDICT_ARTIFACT) else {
+        tracing::warn!(
+            experiment = %experiment,
+            "no {VERDICT_ARTIFACT}; reconciling here instead"
+        );
+        outcome("missing");
+        return None;
+    };
+    let text = match fetch_artifact(http, base, experiment, &artifact.id).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(experiment = %experiment, error = %e, "could not read the verdict");
+            outcome("missing");
+            return None;
+        }
+    };
+    match serde_json::from_str::<RackVerdict>(&text) {
+        Ok(v) => {
+            tracing::info!(
+                experiment = %experiment,
+                agree = v.agree,
+                reason = %v.reason,
+                "judged on the rack"
+            );
+            outcome("verdict");
+            Some(v)
+        }
+        Err(e) => {
+            // The guest writes `{"error": ...}` here when judge-offline failed,
+            // so this is the expected shape of an in-guest judge failure, not a
+            // surprise.
+            let head: String = text.chars().take(200).collect();
+            tracing::warn!(
+                experiment = %experiment,
+                error = %e,
+                verdict = %head,
+                "unusable verdict; reconciling here instead"
+            );
+            outcome("invalid");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

@@ -34,6 +34,20 @@ pub struct RackConfig {
     #[serde(default)]
     pub placement: Placement,
 
+    /// Reconcile the two reviews inside the guest that produced them, against
+    /// the model already loaded there, instead of against `[llm.judge]`.
+    ///
+    /// The judge is a small job -- two finished reviews in, one boolean out --
+    /// and doing it here rather than on delta is what lets barry run with no
+    /// LLM credential at all: no key in `secrets.env`, and no diff leaving the
+    /// rack. The guest is about to be destroyed anyway, and the weights are
+    /// already resident, so the marginal cost is one completion.
+    ///
+    /// Requires [`Placement::Sequential`]: under `Concurrent` the two reviews
+    /// are produced in different guests, and neither can see the other's.
+    #[serde(default)]
+    pub judge: bool,
+
     /// llama-server context window. A review sends whole patches, so this wants
     /// to be generous.
     #[serde(default = "default_context_size")]
@@ -121,6 +135,33 @@ pub struct Reviewer {
     /// agree with `shape`.
     #[serde(default)]
     pub host_tags: Option<Vec<String>>,
+}
+
+/// The artifact the in-guest judge writes its verdict to.
+pub const VERDICT_ARTIFACT: &str = "verdict.json";
+
+impl RackConfig {
+    /// Reject a configuration that cannot do what it says.
+    ///
+    /// Only `judge` can be wrong this way today. It is a hard error rather than
+    /// a silent fallback to `[llm.judge]`, because the whole point of setting
+    /// it is to stop paying a remote judge -- and a silent fallback means still
+    /// paying one while believing you are not.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.judge && self.placement != Placement::Sequential {
+            return Err(
+                "[rack] judge = true needs placement = \"sequential\": concurrent reviewers \
+                 run in separate guests, and neither can see the other's review"
+                    .into(),
+            );
+        }
+        if self.judge && self.reviewers.len() < 2 {
+            return Err(
+                "[rack] judge = true needs two reviewers; there is nothing to reconcile".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Reviewer {

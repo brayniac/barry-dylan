@@ -209,7 +209,24 @@ impl<'a> Orchestrator<'a> {
         self.tracker
             .add_tokens(self.job_id, verdict.tokens.input, verdict.tokens.output);
 
-        if verdict.agree {
+        self.verdict_from(barry, other, verdict.agree, verdict.reason)
+    }
+
+    /// Turn a decision into a [`Verdict`], wherever the decision was made.
+    ///
+    /// Shared by the judge that runs here and the one that runs in a rack
+    /// guest, so that "what agreement means for what gets posted" is decided
+    /// once. The counters are the same too: a verdict reached on the rack is
+    /// still a verdict, and splitting the metric by where it was decided would
+    /// make the agree/disagree ratio unreadable across a config change.
+    pub fn verdict_from(
+        &self,
+        barry: UnifiedReview,
+        other: UnifiedReview,
+        agree: bool,
+        reason: String,
+    ) -> Verdict {
+        if agree {
             tracing::info!(kind = "agree", outcome = ?barry.outcome, "verdict");
             metrics::counter!("barry_multi_review_judge_total", "verdict" => "agree").increment(1);
             Verdict::Agree { barry }
@@ -220,7 +237,7 @@ impl<'a> Orchestrator<'a> {
             Verdict::Disagree {
                 barry,
                 other_barry: other,
-                reason: verdict.reason,
+                reason,
             }
         }
     }

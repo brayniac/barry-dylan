@@ -34,6 +34,24 @@ enum Cmd {
         #[arg(long, default_value = "barry review")]
         name: String,
     },
+    /// Reconcile two finished reviews, with no GitHub access.
+    ///
+    /// What the rack guest runs after its reviewers have finished, against the
+    /// model it already has loaded. Reads two review JSONs as written by
+    /// `review-offline` and writes `{"agree": bool, "reason": string}`.
+    JudgeOffline {
+        #[arg(long)]
+        config: PathBuf,
+        /// The first review.
+        #[arg(long)]
+        a: PathBuf,
+        /// The review to reconcile it with.
+        #[arg(long)]
+        b: PathBuf,
+        /// Where to write the verdict JSON.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Produce a review from a changed-file set, with no GitHub access.
     ///
     /// Reads a JSON array of ChangedFile, runs the local-model half of the
@@ -56,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Run { config } => barry_dylan::app_runtime::run(&config).await,
         Cmd::ReviewOffline { config, files, out } => review_offline(&config, &files, &out).await,
+        Cmd::JudgeOffline { config, a, b, out } => judge_offline(&config, &a, &b, &out).await,
         Cmd::ReviewRack {
             config,
             files,
@@ -91,13 +110,49 @@ async fn review_rack(
     // No global timeout here: the config's job_timeout_secs already bounds the
     // wait, and it is the one that knows how long a model pull takes.
     let http = reqwest::Client::new();
-    let reviews = barry_dylan::rack::review(&cfg, &http, &changed, name).await?;
+    let outcome = barry_dylan::rack::review(&cfg, &http, &changed, name).await?;
+    if let Some(v) = &outcome.verdict {
+        eprintln!("judged on the rack: agree = {} ({})", v.agree, v.reason);
+    }
 
     // Keyed by identity, because there is more than one when several reviewers
     // are configured and the caller has to be able to tell them apart.
-    let json = serde_json::to_string_pretty(&reviews)?;
+    let json = serde_json::to_string_pretty(&outcome.reviews)?;
     std::fs::write(out, json)
         .map_err(|e| anyhow::anyhow!("writing reviews {}: {e}", out.display()))?;
+    Ok(())
+}
+
+/// Read a review as `review-offline` wrote it, or say which file was wrong.
+fn read_review(
+    path: &std::path::Path,
+) -> anyhow::Result<barry_dylan::checker::multi_review::review::UnifiedReview> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("reading review {}: {e}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("parsing review {}: {e}", path.display()))
+}
+
+async fn judge_offline(
+    config: &std::path::Path,
+    a: &std::path::Path,
+    b: &std::path::Path,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let cfg = barry_dylan::offline::config::load(config)?;
+    let verdict = barry_dylan::offline::judge(&cfg, &read_review(a)?, &read_review(b)?).await?;
+
+    // Compact, not pretty: this is read by a program, and it travels as a
+    // systemslab artifact.
+    let json = serde_json::to_string(&verdict)?;
+    std::fs::write(out, json)
+        .map_err(|e| anyhow::anyhow!("writing verdict {}: {e}", out.display()))?;
+
+    eprintln!(
+        "wrote verdict to {} (agree = {})",
+        out.display(),
+        verdict.agree
+    );
     Ok(())
 }
 

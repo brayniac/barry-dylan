@@ -54,6 +54,11 @@ shape = "z2.g"
 # mean rebuilding a 7.5 GB image.
 image = "spool/images/debian-13-gpu@golden"
 
+# Reconcile the two reviews inside the guest, against the model already loaded,
+# and return the verdict as an artifact alongside them. Needs two reviewers and
+# the default sequential placement.
+judge = true
+
 # One block per reviewer. `identity` matches barry's own identity slugs, and the
 # review comes back keyed by it. Order is the order they run in when sequential.
 #

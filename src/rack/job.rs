@@ -1,6 +1,6 @@
 //! Building the systemslab experiment that produces the reviews.
 
-use super::config::{Placement, RackConfig, Reviewer};
+use super::config::{Placement, RackConfig, Reviewer, VERDICT_ARTIFACT};
 use crate::github::pr::ChangedFile;
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -105,6 +105,46 @@ barry-dylan review-offline \
             artifact = r.artifact(),
         ));
 
+        // The judge runs in here, not on delta, when asked to -- after the last
+        // review and *before* the server it uses is stopped. It reconciles two
+        // finished reviews, which is one completion against weights that are
+        // already resident, so it costs the guest seconds and saves delta a
+        // remote model and the credential that comes with it.
+        //
+        // A judge that fails must not lose two good reviews, so its failure is
+        // written into the artifact rather than raised: `set -e` would fail the
+        // whole job, throwing away the reviews to save the reconciliation.
+        // delta sees a verdict it cannot parse and reconciles the reviews
+        // itself.
+        let last = i + 1 == reviewers.len();
+        if cfg.judge && last && reviewers.len() >= 2 {
+            let a = reviewers[0];
+            let b = reviewers[1];
+            s.push_str(&format!(
+                r#"cat > /tmp/offline-judge.toml <<'OFFLINE'
+[llm]
+provider = "openai"
+endpoint = "http://127.0.0.1:8080/v1"
+model = "{model_name}"
+max_tokens = 512
+request_timeout_secs = 600
+OFFLINE
+
+barry-dylan judge-offline \
+    --config /tmp/offline-judge.toml \
+    --a /tmp/{a_artifact} \
+    --b /tmp/{b_artifact} \
+    --out /tmp/{verdict} \
+    || echo '{{"error":"judge-offline failed in the guest"}}' > /tmp/{verdict}
+
+"#,
+                model_name = r.model_name,
+                a_artifact = a.artifact(),
+                b_artifact = b.artifact(),
+                verdict = VERDICT_ARTIFACT,
+            ));
+        }
+
         if stop_server {
             s.push_str(
                 r#"# Free the whole card before the next model loads. Two large q4 models at
@@ -129,6 +169,9 @@ fn job_value(
     host_tags: &[String],
     files: &[ChangedFile],
 ) -> anyhow::Result<Value> {
+    // Only the job that holds every reviewer can judge, which under sequential
+    // placement is the only job there is.
+    let judging = cfg.judge && reviewers.len() >= 2;
     let mut steps = vec![json!({
         "uses": "anvil-vm",
         "with": {
@@ -139,6 +182,7 @@ fn job_value(
             "artifacts": reviewers
                 .iter()
                 .map(|r| format!("/tmp/{}", r.artifact()))
+                .chain(judging.then(|| format!("/tmp/{VERDICT_ARTIFACT}")))
                 .collect::<Vec<_>>(),
             // Guest-side telemetry around a GPU workload. The hypervisor cannot
             // see the GPU at all, so this is the only place it can come from.
@@ -149,6 +193,12 @@ fn job_value(
         steps.push(json!({
             "uses": "upload-artifact",
             "with": { "path": r.artifact() }
+        }));
+    }
+    if judging {
+        steps.push(json!({
+            "uses": "upload-artifact",
+            "with": { "path": VERDICT_ARTIFACT }
         }));
     }
     steps.push(json!({
@@ -176,6 +226,7 @@ pub fn spec(cfg: &RackConfig, files: &[ChangedFile], name: &str) -> anyhow::Resu
     if cfg.reviewers.is_empty() {
         anyhow::bail!("no reviewers configured; nothing to run");
     }
+    cfg.validate().map_err(|e| anyhow::anyhow!(e))?;
 
     let mut jobs = serde_json::Map::new();
     match cfg.placement {
@@ -249,6 +300,92 @@ model_name = "llama-3.1-8b"
 
     fn all(cfg: &RackConfig) -> Vec<&Reviewer> {
         cfg.reviewers.iter().collect()
+    }
+
+    fn judging_cfg() -> RackConfig {
+        toml::from_str(&format!("judge = true\n{BASE}")).unwrap()
+    }
+
+    #[test]
+    fn the_judge_runs_before_the_server_it_uses_is_stopped() {
+        // The judge is cheap only because the weights are already resident.
+        // Emitted after the last `kill`, it would be talking to a port with
+        // nothing behind it.
+        let c = judging_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        let judge = p.find("judge-offline").expect("no judge step");
+        let last_kill = p.rfind("kill $SERVER_PID").expect("no server stop");
+        assert!(
+            judge < last_kill,
+            "the judge runs after the last server is stopped"
+        );
+    }
+
+    #[test]
+    fn the_judge_reconciles_both_reviewers_artifacts() {
+        let c = judging_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(p.contains("--a /tmp/review-barry.json"), "{p}");
+        assert!(p.contains("--b /tmp/review-other_barry.json"), "{p}");
+    }
+
+    #[test]
+    fn a_judge_that_fails_does_not_fail_the_job() {
+        // `set -e` plus a bare judge command would throw away two finished
+        // reviews to save the reconciliation, which is exactly backwards.
+        let c = judging_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(
+            p.contains(r#"|| echo '{"error":"judge-offline failed in the guest"}'"#),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn no_judge_step_without_the_flag() {
+        let c = cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(!p.contains("judge-offline"));
+    }
+
+    #[test]
+    fn the_verdict_is_collected_and_uploaded() {
+        let c = judging_cfg();
+        let spec = spec(&c, &files(), "t").unwrap();
+        let job = &spec["experiment"]["jobs"]["review"];
+        let artifacts = job["steps"][0]["with"]["artifacts"].as_array().unwrap();
+        assert!(
+            artifacts.iter().any(|a| a == "/tmp/verdict.json"),
+            "verdict not pulled out of the guest: {artifacts:?}"
+        );
+        let uploads: Vec<_> = job["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["with"]["path"].as_str())
+            .collect();
+        assert!(uploads.contains(&"verdict.json"), "{uploads:?}");
+    }
+
+    #[test]
+    fn judging_with_concurrent_placement_is_refused() {
+        // Each reviewer is alone in its own guest there, so neither can see the
+        // other's review. Refused rather than quietly reconciled on delta: the
+        // reason to set this is to stop paying a remote judge, and a silent
+        // fallback keeps paying one.
+        let mut c = concurrent_cfg();
+        c.judge = true;
+        let err = spec(&c, &files(), "t").unwrap_err().to_string();
+        assert!(err.contains("sequential"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn judging_one_reviewer_is_refused() {
+        let mut c = cfg();
+        c.judge = true;
+        c.reviewers.truncate(1);
+        let err = spec(&c, &files(), "t").unwrap_err().to_string();
+        assert!(err.contains("two reviewers"), "unexpected error: {err}");
     }
 
     #[test]

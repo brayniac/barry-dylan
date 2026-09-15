@@ -2,6 +2,19 @@
 listen = "0.0.0.0:8181"
 public_url = "https://barry.example.com"
 
+# Where GitHub cannot reach barry directly -- a rack behind a LAN, a laptop --
+# barry holds a smee.io channel open from the inside and feeds what arrives to
+# its own webhook endpoint. Absent means barry is reachable at `public_url` and
+# GitHub posts to it directly.
+#
+# The channel URL is the App's webhook URL. smee keeps no backlog: anything
+# delivered while this is disconnected is lost, and GitHub still records a 200
+# from smee itself, so watch `/healthz` rather than the delivery log.
+#
+# [relay]
+# smee_url = "https://smee.io/aBcDeF123456"
+# require_signature = true   # default; see the docs before turning it off
+
 # Three GitHub Apps, one per reviewer identity. They appear as distinct
 # users in the PR UI (Barry, Other Barry, Other Other Barry). Only Barry
 # receives webhooks; OB and OOB are write-only identities that mint
@@ -72,6 +85,13 @@ request_timeout_secs = 300
 # shape = "z2.g.medium"
 # image = "spool/images/debian-13-gpu@golden"
 #
+# Reconcile the two reviews in the guest that produced them, against the model
+# already loaded there. With this on, [llm.judge] is not needed either -- and
+# then barry holds no LLM credential at all and no diff leaves the rack.
+# Requires the default sequential placement: concurrent reviewers are in
+# separate guests and neither can see the other's review.
+# judge = true
+#
 # [[rack.reviewers]]
 # identity = "barry"
 # model = "Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest"
@@ -83,6 +103,7 @@ request_timeout_secs = 300
 # model_name = "llama-3.1-8b"
 
 # The judge reconciles Barry and Other Barry. Use a small, fast model.
+# Not needed when [rack] judge = true, which does this in the guest instead.
 [llm.judge]
 provider = "anthropic"
 endpoint = "https://api.anthropic.com"
