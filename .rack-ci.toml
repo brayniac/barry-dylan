@@ -1,0 +1,30 @@
+# What rack-ci does with this repository, and where. The rack config on delta
+# defines the targets (pi, x86, gpu); this file picks. See
+# brayniac/infra docs/guides/ci.md.
+#
+# Two checks rather than five: on this rack a check holds a whole host for the
+# length of its script, so fmt-then-clippy in one sequential script costs one
+# host instead of two. Both run every step even after one fails -- stopping at
+# the first problem costs another push, and another host, to find the second.
+
+[checks.lint]
+target = "pi"
+run = """
+bad=0
+cargo fmt --all -- --check || bad=1
+cargo clippy --all-targets --all-features -- -D warnings || bad=1
+exit $bad
+"""
+
+[checks.test]
+target = "pi"
+run = "cargo test --all-targets"
+
+# v* tags only: build the .deb into dist/ for the [release] job to publish.
+#
+# This one matters more than most: the rack guest that runs a review installs
+# barry-dylan from delta's internal apt repo at run time, so a review runs
+# whatever was last published here -- not whatever is deployed on delta.
+[release]
+target = "x86"
+run = "bash .rack-release.sh"
