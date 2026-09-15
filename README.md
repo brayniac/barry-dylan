@@ -82,6 +82,26 @@ Copy `config/barry.toml.example` to `barry.toml` and fill in:
 
 Optionally, copy `config/.barry.toml.example` to `.barry.toml` in any repo to customize behavior per-repository.
 
+### 3b. Choose Which Repositories Barry Acts On
+
+```toml
+repos = ["you/project", "you/other-project"]
+```
+
+Absent means every repository the Apps are installed on. If you installed them
+with "All repositories", that is every repository in the account — and since a
+review costs real compute, "installed everywhere" and "reviews everywhere"
+being the same set is a spending decision worth making deliberately.
+
+This is a **spend gate, not an authorization boundary**. The installation is
+the authorization boundary: an App installed on a repository can write to it
+whatever this list says. Narrowing the installation is still the only thing
+that reduces what the Apps can reach.
+
+Checked before a delivery becomes a job, so an unlisted repository costs one
+string compare rather than a worker and a review. Case-insensitive, as GitHub
+is. Drops are counted as `barry_webhook_rejected_total{reason="repo"}`.
+
 ### 4. Set Environment Variables
 
 ```bash
@@ -129,6 +149,7 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | | `private_key_path` | Path to Other Barry's PEM key |
 | `[github.other_other_barry]` | `app_id` | Other Other Barry's GitHub App ID |
 | | `private_key_path` | Path to Other Other Barry's PEM key |
+| (top level) | `repos` | `owner/name` list barry acts on; absent means all |
 | `[relay]` | `smee_url` | smee.io channel to hold open, when GitHub cannot reach Barry |
 | | `require_signature` | Forward GitHub's signature (default `true`) rather than re-signing |
 | `[storage]` | `sqlite_path` | Path to the SQLite database file |

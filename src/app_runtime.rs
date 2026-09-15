@@ -315,12 +315,22 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         status
     });
 
+    let repos = Arc::new(crate::webhook::server::RepoFilter::new(cfg.repos.as_ref()));
+    match repos.configured_count() {
+        Some(n) => tracing::info!(repos = n, "acting on a configured set of repositories"),
+        None => tracing::warn!(
+            "no `repos` configured: barry will act on every repository the Apps are \
+             installed on, and a review costs GPU-minutes on a measurement host"
+        ),
+    }
+
     // HTTP server.
     let app_state = AppState {
         store: store.clone(),
         webhook_secret,
         metrics,
         debounce_secs: cfg.dispatcher.debounce_secs,
+        repos,
         relay: relay_status,
     };
     let router = crate::webhook::server::router(app_state);

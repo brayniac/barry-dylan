@@ -11,12 +11,46 @@ use axum::routing::{get, post};
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 
+/// Which repositories barry acts on.
+///
+/// Built once at startup so the hot path is a hash lookup, and lowercased
+/// because GitHub treats `Brayniac/Slipway` and `brayniac/slipway` as the same
+/// repository while a `HashSet<String>` does not.
+#[derive(Debug, Default, Clone)]
+pub struct RepoFilter {
+    allowed: Option<std::collections::HashSet<String>>,
+}
+
+impl RepoFilter {
+    pub fn new(configured: Option<&Vec<String>>) -> Self {
+        Self {
+            allowed: configured.map(|repos| repos.iter().map(|r| r.to_ascii_lowercase()).collect()),
+        }
+    }
+
+    pub fn allows(&self, owner: &str, repo: &str) -> bool {
+        match &self.allowed {
+            None => true,
+            Some(set) => set.contains(&format!("{owner}/{repo}").to_ascii_lowercase()),
+        }
+    }
+
+    /// How many repositories are listed, or `None` for "every one".
+    pub fn configured_count(&self) -> Option<usize> {
+        self.allowed.as_ref().map(|s| s.len())
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Store,
     pub webhook_secret: Arc<Vec<u8>>,
     pub metrics: PrometheusHandle,
     pub debounce_secs: u64,
+    /// Repositories barry acts on. Checked before a delivery becomes a job,
+    /// so a repository barry is installed on but not configured for costs one
+    /// string compare rather than a worker and a GPU host.
+    pub repos: Arc<RepoFilter>,
     /// Present when events arrive through [`crate::relay`] rather than
     /// directly. Reported by `/healthz`: smee keeps no backlog, so a relay
     /// that has quietly stopped looks exactly like a repository where nobody
@@ -69,6 +103,15 @@ async fn metrics(State(s): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, s.metrics.render())
 }
 
+/// The repository a delivery is about, when it is about one.
+fn repo_of(parsed: &InboundEvent) -> Option<(&str, &str)> {
+    match parsed {
+        InboundEvent::PullRequest(e) => Some((&e.repository.owner.login, &e.repository.name)),
+        InboundEvent::IssueComment(e) => Some((&e.repository.owner.login, &e.repository.name)),
+        InboundEvent::Ignored(_) => None,
+    }
+}
+
 async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
     metrics::counter!("barry_webhook_received_total").increment(1);
 
@@ -94,6 +137,22 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             return (StatusCode::BAD_REQUEST, "bad payload");
         }
     };
+    if let Some((owner, repo)) = repo_of(&parsed)
+        && !s.repos.allows(owner, repo)
+    {
+        // Not an error and not a signature problem: barry is installed on this
+        // repository and deliberately does not act on it. Counted so that "why
+        // did barry ignore my pull request" has an answer.
+        tracing::debug!(
+            event = evt,
+            delivery_id = %delivery,
+            repo = %format!("{owner}/{repo}"),
+            "not a configured repository; ignoring"
+        );
+        metrics::counter!("barry_webhook_rejected_total", "reason" => "repo").increment(1);
+        return (StatusCode::OK, "not a configured repository");
+    }
+
     tracing::info!(event = evt, delivery_id = %delivery, "webhook received");
 
     let now = crate::util::now_ts();
@@ -299,6 +358,97 @@ mod tests {
         s
     }
 
+    /// A router that acts only on the named repositories.
+    async fn fresh_with_repos(repos: Option<Vec<String>>) -> (Router, Store) {
+        let store = Store::in_memory().await.unwrap();
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let state = AppState {
+            store: store.clone(),
+            webhook_secret: Arc::new(b"sec".to_vec()),
+            metrics: recorder.handle(),
+            debounce_secs: 30,
+            repos: Arc::new(RepoFilter::new(repos.as_ref())),
+            relay: None,
+        };
+        (router(state), store)
+    }
+
+    /// A signed `pull_request` delivery for `owner/repo`.
+    fn pr_delivery(owner: &str, repo: &str) -> (String, String) {
+        let body = serde_json::json!({
+            "action": "opened", "number": 1,
+            "installation": { "id": 9 },
+            "repository": { "name": repo, "owner": { "login": owner }, "default_branch": "main" },
+            "pull_request": {
+                "number": 1, "title": "feat: x", "body": "ok",
+                "user": { "login": "a" }, "draft": false, "state": "open",
+                "head": { "sha": "s1", "ref": "x" }, "base": { "sha": "s0", "ref": "main" }
+            }
+        })
+        .to_string();
+        let sig = sign(b"sec", body.as_bytes());
+        (body, sig)
+    }
+
+    async fn post(app: Router, body: String, sig: String) -> StatusCode {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhook")
+                .header("X-Hub-Signature-256", sig)
+                .header("X-GitHub-Event", "pull_request")
+                .header("X-GitHub-Delivery", "d1")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_is_not_listed_never_becomes_a_job() {
+        // The Apps are installed on every repository in the account; acting on
+        // all of them is GPU-minutes per pull request on a measurement host.
+        let (app, store) = fresh_with_repos(Some(vec![
+            "brayniac/slipway".into(),
+            "brayniac/levinson".into(),
+        ]))
+        .await;
+        let (body, sig) = pr_delivery("brayniac", "some-other-repo");
+
+        // 200, not an error: barry received it and chose not to act.
+        assert_eq!(post(app, body, sig).await, StatusCode::OK);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_listed_repository_still_gets_through() {
+        let (app, store) = fresh_with_repos(Some(vec!["brayniac/slipway".into()])).await;
+        let (body, sig) = pr_delivery("brayniac", "slipway");
+        assert_eq!(post(app, body, sig).await, StatusCode::OK);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_allowlist_ignores_case_as_github_does() {
+        // GitHub will happily deliver `Brayniac/Slipway` for the repository
+        // written `brayniac/slipway`, and a HashSet<String> will not.
+        let (app, store) = fresh_with_repos(Some(vec!["brayniac/slipway".into()])).await;
+        let (body, sig) = pr_delivery("Brayniac", "Slipway");
+        assert_eq!(post(app, body, sig).await, StatusCode::OK);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[test]
+    fn no_allowlist_allows_everything() {
+        // What barry did before this existed, and what an unset key must keep
+        // meaning.
+        let f = RepoFilter::new(None);
+        assert!(f.allows("anyone", "anything"));
+        assert_eq!(f.configured_count(), None);
+    }
+
     async fn fresh() -> (Router, Store) {
         let store = Store::in_memory().await.unwrap();
         let _ = crate::telemetry::init_tracing;
@@ -309,6 +459,7 @@ mod tests {
             webhook_secret: Arc::new(b"sec".to_vec()),
             metrics,
             debounce_secs: 30,
+            repos: Arc::new(RepoFilter::default()),
             relay: None,
         };
         (router(state), store)

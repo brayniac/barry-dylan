@@ -21,6 +21,24 @@ pub struct Config {
     /// and needs no GPU.
     #[serde(default)]
     pub rack: Option<crate::rack::RackConfig>,
+    /// Repositories barry will act on, as `owner/name`.
+    ///
+    /// Absent means every repository the Apps are installed on, which is what
+    /// barry did before this existed.
+    ///
+    /// This is a SPEND gate, not an authorization boundary, and the difference
+    /// matters. The installation is the authorization boundary: an App
+    /// installed on a repository can write to it whatever this list says. What
+    /// the list bounds is what barry chooses to *do* -- and a review is
+    /// GPU-minutes on a hypervisor that is also where measurements run, so
+    /// "installed on 189 repositories" and "reviews 189 repositories" being the
+    /// same number is a spending decision nobody made.
+    ///
+    /// Narrowing the installation is still worth doing; it is the only thing
+    /// that reduces what the Apps can reach.
+    #[serde(default)]
+    pub repos: Option<Vec<String>>,
+
     /// When present, barry holds a smee.io channel open and feeds what arrives
     /// to its own webhook endpoint. Absent means barry is reachable directly,
     /// which is true of a laptop with a tunnel and not of this rack.
@@ -206,6 +224,25 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(repos) = &self.repos {
+            if repos.is_empty() {
+                return Err(ConfigError::Validate(
+                    "`repos` is present but empty, which would ignore every repository; \
+                     remove the key to act on all of them"
+                        .into(),
+                ));
+            }
+            // A bare name never matches anything, and the way it fails is
+            // silence -- barry receives the delivery and drops it. Caught here
+            // instead, where it is one line of output.
+            for r in repos {
+                if r.split('/').filter(|p| !p.is_empty()).count() != 2 {
+                    return Err(ConfigError::Validate(format!(
+                        "`repos` entry {r:?} is not `owner/name`"
+                    )));
+                }
+            }
+        }
         if let Some(rack) = &self.rack {
             rack.validate().map_err(ConfigError::Validate)?;
         }
