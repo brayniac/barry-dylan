@@ -48,6 +48,22 @@ pub struct RackConfig {
     #[serde(default)]
     pub judge: bool,
 
+    /// What the guest installs from the rack's internal apt repo before the
+    /// review, alongside barry-dylan itself.
+    ///
+    /// These are the rack's "workload in the job" half: the guest image carries
+    /// the platform (driver, CUDA, kernel, rezolus) and a job installs what it
+    /// actually runs. `debian-13-gpu` deliberately bakes neither -- llama.cpp
+    /// moves far too fast for a version in a 7.5 GB image to mean anything, and
+    /// slipway's client has to be able to follow its server.
+    ///
+    /// Pin them (`slipway=0.2.3-1`) in a deployment: unpinned, a review's
+    /// toolchain changes under it the day either package is republished, and a
+    /// review that changed because its tooling changed is a review nobody can
+    /// reason about. Default is unpinned so a fresh config still works.
+    #[serde(default = "default_packages")]
+    pub packages: Vec<String>,
+
     /// llama-server context window. A review sends whole patches, so this wants
     /// to be generous.
     #[serde(default = "default_context_size")]
@@ -137,6 +153,10 @@ pub struct Reviewer {
     pub host_tags: Option<Vec<String>>,
 }
 
+fn default_packages() -> Vec<String> {
+    vec!["slipway".to_string(), "llama-server".to_string()]
+}
+
 /// The artifact the in-guest judge writes its verdict to.
 pub const VERDICT_ARTIFACT: &str = "verdict.json";
 
@@ -148,6 +168,18 @@ impl RackConfig {
     /// it is to stop paying a remote judge -- and a silent fallback means still
     /// paying one while believing you are not.
     pub fn validate(&self) -> Result<(), String> {
+        for p in &self.packages {
+            // An apt spec, not a shell fragment: it is interpolated into the
+            // guest payload, and the payload is bash.
+            if p.is_empty()
+                || p.chars()
+                    .any(|c| c.is_whitespace() || "\"'$`;&|<>()".contains(c))
+            {
+                return Err(format!(
+                    "[rack] packages entry {p:?} is not a plain apt spec (name or name=version)"
+                ));
+            }
+        }
         if self.judge && self.placement != Placement::Sequential {
             return Err(
                 "[rack] judge = true needs placement = \"sequential\": concurrent reviewers \

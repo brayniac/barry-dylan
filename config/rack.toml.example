@@ -54,6 +54,13 @@ shape = "z2.g"
 # mean rebuilding a 7.5 GB image.
 image = "spool/images/debian-13-gpu@golden"
 
+# What the guest installs before reviewing, from the rack's internal apt repo.
+# The image carries the platform (driver, CUDA, rezolus) and a job installs the
+# workload: debian-13-gpu bakes neither llama-server nor the slipway client.
+# Pin them in a real deployment -- unpinned, a review's toolchain changes the
+# day either is republished. Default: ["slipway", "llama-server"], unpinned.
+packages = ["slipway=0.2.3-1", "llama-server=10502-1"]
+
 # Reconcile the two reviews inside the guest, against the model already loaded,
 # and return the verdict as an artifact alongside them. Needs two reviewers and
 # the default sequential placement.

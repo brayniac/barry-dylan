@@ -30,15 +30,27 @@ pub fn payload(
     let files_b64 = base64::engine::general_purpose::STANDARD.encode(files_json);
 
     let mut s = String::new();
-    s.push_str(
+    // barry-dylan, plus whatever the review needs to run at all. The gpu image
+    // carries the platform and not the workload: it has the driver, CUDA and
+    // rezolus, and deliberately neither llama-server (llama.cpp moves far too
+    // fast for a baked version to mean anything) nor the slipway client. A
+    // payload that assumed them failed at `slipway: command not found` after
+    // the 2026-09-12 image rebuild, having proved only that apt works.
+    s.push_str(&format!(
         r#"set -euxo pipefail
 
 sudo apt-get update -qq
-sudo apt-get install -y barry-dylan
+sudo apt-get install -y barry-dylan{packages}
 barry-dylan --version
+llama-server --version 2>&1 | head -1 || true
 
 "#,
-    );
+        packages = cfg
+            .packages
+            .iter()
+            .map(|p| format!(" {p}"))
+            .collect::<String>(),
+    ));
     s.push_str(&format!(
         "echo '{files_b64}' | base64 -d > /tmp/changed.json\n\n"
     ));
@@ -304,6 +316,42 @@ model_name = "llama-3.1-8b"
 
     fn judging_cfg() -> RackConfig {
         toml::from_str(&format!("judge = true\n{BASE}")).unwrap()
+    }
+
+    #[test]
+    fn the_guest_installs_what_the_review_needs_to_run() {
+        // The image has neither, by design, and the payload is the only place
+        // that can put them there.
+        let c = cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        let install = p
+            .lines()
+            .find(|l| l.contains("apt-get install"))
+            .expect("no install line");
+        assert!(install.contains("barry-dylan"), "{install}");
+        assert!(install.contains("slipway"), "{install}");
+        assert!(install.contains("llama-server"), "{install}");
+    }
+
+    #[test]
+    fn pinned_packages_reach_the_guest_as_written() {
+        let mut c = cfg();
+        c.packages = vec!["slipway=0.2.3-1".into(), "llama-server=10502-1".into()];
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(
+            p.contains("barry-dylan slipway=0.2.3-1 llama-server=10502-1"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn a_package_spec_that_is_really_a_shell_fragment_is_refused() {
+        // It is interpolated into bash. `validate` is the only thing between a
+        // config file and arbitrary commands in a guest.
+        let mut c = cfg();
+        c.packages = vec!["slipway; rm -rf /".into()];
+        let err = spec(&c, &files(), "t").unwrap_err().to_string();
+        assert!(err.contains("plain apt spec"), "unexpected error: {err}");
     }
 
     #[test]
