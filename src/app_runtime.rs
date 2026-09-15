@@ -297,12 +297,31 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         worker_handles.push(handle);
     }
 
+    // The relay, when this barry is somewhere GitHub cannot reach. Started
+    // before the server binds only because it needs the secret before it is
+    // moved into the router; it tolerates a target that is not up yet, since
+    // its first delivery is however long GitHub takes to send one.
+    let webhook_secret = Arc::new(webhook_secret.into_bytes());
+    let relay_status = cfg.relay.as_ref().map(|relay_cfg| {
+        let status = Arc::new(crate::relay::Status::default());
+        let target = crate::relay::target_url(&cfg.server.listen);
+        tokio::spawn(crate::relay::run(
+            relay_cfg.clone(),
+            target,
+            webhook_secret.clone(),
+            status.clone(),
+            shutdown_clone.clone(),
+        ));
+        status
+    });
+
     // HTTP server.
     let app_state = AppState {
         store: store.clone(),
-        webhook_secret: Arc::new(webhook_secret.into_bytes()),
+        webhook_secret,
         metrics,
         debounce_secs: cfg.dispatcher.debounce_secs,
+        relay: relay_status,
     };
     let router = crate::webhook::server::router(app_state);
     let listener = tokio::net::TcpListener::bind(&cfg.server.listen).await?;

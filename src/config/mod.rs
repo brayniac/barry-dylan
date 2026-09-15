@@ -21,6 +21,11 @@ pub struct Config {
     /// and needs no GPU.
     #[serde(default)]
     pub rack: Option<crate::rack::RackConfig>,
+    /// When present, barry holds a smee.io channel open and feeds what arrives
+    /// to its own webhook endpoint. Absent means barry is reachable directly,
+    /// which is true of a laptop with a tunnel and not of this rack.
+    #[serde(default)]
+    pub relay: Option<crate::relay::RelayConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -65,8 +70,12 @@ pub struct LlmProfile {
     pub request_timeout_secs: u64,
 }
 
+/// Also the fallback for an identity with no profile at all, which is only
+/// reachable with `[rack]` configured.
+pub const DEFAULT_MAX_TOKENS: u32 = 8192;
+
 fn default_max_tokens() -> u32 {
-    8192
+    DEFAULT_MAX_TOKENS
 }
 fn default_llm_timeout() -> u64 {
     300
@@ -197,10 +206,30 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        for required in ["barry", "other_barry", "other_other_barry", "judge"] {
-            if !self.llm.contains_key(required) {
+        if let Some(rack) = &self.rack {
+            rack.validate().map_err(ConfigError::Validate)?;
+        }
+
+        // Without [rack], every identity needs an endpoint before anything can
+        // run, and finding that out at startup is much better than finding it
+        // out on someone's pull request.
+        //
+        // With [rack], the reviews come from a guest, so the endpoints are not
+        // wanted at all -- and requiring them would mean a rack deployment
+        // still had to carry a remote model's address and key to start. A
+        // profile that is genuinely needed later (Other Other Barry, when
+        // somebody confers) fails then, naming itself.
+        let required: &[&str] = match &self.rack {
+            None => &["barry", "other_barry", "other_other_barry", "judge"],
+            Some(rack) if rack.judge => &[],
+            // The rack produces reviews but was not asked to reconcile them,
+            // so the judge is still this process's job.
+            Some(_) => &["judge"],
+        };
+        for name in required {
+            if !self.llm.contains_key(*name) {
                 return Err(ConfigError::Validate(format!(
-                    "an [llm.{required}] profile is required"
+                    "an [llm.{name}] profile is required"
                 )));
             }
         }
@@ -227,6 +256,81 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         f.write_all(contents.as_bytes()).unwrap();
         f
+    }
+
+    /// A config with [rack] and no [llm.*] at all. This is delta's shape, and
+    /// before the rack judge existed it could not start: validate demanded four
+    /// profiles for endpoints a rack deployment never calls.
+    const RACK_ONLY: &str = r#"
+[server]
+listen = "0.0.0.0:8181"
+
+[github.barry]
+app_id = 1
+private_key_path = "/tmp/b.pem"
+webhook_secret_env = "WS"
+[github.other_barry]
+app_id = 2
+private_key_path = "/tmp/ob.pem"
+[github.other_other_barry]
+app_id = 3
+private_key_path = "/tmp/oob.pem"
+
+[storage]
+sqlite_path = "/tmp/b.db"
+
+[dispatcher]
+
+[rack]
+systemslab = "http://systemslab"
+host_tags = ["z2.baremetal"]
+shape = "z2.g"
+image = "spool/images/debian-13-gpu@golden"
+judge = true
+
+[[rack.reviewers]]
+identity = "barry"
+model = "Qwen/Qwen3.5-9B@latest/gguf/q4_k_m@latest"
+model_name = "qwen3.5-9b"
+
+[[rack.reviewers]]
+identity = "other_barry"
+model = "Qwen/Qwen3.5-9B@latest/gguf/q4_k_m@latest"
+model_name = "qwen3.5-9b"
+"#;
+
+    #[test]
+    fn a_rack_that_judges_needs_no_llm_profiles_at_all() {
+        // The point of the rack judge: no endpoint, no key, no diff leaving the
+        // rack, and nothing in secrets.env but the webhook secret.
+        let f = write_tmp(RACK_ONLY);
+        Config::load(f.path()).expect("a rack-only config must load");
+    }
+
+    #[test]
+    fn a_rack_that_does_not_judge_still_needs_one() {
+        let f = write_tmp(&RACK_ONLY.replace("judge = true", "judge = false"));
+        let err = Config::load(f.path()).unwrap_err().to_string();
+        assert!(err.contains("[llm.judge]"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_judge_on_concurrent_reviewers_is_refused_at_startup() {
+        // Caught when the config is read rather than when a pull request
+        // arrives: the failure is in the file, not in the pull request.
+        let f = write_tmp(&RACK_ONLY.replace(
+            "image = \"spool/images/debian-13-gpu@golden\"",
+            "image = \"spool/images/debian-13-gpu@golden\"\nplacement = \"concurrent\"",
+        ));
+        let err = Config::load(f.path()).unwrap_err().to_string();
+        assert!(err.contains("sequential"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn without_a_rack_every_profile_is_still_required() {
+        let f = write_tmp(&RACK_ONLY[..RACK_ONLY.find("[rack]").unwrap()]);
+        let err = Config::load(f.path()).unwrap_err().to_string();
+        assert!(err.contains("[llm.barry]"), "unexpected error: {err}");
     }
 
     #[test]

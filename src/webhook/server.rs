@@ -17,6 +17,11 @@ pub struct AppState {
     pub webhook_secret: Arc<Vec<u8>>,
     pub metrics: PrometheusHandle,
     pub debounce_secs: u64,
+    /// Present when events arrive through [`crate::relay`] rather than
+    /// directly. Reported by `/healthz`: smee keeps no backlog, so a relay
+    /// that has quietly stopped looks exactly like a repository where nobody
+    /// opened a pull request.
+    pub relay: Option<Arc<crate::relay::Status>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -28,10 +33,36 @@ pub fn router(state: AppState) -> Router {
 }
 
 async fn healthz(State(s): State<AppState>) -> impl IntoResponse {
-    match s.store.query_raw("SELECT 1").await {
-        Ok(_) => (StatusCode::OK, "ok"),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "db unavailable"),
+    if s.store.query_raw("SELECT 1").await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "db unavailable".to_string(),
+        );
     }
+    let Some(relay) = &s.relay else {
+        return (StatusCode::OK, "ok".to_string());
+    };
+    // A disconnected relay is not reported as unhealthy: it reconnects on its
+    // own, and a health check that flaps every time smee drops a long-lived
+    // connection is a health check nobody reads. The state is reported so a
+    // human or `infra diff` can see a relay that has been down for hours.
+    let last = match relay.last_event_unix() {
+        Some(t) => format!("{}s ago", crate::util::now_ts().saturating_sub(t)),
+        None => "never".to_string(),
+    };
+    (
+        StatusCode::OK,
+        format!(
+            "ok\nrelay: {}\nrelay_events: {}\nrelay_last_event: {}\n",
+            if relay.connected() {
+                "connected"
+            } else {
+                "disconnected"
+            },
+            relay.events(),
+            last
+        ),
+    )
 }
 
 async fn metrics(State(s): State<AppState>) -> impl IntoResponse {
@@ -278,6 +309,7 @@ mod tests {
             webhook_secret: Arc::new(b"sec".to_vec()),
             metrics,
             debounce_secs: 30,
+            relay: None,
         };
         (router(state), store)
     }

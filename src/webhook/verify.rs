@@ -12,6 +12,27 @@ pub enum VerifyError {
     Mismatch,
 }
 
+/// Sign a body the way GitHub signs one, as `sha256=<hex>`.
+///
+/// Used by [`crate::relay`] when it is told to re-sign what it forwards, and by
+/// this module's own tests. Signing and verifying with the same secret is only
+/// meaningful when the signer is trusted -- see `relay.require_signature`.
+pub fn sign(secret: &[u8], body: &[u8]) -> String {
+    let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key length");
+    let bytes = mac_bytes(&mut mac, body);
+    let mut out = String::with_capacity(7 + bytes.len() * 2);
+    out.push_str("sha256=");
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+fn mac_bytes(mac: &mut Hmac<Sha256>, body: &[u8]) -> Vec<u8> {
+    mac.update(body);
+    mac.clone().finalize().into_bytes().to_vec()
+}
+
 /// Verify a webhook body against the `X-Hub-Signature-256` header value.
 /// `header_value` is expected to look like `sha256=<hex>`.
 pub fn verify(secret: &[u8], body: &[u8], header_value: Option<&str>) -> Result<(), VerifyError> {
@@ -49,19 +70,6 @@ fn hex_decode(s: &str, out: &mut [u8]) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hmac::Mac;
-
-    fn sign(secret: &[u8], body: &[u8]) -> String {
-        let mut mac = <Hmac<Sha256>>::new_from_slice(secret).unwrap();
-        mac.update(body);
-        let bytes = mac.finalize().into_bytes();
-        let mut out = String::with_capacity(7 + bytes.len() * 2);
-        out.push_str("sha256=");
-        for b in bytes {
-            out.push_str(&format!("{b:02x}"));
-        }
-        out
-    }
 
     #[test]
     fn good_signature_passes() {
