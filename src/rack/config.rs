@@ -73,6 +73,33 @@ pub struct RackConfig {
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
 
+    /// How long to wait for a host before giving up and cancelling.
+    ///
+    /// Separate from `job_timeout_secs`, and the reason is what happened on
+    /// 2026-09-16: an anvil review sat behind an eighteen-experiment
+    /// measurement matrix, barry gave up after an hour having never been
+    /// scheduled, and the job then ran at five hours -- producing two reviews
+    /// and a verdict that nobody was waiting for, on a measurement host, while
+    /// the matrix queued behind it.
+    ///
+    /// A review is worth a GPU host when someone is waiting for it, and worth
+    /// nothing when they are not. So the queue wait is bounded tightly and
+    /// separately: if the rack is busy, say so quickly and get out of the way,
+    /// rather than holding a place in the queue for an answer that will arrive
+    /// after the pull request is merged.
+    #[serde(default = "default_queue_timeout_secs")]
+    pub queue_timeout_secs: u64,
+
+    /// Cap on the in-guest judge's completion.
+    ///
+    /// Not 512, which is what the in-process judge uses against a small remote
+    /// model and what this hardcoded until 2026-09-16. A local model that
+    /// reasons before answering can spend 512 tokens thinking and emit no JSON
+    /// at all -- which is exactly what happened on the first real rack judge:
+    /// `could not parse judge output:` with nothing after the colon.
+    #[serde(default = "default_judge_max_tokens")]
+    pub judge_max_tokens: u32,
+
     /// How often to ask the control plane whether the experiment has finished.
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
@@ -187,6 +214,13 @@ impl RackConfig {
                     .into(),
             );
         }
+        if self.queue_timeout_secs > self.job_timeout_secs {
+            return Err(format!(
+                "[rack] queue_timeout_secs ({}) is longer than job_timeout_secs ({}), so \
+                 the queue budget can never be reached",
+                self.queue_timeout_secs, self.job_timeout_secs
+            ));
+        }
         if self.judge && self.reviewers.len() < 2 {
             return Err(
                 "[rack] judge = true needs two reviewers; there is nothing to reconcile".into(),
@@ -232,6 +266,14 @@ fn default_poll_interval_secs() -> u64 {
 
 fn default_job_timeout_secs() -> u64 {
     3600
+}
+
+fn default_queue_timeout_secs() -> u64 {
+    900
+}
+
+fn default_judge_max_tokens() -> u32 {
+    4096
 }
 
 fn default_payload_timeout_secs() -> u64 {

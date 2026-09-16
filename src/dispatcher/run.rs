@@ -228,7 +228,12 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                     Some(Ok(Ok(o))) => o,
                     Some(Ok(Err(e))) => {
                         tracing::error!(error = ?e, "checker failed");
-                        CheckerOutcome::neutral(checker_name, "internal error (see logs)")
+                        // The summary is all a reader gets on the check run, and
+                        // "internal error (see logs)" cannot distinguish "the rack
+                        // was busy" from "barry is broken" -- which is how a real
+                        // failure gets ignored. The error's own first line says
+                        // which, so use it; the logs still have the rest.
+                        CheckerOutcome::neutral(checker_name, summarize_error(&e))
                     }
                     Some(Err(_)) => {
                         let timeout_msg = format!("timed out after {}s", checker_timeout.as_secs());
@@ -588,6 +593,20 @@ async fn post_outcome(
     .await
 }
 
+/// One line of an error, short enough for a check-run summary.
+///
+/// First line only: the chain below it is context for the log, not for someone
+/// glancing at a pull request.
+fn summarize_error(e: &anyhow::Error) -> String {
+    let msg = e.to_string();
+    let first = msg.lines().next().unwrap_or("internal error").trim();
+    let mut out: String = first.chars().take(300).collect();
+    if first.chars().count() > 300 {
+        out.push('\u{2026}');
+    }
+    out
+}
+
 fn status_str(s: OutcomeStatus) -> &'static str {
     match s {
         OutcomeStatus::Success => "success",
@@ -597,3 +616,28 @@ fn status_str(s: OutcomeStatus) -> &'static str {
 }
 
 use crate::util::now_ts;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_checker_says_what_failed_rather_than_see_logs() {
+        // What a reader sees on the pull request. "internal error (see logs)"
+        // made "the rack was busy" and "barry is broken" identical, and the
+        // logs are on a host they may not have.
+        let e = anyhow::anyhow!(
+            "the rack was busy: experiment 01a0 waited 900s without being given a host"
+        );
+        let s = summarize_error(&e);
+        assert!(s.contains("the rack was busy"), "{s}");
+    }
+
+    #[test]
+    fn a_long_error_is_cut_to_one_line_and_a_readable_length() {
+        let e = anyhow::anyhow!("{}\nsecond line that should not appear", "x".repeat(400));
+        let s = summarize_error(&e);
+        assert!(!s.contains("second line"), "multi-line summary");
+        assert!(s.chars().count() <= 301, "{} chars", s.chars().count());
+    }
+}

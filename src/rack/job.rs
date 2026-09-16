@@ -138,7 +138,7 @@ barry-dylan review-offline \
 provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
-max_tokens = 512
+max_tokens = {judge_max_tokens}
 request_timeout_secs = 600
 OFFLINE
 
@@ -151,6 +151,7 @@ barry-dylan judge-offline \
 
 "#,
                 model_name = r.model_name,
+                judge_max_tokens = cfg.judge_max_tokens,
                 a_artifact = a.artifact(),
                 b_artifact = b.artifact(),
                 verdict = VERDICT_ARTIFACT,
@@ -375,6 +376,20 @@ model_name = "llama-3.1-8b"
         let p = payload(&c, &all(&c), &files()).unwrap();
         assert!(p.contains("--a /tmp/review-barry.json"), "{p}");
         assert!(p.contains("--b /tmp/review-other_barry.json"), "{p}");
+    }
+
+    #[test]
+    fn the_judge_gets_a_budget_a_reasoning_model_can_answer_within() {
+        // 512 was the in-process judge's cap, sized for a small remote model.
+        // A local model that reasons first spent all of it thinking and
+        // returned nothing, so the first real rack judge produced no verdict.
+        let c = judging_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        let judge_cfg = p
+            .split("offline-judge.toml")
+            .nth(1)
+            .expect("no judge config");
+        assert!(judge_cfg.contains("max_tokens = 4096"), "{judge_cfg}");
     }
 
     #[test]

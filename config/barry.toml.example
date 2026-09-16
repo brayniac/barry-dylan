@@ -94,6 +94,14 @@ request_timeout_secs = 300
 # systemslab = "http://systemslab"
 # host_tags = ["z2.baremetal"]
 # shape = "z2.g.medium"
+# How long to wait for a host before giving up AND cancelling. Separate from
+# job_timeout_secs on purpose: a review is worth a GPU host when someone is
+# waiting for it and worth nothing when they are not, so a busy rack gets a
+# quick "the rack was busy" rather than a place in the queue.
+# queue_timeout_secs = 900
+# The in-guest judge's completion cap. Not 512: a model that reasons before
+# answering spends that thinking and returns nothing.
+# judge_max_tokens = 4096
 # image = "spool/images/debian-13-gpu@golden"
 
 # What the guest installs before reviewing, from the rack's internal apt repo.

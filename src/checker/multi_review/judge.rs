@@ -12,6 +12,15 @@ pub enum JudgeError {
     Llm(#[from] LlmError),
     #[error("could not parse judge output: {0}")]
     Parse(String),
+    /// The model returned nothing at all.
+    ///
+    /// Distinct from `Parse` because it has a different cause and a different
+    /// fix: a model that reasons before answering, given a small `max_tokens`,
+    /// spends the budget thinking and returns empty content. `Parse` with an
+    /// empty string said "could not parse" and showed nothing, which reads
+    /// like a bug in the parser rather than a cap set too low.
+    #[error("the judge model returned no content (max_tokens too small for a model that reasons?)")]
+    Empty,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +64,10 @@ pub async fn judge(
     );
     match judge_once(client, &user, max_tokens).await {
         Ok(v) => Ok(v),
+        Err(JudgeError::Empty) => {
+            tracing::warn!("judge returned no content; retrying once");
+            judge_once(client, &user, max_tokens).await
+        }
         Err(JudgeError::Parse(raw)) => {
             let truncated: String = raw.chars().take(2048).collect();
             tracing::warn!(raw_text = %truncated, "judge parse failed; retrying once");
@@ -88,6 +101,9 @@ async fn judge_once(
         response_schema: Some(verdict_schema()),
     };
     let resp = client.complete(&req).await?;
+    if resp.text.trim().is_empty() {
+        return Err(JudgeError::Empty);
+    }
     let slice = locate_json(&resp.text).ok_or_else(|| JudgeError::Parse(resp.text.clone()))?;
     let parsed: JudgeResp =
         serde_json::from_str(slice).map_err(|e| JudgeError::Parse(e.to_string()))?;

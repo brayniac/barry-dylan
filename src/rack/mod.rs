@@ -33,6 +33,11 @@ pub enum RackError {
         secs: u64,
         state: String,
     },
+    #[error(
+        "the rack was busy: experiment {id} waited {secs}s without being given a host, \
+         so the review was cancelled rather than queued behind measurement work"
+    )]
+    Queued { id: String, secs: u64 },
     #[error("experiment {id} produced no `{name}` artifact")]
     MissingArtifact { id: String, name: String },
     #[error("the review returned by experiment {id} was not a valid review: {cause}")]
@@ -76,6 +81,44 @@ struct SubmitResponse {
 #[derive(Deserialize)]
 struct ExperimentState {
     state: String,
+    /// Per-job states. The experiment-level state says `pending` both while
+    /// nothing has been scheduled and while a guest is mid-review, so it cannot
+    /// answer "has this started"; only the jobs can.
+    #[serde(default)]
+    jobs: Vec<JobState>,
+}
+
+#[derive(Deserialize)]
+struct JobState {
+    state: String,
+}
+
+/// Has the rack given this experiment a host yet?
+///
+/// Anything other than `unscheduled` counts as started, including terminal
+/// states: a job that has already failed has certainly been scheduled, and
+/// treating it as still queued would cancel it for the wrong reason.
+fn has_started(jobs: &[JobState]) -> bool {
+    jobs.iter().any(|j| j.state != "unscheduled")
+}
+
+/// Ask the rack to stop, and do not care very much whether it agrees.
+///
+/// Best effort by design, as rack-ci's equivalent is: this is called when
+/// barry has already stopped waiting, and an experiment that has just been
+/// scheduled will refuse. Failing the review because the cancellation failed
+/// would be the wrong trade -- the review has failed either way, and the
+/// point of cancelling is to stop a GPU host producing an answer nobody is
+/// waiting for.
+async fn cancel(http: &reqwest::Client, base: &str, id: &str) {
+    let url = format!("{base}/api/v1/experiment/{id}/cancel");
+    match http.post(&url).send().await {
+        Ok(r) if r.status().is_success() => {
+            tracing::info!(experiment = %id, "cancelled a review nobody is waiting for")
+        }
+        Ok(r) => tracing::warn!(experiment = %id, status = %r.status(), "could not cancel"),
+        Err(e) => tracing::warn!(experiment = %id, error = %e, "could not cancel"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -161,13 +204,23 @@ pub async fn review(
     );
 
     let deadline = Instant::now() + Duration::from_secs(cfg.job_timeout_secs);
+    let queue_deadline = Instant::now() + Duration::from_secs(cfg.queue_timeout_secs);
+    let mut started = false;
     let mut last = String::from("unknown");
     loop {
         if Instant::now() >= deadline {
+            cancel(http, base, &id).await;
             return Err(RackError::Timeout {
                 id,
                 secs: cfg.job_timeout_secs,
                 state: last,
+            });
+        }
+        if !started && Instant::now() >= queue_deadline {
+            cancel(http, base, &id).await;
+            return Err(RackError::Queued {
+                id,
+                secs: cfg.queue_timeout_secs,
             });
         }
 
@@ -187,6 +240,10 @@ pub async fn review(
                 cause: e.to_string(),
             })?;
 
+        if !started && has_started(&state.jobs) {
+            started = true;
+            tracing::info!(experiment = %id, "the rack gave the review a host");
+        }
         if state.state != last {
             tracing::info!(experiment = %id, state = %state.state, "rack review progress");
             last = state.state.clone();
@@ -392,5 +449,56 @@ mod tests {
     fn a_missing_artifact_is_none_not_a_panic() {
         let all = vec![artifact("1", "metrics.rez")];
         assert!(find_artifact(&all, "review.json").is_none());
+    }
+
+    fn jobs(states: &[&str]) -> Vec<JobState> {
+        states
+            .iter()
+            .map(|s| JobState {
+                state: (*s).to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_unscheduled_job_has_not_started() {
+        // The experiment reads `pending` here too, which is why the job states
+        // are what this asks.
+        assert!(!has_started(&jobs(&["unscheduled"])));
+    }
+
+    #[test]
+    fn a_running_job_has_started() {
+        assert!(has_started(&jobs(&["running"])));
+    }
+
+    #[test]
+    fn a_job_that_already_failed_counts_as_started() {
+        // It certainly got a host. Treating it as still queued would cancel it
+        // for the wrong reason and report the wrong thing.
+        assert!(has_started(&jobs(&["failed"])));
+    }
+
+    #[test]
+    fn one_scheduled_job_is_enough() {
+        assert!(has_started(&jobs(&["unscheduled", "running"])));
+    }
+
+    #[test]
+    fn an_experiment_with_no_jobs_yet_has_not_started() {
+        assert!(!has_started(&[]));
+    }
+
+    #[test]
+    fn a_queued_out_review_says_the_rack_was_busy() {
+        // What lands on the pull request. "internal error" would not tell
+        // anyone that the answer is to wait rather than to debug barry.
+        let e = RackError::Queued {
+            id: "01a0".into(),
+            secs: 900,
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("the rack was busy"), "{msg}");
+        assert!(msg.contains("900s"), "{msg}");
     }
 }
