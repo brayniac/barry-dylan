@@ -176,6 +176,13 @@ Fetched from the repo's HEAD at runtime, allows overriding hygiene rules and dis
 | signal | effect |
 |---|---|
 | `SIGHUP` | **checks** the config on disk and reports whether it is valid. It does not apply it — nothing is rebuilt from a new config. Restart to apply a change. |
+
+The check is made by the **running** binary, which matters immediately after an
+upgrade: install a new version that understands a new config key, add the key,
+and SIGHUP reports `unknown field` — the old process is still the one reading
+it, and the restart it is telling you to do is exactly what fixes it. Upgrade,
+restart, then edit; or read an `unknown field` on a freshly installed version as
+"restart first".
 | `SIGTERM` | graceful shutdown: the HTTP server drains, workers finish the job in hand. |
 
 ## Slash Commands
