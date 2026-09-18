@@ -210,7 +210,7 @@ and SIGHUP reports `unknown field` — the old process is still the one reading
 it, and the restart it is telling you to do is exactly what fixes it. Upgrade,
 restart, then edit; or read an `unknown field` on a freshly installed version as
 "restart first".
-| `SIGTERM` | graceful shutdown: the HTTP server drains, workers finish the job in hand. |
+| `SIGTERM` | graceful shutdown: the HTTP server drains, workers hand the job in hand back to the queue for the next process, which leases it within seconds. A rack review resumes the experiment it was waiting on rather than submitting another. |
 
 ## Slash Commands
 
@@ -229,6 +229,7 @@ column is the further check each command makes after that.
 - **HMAC-SHA256 verification** — Webhook signatures verified with constant-time compare (`subtle::ConstantTimeEq`) before any payload is parsed
 - **Key file permissions** — Private key `.pem` files must be mode `0600` or stricter; Barry refuses to start otherwise
 - **Trust gate** — Authors with read permission require `/barry approve` from a maintainer before review runs. Approval is sticky for the PR lifetime.
+- **Reviews survive a restart** — A rack review's experiment id is written to the job the moment it exists. Stopping barry hands the job back (no waiting out a twenty-minute review, no ninety-second SIGKILL with the lease held for `job_timeout_secs`) and leaves the experiment running; the next process leases the job within seconds and resumes it. Counted as `barry_job_completed_total{outcome="handed_back"}` and `barry_rack_resumed_total`.
 - **No stale reviews** — A push cancels the review in flight for the head it replaced, on the rack included, and the new head is reviewed after the debounce. A close cancels it outright. And whatever the webhooks said, nothing is posted without re-checking that the PR is still open and its head is still the commit that was reviewed.
 - **Endpoint validation** — `provider = "anthropic"` is rejected with non-anthropic endpoint hosts, preventing misconfiguration from leaking diffs to wrong LLM endpoints
 - **Diff exposure** — Code diffs are sent to configured LLM endpoints. Do not run on repos containing secrets or PII that should not leave your environment

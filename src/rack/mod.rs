@@ -18,6 +18,7 @@ use crate::checker::multi_review::review::UnifiedReview;
 use crate::github::pr::ChangedFile;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RackError {
@@ -134,20 +135,26 @@ async fn cancel(http: &reqwest::Client, base: &str, id: &str) {
 /// Armed once the experiment exists; disarmed once it is over or once the
 /// review has decided to cancel it explicitly. `Drop` cannot await, so the
 /// request is spawned, and the worker task that dropped us outlives it.
+///
+/// One drop is not abandonment: barry stopping. The experiment is recorded on
+/// the job (#39) and the next process resumes it, so cancelling it would throw
+/// away GPU work that was about to succeed. `shutdown` tells the two apart.
 struct Abandoned {
     http: reqwest::Client,
     base: String,
     id: String,
     armed: bool,
+    shutdown: CancellationToken,
 }
 
 impl Abandoned {
-    fn arm(http: reqwest::Client, base: String, id: String) -> Self {
+    fn arm(http: reqwest::Client, base: String, id: String, shutdown: CancellationToken) -> Self {
         Self {
             http,
             base,
             id,
             armed: true,
+            shutdown,
         }
     }
 
@@ -159,6 +166,13 @@ impl Abandoned {
 impl Drop for Abandoned {
     fn drop(&mut self) {
         if !self.armed {
+            return;
+        }
+        if self.shutdown.is_cancelled() {
+            tracing::info!(
+                experiment = %self.id,
+                "barry is stopping; leaving the experiment running for the next process to resume"
+            );
             return;
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
@@ -214,13 +228,13 @@ pub struct RackOutcome {
     pub verdict: Option<RackVerdict>,
 }
 
-/// Run every configured reviewer on the rack and return their reviews.
-pub async fn review(
+/// Submit the experiment for every configured reviewer and return its id.
+pub async fn submit(
     cfg: &RackConfig,
     http: &reqwest::Client,
     files: &[ChangedFile],
     name: &str,
-) -> Result<RackOutcome, RackError> {
+) -> Result<String, RackError> {
     if files.is_empty() {
         return Err(RackError::Other(anyhow::anyhow!(
             "no changed files supplied; nothing to review"
@@ -246,15 +260,32 @@ pub async fn review(
     }
     let submitted: SubmitResponse =
         serde_json::from_str(&body).map_err(|e| RackError::Submit(format!("{e}: {body}")))?;
-    let id = submitted.id;
 
     tracing::info!(
-        experiment = %id,
+        experiment = %submitted.id,
         placement = ?cfg.placement,
         reviewers = cfg.reviewers.len(),
         "rack review submitted"
     );
-    let mut abandoned = Abandoned::arm(http.clone(), base.to_string(), id.clone());
+    Ok(submitted.id)
+}
+
+/// Wait for experiment `id` and collect its reviews.
+///
+/// Works for an experiment this process submitted a moment ago and for one a
+/// previous process submitted before it stopped (#39): the rack does not care
+/// who is asking. The timeouts count from now either way, which for a resumed
+/// experiment is generous by however long it had already run.
+pub async fn collect(
+    cfg: &RackConfig,
+    http: &reqwest::Client,
+    id: &str,
+    shutdown: &CancellationToken,
+) -> Result<RackOutcome, RackError> {
+    let base = cfg.systemslab.trim_end_matches('/');
+    let id = id.to_string();
+    let mut abandoned =
+        Abandoned::arm(http.clone(), base.to_string(), id.clone(), shutdown.clone());
 
     let deadline = Instant::now() + Duration::from_secs(cfg.job_timeout_secs);
     let queue_deadline = Instant::now() + Duration::from_secs(cfg.queue_timeout_secs);
@@ -367,6 +398,95 @@ pub async fn review(
     };
 
     Ok(RackOutcome { reviews, verdict })
+}
+
+/// Run every configured reviewer on the rack and return their reviews.
+///
+/// One shot, nothing remembered: for `review-rack` on the command line. The
+/// dispatcher uses [`review_for_job`], which survives a restart.
+pub async fn review(
+    cfg: &RackConfig,
+    http: &reqwest::Client,
+    files: &[ChangedFile],
+    name: &str,
+) -> Result<RackOutcome, RackError> {
+    let id = submit(cfg, http, files, name).await?;
+    collect(cfg, http, &id, &CancellationToken::new()).await
+}
+
+/// Review on the rack for a dispatcher job, resuming the job's experiment if
+/// a previous process left one behind (#39).
+///
+/// The experiment id is written to the job row the moment it exists and
+/// cleared once the experiment is over. If barry stops in between, the future
+/// is dropped without running the clearing line, the abandon guard sees the
+/// shutdown and leaves the experiment alone, and the job comes back to the
+/// next process still carrying the id. That process polls the same experiment
+/// instead of paying for another. A resumed experiment that ended badly is
+/// resubmitted once, since its reviewers may not match today's config any
+/// more than its outcome does.
+pub async fn review_for_job(
+    cfg: &RackConfig,
+    http: &reqwest::Client,
+    files: &[ChangedFile],
+    name: &str,
+    store: &crate::storage::Store,
+    job_id: i64,
+    shutdown: &CancellationToken,
+) -> Result<RackOutcome, RackError> {
+    let remembered = store
+        .rack_experiment(job_id)
+        .await
+        .map_err(RackError::Other)?;
+    let (id, resumed) = match remembered {
+        Some(id) => {
+            tracing::info!(
+                experiment = %id,
+                job_id,
+                "resuming the experiment a previous process submitted"
+            );
+            metrics::counter!("barry_rack_resumed_total").increment(1);
+            (id, true)
+        }
+        None => {
+            let id = submit(cfg, http, files, name).await?;
+            store
+                .set_rack_experiment(job_id, Some(&id))
+                .await
+                .map_err(RackError::Other)?;
+            (id, false)
+        }
+    };
+
+    let mut outcome = collect(cfg, http, &id, shutdown).await;
+    if resumed
+        && matches!(
+            outcome,
+            Err(RackError::Failed { .. }
+                | RackError::MissingArtifact { .. }
+                | RackError::BadReview { .. })
+        )
+    {
+        let why = outcome
+            .as_ref()
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        tracing::warn!(experiment = %id, job_id, error = %why, "the resumed experiment is no use; submitting afresh");
+        let id = submit(cfg, http, files, name).await?;
+        store
+            .set_rack_experiment(job_id, Some(&id))
+            .await
+            .map_err(RackError::Other)?;
+        outcome = collect(cfg, http, &id, shutdown).await;
+    }
+
+    // Terminal either way. If we were dropped instead, this never runs and the
+    // id stays on the job, which is the point.
+    if let Err(e) = store.set_rack_experiment(job_id, None).await {
+        tracing::warn!(?e, job_id, "could not clear the job's rack experiment");
+    }
+    outcome
 }
 
 /// Fetch one artifact's body.
@@ -638,6 +758,203 @@ model_name = "y"
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("the experiment was not cancelled after the review was dropped");
+    }
+
+    #[tokio::test]
+    async fn a_review_dropped_because_barry_is_stopping_leaves_the_experiment_alone() {
+        // The next process resumes it (#39). Cancelling would throw away the
+        // GPU work done so far.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/experiment/01a0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"state": "pending", "jobs": [{"state": "running"}]}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/experiment/01a0/cancel"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let cfg = cfg_for(&server);
+        let http = reqwest::Client::new();
+        let shutdown = CancellationToken::new();
+
+        let waiting = collect(&cfg, &http, "01a0", &shutdown);
+        tokio::pin!(waiting);
+        // Let it poll once, then stop barry and drop the review as the worker
+        // does.
+        let _ = tokio::time::timeout(Duration::from_millis(300), &mut waiting).await;
+        shutdown.cancel();
+        drop(waiting);
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(cancels_received(&server).await, 0);
+    }
+
+    /// Mocks for an experiment that has succeeded with one review artifact.
+    async fn mount_succeeded(server: &MockServer, id: &str) {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/experiment/{id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"state": "success", "jobs": [{"state": "complete"}]}),
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/experiment/{id}/artifacts")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!([{"id": format!("art-{id}"), "name": "review-barry.json"}]),
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/artifact/art-{id}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"outcome":"approve","summary":"LGTM","findings":[]}"#),
+            )
+            .mount(server)
+            .await;
+    }
+
+    async fn submits_received(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path() == "/api/v1/submit")
+            .count()
+    }
+
+    async fn leased_job(store: &crate::storage::Store) -> i64 {
+        store
+            .enqueue(
+                &crate::storage::queue::NewJob {
+                    installation_id: 1,
+                    repo_owner: "o".into(),
+                    repo_name: "r".into(),
+                    pr_number: 1,
+                    event_kind: "pull_request.opened".into(),
+                    delivery_id: "d".into(),
+                    actor: None,
+                },
+                0,
+                0,
+            )
+            .await
+            .unwrap();
+        store.lease_next(1, 300).await.unwrap().unwrap().id
+    }
+
+    #[tokio::test]
+    async fn a_job_left_with_an_experiment_resumes_it_instead_of_submitting() {
+        let server = MockServer::start().await;
+        mount_succeeded(&server, "old1").await;
+        // No submit mock at all: a submit would 404 and fail the review.
+        let cfg = cfg_for(&server);
+        let http = reqwest::Client::new();
+        let store = crate::storage::Store::in_memory().await.unwrap();
+        let job = leased_job(&store).await;
+        store.set_rack_experiment(job, Some("old1")).await.unwrap();
+
+        let out = review_for_job(
+            &cfg,
+            &http,
+            &one_file(),
+            "t",
+            &store,
+            job,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(out.reviews.contains_key("barry"));
+        assert_eq!(submits_received(&server).await, 0);
+        // Over now; the next lease of this job must not resume a finished one.
+        assert_eq!(store.rack_experiment(job).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_job_submits_and_remembers_the_experiment_while_waiting() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/submit"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "new1"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/experiment/new1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"state": "pending", "jobs": [{"state": "running"}]}),
+            ))
+            .mount(&server)
+            .await;
+        let cfg = cfg_for(&server);
+        let http = reqwest::Client::new();
+        let store = crate::storage::Store::in_memory().await.unwrap();
+        let job = leased_job(&store).await;
+        let shutdown = CancellationToken::new();
+
+        // Stop barry while it is waiting: the id must be on the job for the
+        // next process, and the experiment must be left alone.
+        let waiting = review_for_job(&cfg, &http, &one_file(), "t", &store, job, &shutdown);
+        tokio::pin!(waiting);
+        let _ = tokio::time::timeout(Duration::from_millis(300), &mut waiting).await;
+        shutdown.cancel();
+        drop(waiting);
+
+        assert_eq!(
+            store.rack_experiment(job).await.unwrap().as_deref(),
+            Some("new1")
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(cancels_received(&server).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_experiment_that_ended_badly_is_submitted_afresh_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/experiment/old1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"state": "failure", "jobs": [{"state": "failed"}]}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/submit"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "new1"})),
+            )
+            .mount(&server)
+            .await;
+        mount_succeeded(&server, "new1").await;
+        let cfg = cfg_for(&server);
+        let http = reqwest::Client::new();
+        let store = crate::storage::Store::in_memory().await.unwrap();
+        let job = leased_job(&store).await;
+        store.set_rack_experiment(job, Some("old1")).await.unwrap();
+
+        let out = review_for_job(
+            &cfg,
+            &http,
+            &one_file(),
+            "t",
+            &store,
+            job,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(out.reviews.contains_key("barry"));
+        assert_eq!(submits_received(&server).await, 1);
+        assert_eq!(store.rack_experiment(job).await.unwrap(), None);
     }
 
     #[tokio::test]

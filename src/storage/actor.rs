@@ -70,6 +70,17 @@ pub enum ActorCommand {
         backoff: Vec<i64>,
         reply: Reply<bool>,
     },
+    /// Remember (or forget) the rack experiment a leased job is waiting on.
+    SetRackExperiment {
+        job_id: i64,
+        experiment: Option<String>,
+        reply: Reply<()>,
+    },
+    /// The rack experiment a job is waiting on, if any.
+    GetRackExperiment {
+        job_id: i64,
+        reply: Reply<Option<String>>,
+    },
     Enqueue {
         job: NewJob,
         now_ts: i64,
@@ -257,7 +268,8 @@ pub(crate) fn run(
                                   LIMIT 1
                                 )
                                 RETURNING id, installation_id, repo_owner, repo_name, pr_number,
-                                          event_kind, delivery_id, attempts, actor"#,
+                                          event_kind, delivery_id, attempts, actor,
+                                          rack_experiment"#,
                         )
                         .bind(now_ts + lease_secs)
                         .bind(now_ts)
@@ -274,6 +286,7 @@ pub(crate) fn run(
                         delivery_id: row.get("delivery_id"),
                         attempts: row.get("attempts"),
                         actor: row.get("actor"),
+                        rack_experiment: row.get("rack_experiment"),
                     });
                     let duration_ms = start.elapsed().as_millis() as u64;
                     metrics::histogram!("barry_db_duration_ms", "operation" => "lease_next")
@@ -425,6 +438,40 @@ pub(crate) fn run(
                     });
                     let duration_ms = start.elapsed().as_millis() as u64;
                     record_db_timing("enqueue", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::SetRackExperiment {
+                    job_id,
+                    experiment,
+                    reply,
+                } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || {
+                        let experiment = experiment.clone();
+                        async move {
+                            sqlx::query("UPDATE jobs SET rack_experiment = ?1 WHERE id = ?2")
+                                .bind(&experiment)
+                                .bind(job_id)
+                                .execute(unsafe { &mut *raw })
+                                .await
+                                .map(|_| ())
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("set_rack_experiment", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::GetRackExperiment { job_id, reply } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || async move {
+                        let row = sqlx::query("SELECT rack_experiment FROM jobs WHERE id = ?1")
+                            .bind(job_id)
+                            .fetch_optional(unsafe { &mut *raw })
+                            .await?;
+                        Ok(row.and_then(|r| r.get::<Option<String>, _>("rack_experiment")))
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("get_rack_experiment", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::PendingRunAfter {

@@ -262,12 +262,19 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
             "reviews will run on the rack"
         );
     }
+    // Shared cancellation token for graceful shutdown. Made before the
+    // pipeline because the rack checker needs it: a review dropped because
+    // barry is stopping must not cancel its experiment (#39).
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
     let pipeline = Arc::new(build_pipeline_with(
         clients.clone(),
         personas.clone(),
         gh_factory.clone(),
         status_tracker.clone(),
         rack,
+        shutdown.clone(),
     ));
     // One registry for the dispatcher, which registers each job's token, and
     // the webhook handler, which fires it when the PR's head moves.
@@ -282,10 +289,6 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         status_tracker: status_tracker.clone(),
         cancel_registry: cancel_registry.clone(),
     });
-
-    // Shared cancellation token for graceful shutdown.
-    let shutdown = CancellationToken::new();
-    let shutdown_clone = shutdown.clone();
 
     // Workers.
     let mut worker_handles = Vec::with_capacity(cfg.dispatcher.worker_count);
@@ -418,6 +421,7 @@ fn build_pipeline_with(
     gh_factory: Arc<dyn MultiGhFactory>,
     status_tracker: Arc<StatusTracker>,
     rack: Option<Arc<crate::rack::RackConfig>>,
+    shutdown: CancellationToken,
 ) -> Pipeline {
     let mut p = Pipeline::hygiene_only();
     p.checkers
@@ -428,6 +432,7 @@ fn build_pipeline_with(
             status_tracker,
             rack,
             http: reqwest::Client::new(),
+            shutdown,
         }));
     p
 }

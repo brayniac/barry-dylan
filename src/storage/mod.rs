@@ -149,6 +149,7 @@ impl Store {
         Self::migrate_installation_tokens(&pool).await;
         Self::migrate_schema(&pool).await;
         Self::migrate_jobs_add_actor(&pool).await;
+        Self::migrate_jobs_add_rack_experiment(&pool).await;
 
         // Create a single connection to hand to the actor.
         let conn = pool.acquire().await?.detach();
@@ -174,6 +175,7 @@ impl Store {
         Self::migrate_installation_tokens(&pool).await;
         Self::migrate_schema(&pool).await;
         Self::migrate_jobs_add_actor(&pool).await;
+        Self::migrate_jobs_add_rack_experiment(&pool).await;
 
         let conn = pool.acquire().await?.detach();
 
@@ -221,6 +223,24 @@ impl Store {
             .execute(pool)
             .await
             .map_err(|e| tracing::error!("migrate_jobs_add_actor failed: {e}"));
+    }
+
+    /// Add `rack_experiment` to `jobs` if missing (2026-09-18, #39). New
+    /// deployments get it from CREATE TABLE; older ones need this ALTER.
+    async fn migrate_jobs_add_rack_experiment(pool: &sqlx::Pool<sqlx::Sqlite>) {
+        use sqlx::Row;
+        let rows = sqlx::query("SELECT name FROM pragma_table_info('jobs')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        let cols: Vec<String> = rows.iter().map(|r| r.get::<String, _>("name")).collect();
+        if cols.iter().any(|c| c == "rack_experiment") {
+            return;
+        }
+        let _ = sqlx::query("ALTER TABLE jobs ADD COLUMN rack_experiment TEXT")
+            .execute(pool)
+            .await
+            .map_err(|e| tracing::error!("migrate_jobs_add_rack_experiment failed: {e}"));
     }
 
     /// Run schema statements from SCHEMA.

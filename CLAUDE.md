@@ -82,6 +82,8 @@ src/
 
 7. **No stale reviews** (`src/dispatcher/cancel.rs`, `src/dispatcher/run.rs`): a `synchronize` webhook fires the PR's cancel token immediately, dropping the in-flight review of the old head (and cancelling its rack experiment); a `closed` webhook does the same via the queue. `post_outcome` re-fetches the PR before writing anything and skips the post if the head moved or the PR is no longer open.
 
+8. **Reviews survive a restart** (`src/rack/mod.rs::review_for_job`, `src/dispatcher/worker.rs`): the rack experiment id is persisted on the `jobs` row (`rack_experiment`) on submit and cleared when it ends. On SIGTERM the worker drops the job in hand and releases its lease (`reschedule_at`, no attempt spent); the abandon guard sees the shutdown token and does not cancel the experiment; the next process leases the job and resumes the experiment instead of resubmitting. A resumed experiment that ended badly is resubmitted once.
+
 ### Slash Commands
 
 Every comment command is gated at the webhook on `commands_from` (GitHub logins, checked against the signed comment author). Absent means nobody can command Barry from a comment.

@@ -36,6 +36,10 @@ pub struct MultiReviewChecker {
     pub rack: Option<Arc<crate::rack::RackConfig>>,
     /// Used only for talking to systemslab, and only when `rack` is set.
     pub http: reqwest::Client,
+    /// Fired when barry is stopping. A rack review dropped for that reason
+    /// leaves its experiment running for the next process to resume (#39),
+    /// where one dropped for any other reason cancels it.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl MultiReviewChecker {
@@ -75,7 +79,16 @@ impl MultiReviewChecker {
             // Nothing to reconcile, so do not pay for a reconciliation.
             cfg.judge = false;
         }
-        let outcome = crate::rack::review(&cfg, &self.http, &ctx.files, &name).await?;
+        let outcome = crate::rack::review_for_job(
+            &cfg,
+            &self.http,
+            &ctx.files,
+            &name,
+            &ctx.store,
+            ctx.job_id,
+            &self.shutdown,
+        )
+        .await?;
         let mut reviews = outcome.reviews;
 
         let barry = reviews
