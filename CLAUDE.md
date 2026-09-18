@@ -80,6 +80,8 @@ src/
 
 6. **Trust gate** (`src/dispatcher/trust.rs`): Untrusted PRs (from non-maintainers) require `/barry approve` from a maintainer before LLM review runs.
 
+7. **No stale reviews** (`src/dispatcher/cancel.rs`, `src/dispatcher/run.rs`): a `synchronize` webhook fires the PR's cancel token immediately, dropping the in-flight review of the old head (and cancelling its rack experiment); a `closed` webhook does the same via the queue. `post_outcome` re-fetches the PR before writing anything and skips the post if the head moved or the PR is no longer open.
+
 ### Slash Commands
 
 Every comment command is gated at the webhook on `commands_from` (GitHub logins, checked against the signed comment author). Absent means nobody can command Barry from a comment.
@@ -101,6 +103,8 @@ Every comment command is gated at the webhook on `commands_from` (GitHub logins,
 - `barry_multi_review_barry_alone_total` — Other Barry was unreachable
 - `barry_confer_total{outcome="ob"|"oob"|"rejected_unauthorized"|"rejected_max_reached"|"rejected_no_run"|"rejected_all_posted"}`
 - `barry_webhook_command_total{outcome="accepted"|"on_demand"|"rejected"}` — comment commands, `on_demand` being one in a repository outside `repos`
+- `barry_review_superseded_total{by="push"}` — a push cancelled the review in flight for the old head
+- `barry_review_stale_total{reason="head_moved"|"closed"}` — outcome not posted because the PR moved on
 - plus the usual job/webhook counters.
 
 ### Security

@@ -168,3 +168,109 @@ async fn inflight_cancellation_prevents_posting() {
 
     // wiremock verifies expect(0) on teardown when MockServer is dropped.
 }
+
+// ---------------------------------------------------------------------------
+// Level 0: the head is re-checked at the last moment before posting
+// ---------------------------------------------------------------------------
+
+fn rest_pr(head: &str, state: &str) -> serde_json::Value {
+    serde_json::json!({
+        "number": 1, "title": "feat: x", "body": "ok",
+        "user": { "login": "alice" }, "draft": false, "state": state,
+        "head": { "sha": head, "ref": "x" }, "base": { "sha": "base", "ref": "main" },
+        "additions": 1, "deletions": 0, "changed_files": 1
+    })
+}
+
+/// A job whose context (GraphQL) says the head is `sha1`, while the REST
+/// lookup at post time says `head`/`state`. Returns how many check-runs were
+/// created.
+async fn check_runs_posted_when_head_is(head: &str, state: &str) -> usize {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(crate::common::graphql_pr_context(
+                1,
+                "alice",
+                "sha1",
+                None,
+                serde_json::json!([]),
+                serde_json::json!([]),
+            )),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/repos/o/r/pulls/1/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/pulls/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr(head, state)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/collaborators/alice/permission"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "permission": "write"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/o/r/check-runs"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/repos/o/r/issues/1/"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+        .mount(&server)
+        .await;
+
+    let store = Store::in_memory().await.unwrap();
+    let gh = Arc::new(
+        barry_dylan::github::client::GitHub::new(reqwest::Client::new(), "tok".into())
+            .with_base(server.uri()),
+    );
+    let deps = Arc::new(JobDeps {
+        store: store.clone(),
+        config: Arc::new(crate::common::default_config()),
+        pipeline: Arc::new(Pipeline::hygiene_only()),
+        gh_factory: Arc::new(crate::common::StaticGh { gh }),
+        clients: None,
+        personas: None,
+        status_tracker: Arc::new(barry_dylan::telemetry::status::StatusTracker::new()),
+        cancel_registry: CancelRegistry::new(),
+    });
+    crate::common::enqueue_opened(&store, "o", "r", 1).await;
+    let job = store.lease_next(0, 300).await.unwrap().unwrap();
+    run_job(&deps, &job).await.unwrap();
+
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.method == "POST" && r.url.path() == "/repos/o/r/check-runs")
+        .count()
+}
+
+#[tokio::test]
+async fn an_outcome_for_a_head_that_moved_is_not_posted() {
+    // The push that moved it may not have been delivered (smee keeps no
+    // backlog), so the review reaches the post step with a stale outcome.
+    assert_eq!(check_runs_posted_when_head_is("sha2", "open").await, 0);
+}
+
+#[tokio::test]
+async fn an_outcome_for_a_pull_request_since_closed_is_not_posted() {
+    assert_eq!(check_runs_posted_when_head_is("sha1", "closed").await, 0);
+}
+
+#[tokio::test]
+async fn an_outcome_for_the_current_head_is_posted() {
+    // The guard must not eat real reviews.
+    assert!(check_runs_posted_when_head_is("sha1", "open").await >= 1);
+}

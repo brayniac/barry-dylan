@@ -70,6 +70,7 @@ async fn a_delivery_survives_the_channel_and_becomes_a_job() {
         // repositories barry acts on.
         repos: Arc::new(RepoFilter::default()),
         commanders: Arc::new(Commanders::default()),
+        cancel_registry: barry_dylan::dispatcher::cancel::CancelRegistry::new(),
         relay: None,
     };
 

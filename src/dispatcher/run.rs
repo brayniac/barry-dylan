@@ -481,6 +481,59 @@ fn default_repo_config() -> crate::config::repo::RepoConfig {
     crate::config::repo::RepoConfig::default()
 }
 
+/// Whether the pull request is still the one this outcome was produced for.
+///
+/// A push cancels the review in flight from the webhook, but the delivery can
+/// lag or, through smee, never arrive; and a review that finished a moment
+/// before the push still has its outcome in hand. So the head is checked once
+/// more here, at the last moment before anything is written. A review of a
+/// commit that is no longer the head is worth nothing, and posting it
+/// misleads: the check-run lands on a stale SHA and the review comments sit
+/// under lines that may no longer exist.
+///
+/// A lookup that fails does not block the post: losing a good review to a
+/// transient GitHub error is the worse trade.
+async fn still_current(gh: &Arc<GitHub>, job: &LeasedJob, pr: &PullRequest) -> bool {
+    let now = match gh
+        .get_pr(&job.repo_owner, &job.repo_name, job.pr_number)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                pr = job.pr_number,
+                "could not re-check the head before posting; posting anyway"
+            );
+            return true;
+        }
+    };
+    if now.head.sha != pr.head.sha {
+        tracing::info!(
+            pr = job.pr_number,
+            owner = %job.repo_owner,
+            repo = %job.repo_name,
+            reviewed = %pr.head.sha,
+            head = %now.head.sha,
+            "head moved during the review; not posting a stale outcome"
+        );
+        metrics::counter!("barry_review_stale_total", "reason" => "head_moved").increment(1);
+        return false;
+    }
+    if now.state != "open" {
+        tracing::info!(
+            pr = job.pr_number,
+            owner = %job.repo_owner,
+            repo = %job.repo_name,
+            state = %now.state,
+            "PR is no longer open; not posting"
+        );
+        metrics::counter!("barry_review_stale_total", "reason" => "closed").increment(1);
+        return false;
+    }
+    true
+}
+
 async fn post_outcome(
     gh: &Arc<GitHub>,
     job: &LeasedJob,
@@ -488,6 +541,9 @@ async fn post_outcome(
     o: &CheckerOutcome,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
+    if !still_current(gh, job, pr).await {
+        return Ok(());
+    }
     let span = tracing::info_span!(
         "checker.post_outcome",
         checker = o.checker_name,
