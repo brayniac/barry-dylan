@@ -121,6 +121,58 @@ async fn cancel(http: &reqwest::Client, base: &str, id: &str) {
     }
 }
 
+/// Cancels the experiment if the review is abandoned before it ends.
+///
+/// `cancel` above covers the two ways [`review`] gives up on its own. It does
+/// not cover the ways the *caller* gives up: the dispatcher drops the review
+/// future when the pull request is closed and when the checker times out, and
+/// a dropped future runs no more code. The first real case was infra#18 on
+/// 2026-09-18: closed at 16:22Z, barry stopped waiting at 16:22Z, and the guest
+/// held hv02 until 16:28Z producing a review nobody would read, while two
+/// measurement jobs starved behind it.
+///
+/// Armed once the experiment exists; disarmed once it is over or once the
+/// review has decided to cancel it explicitly. `Drop` cannot await, so the
+/// request is spawned, and the worker task that dropped us outlives it.
+struct Abandoned {
+    http: reqwest::Client,
+    base: String,
+    id: String,
+    armed: bool,
+}
+
+impl Abandoned {
+    fn arm(http: reqwest::Client, base: String, id: String) -> Self {
+        Self {
+            http,
+            base,
+            id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Abandoned {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(experiment = %self.id, "abandoned outside a runtime; cannot cancel");
+            return;
+        };
+        tracing::info!(experiment = %self.id, "review abandoned before the rack finished; cancelling");
+        let http = self.http.clone();
+        let base = std::mem::take(&mut self.base);
+        let id = std::mem::take(&mut self.id);
+        rt.spawn(async move { cancel(&http, &base, &id).await });
+    }
+}
+
 #[derive(Deserialize)]
 struct ArtifactRef {
     id: String,
@@ -202,6 +254,7 @@ pub async fn review(
         reviewers = cfg.reviewers.len(),
         "rack review submitted"
     );
+    let mut abandoned = Abandoned::arm(http.clone(), base.to_string(), id.clone());
 
     let deadline = Instant::now() + Duration::from_secs(cfg.job_timeout_secs);
     let queue_deadline = Instant::now() + Duration::from_secs(cfg.queue_timeout_secs);
@@ -209,6 +262,7 @@ pub async fn review(
     let mut last = String::from("unknown");
     loop {
         if Instant::now() >= deadline {
+            abandoned.disarm();
             cancel(http, base, &id).await;
             return Err(RackError::Timeout {
                 id,
@@ -217,6 +271,7 @@ pub async fn review(
             });
         }
         if !started && Instant::now() >= queue_deadline {
+            abandoned.disarm();
             cancel(http, base, &id).await;
             return Err(RackError::Queued {
                 id,
@@ -250,8 +305,14 @@ pub async fn review(
         }
 
         match classify(&state.state) {
-            Progress::Succeeded => break,
-            Progress::Ended(s) => return Err(RackError::Failed { id, state: s }),
+            Progress::Succeeded => {
+                abandoned.disarm();
+                break;
+            }
+            Progress::Ended(s) => {
+                abandoned.disarm();
+                return Err(RackError::Failed { id, state: s });
+            }
             Progress::Waiting => {
                 tokio::time::sleep(Duration::from_secs(cfg.poll_interval_secs)).await;
             }
@@ -487,6 +548,130 @@ mod tests {
     #[test]
     fn an_experiment_with_no_jobs_yet_has_not_started() {
         assert!(!has_started(&[]));
+    }
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn cfg_for(server: &MockServer) -> RackConfig {
+        toml::from_str(&format!(
+            r#"
+systemslab = "{}"
+host_tags = ["gpu"]
+shape = "auto.g"
+image = "spool/images/debian-13-gpu@golden"
+poll_interval_secs = 1
+
+[[reviewers]]
+identity = "barry"
+model = "x/y@latest/gguf/q4_k_m@latest"
+model_name = "y"
+"#,
+            server.uri()
+        ))
+        .unwrap()
+    }
+
+    fn one_file() -> Vec<ChangedFile> {
+        vec![ChangedFile {
+            filename: "a.rs".into(),
+            status: "modified".into(),
+            additions: 1,
+            deletions: 0,
+            changes: 1,
+            patch: Some("@@ -1 +1 @@\n+x".into()),
+        }]
+    }
+
+    async fn cancels_received(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/cancel"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_review_dropped_mid_flight_cancels_the_experiment() {
+        // The dispatcher drops the review future when the pull request is
+        // closed or the checker times out. The guest must not keep the host.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/submit"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "01a0"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/experiment/01a0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"state": "pending", "jobs": [{"state": "running"}]}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/experiment/01a0/cancel"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let cfg = cfg_for(&server);
+        let http = reqwest::Client::new();
+
+        // Poll once, then abandon it the way `select!` on a cancel token does.
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(300),
+            review(&cfg, &http, &one_file(), "t"),
+        )
+        .await;
+        assert!(
+            dropped.is_err(),
+            "the review should still have been waiting"
+        );
+
+        for _ in 0..40 {
+            if cancels_received(&server).await == 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the experiment was not cancelled after the review was dropped");
+    }
+
+    #[tokio::test]
+    async fn a_review_that_ends_on_its_own_is_not_cancelled() {
+        // Cancelling something already finished is noise at best; the guard
+        // must stand down once the experiment has reached a terminal state.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/submit"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "01a0"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/experiment/01a0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"state": "failure", "jobs": [{"state": "failed"}]}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/experiment/01a0/cancel"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let cfg = cfg_for(&server);
+        let http = reqwest::Client::new();
+
+        let err = review(&cfg, &http, &one_file(), "t").await.unwrap_err();
+        assert!(matches!(err, RackError::Failed { .. }), "{err}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(cancels_received(&server).await, 0);
     }
 
     #[test]
