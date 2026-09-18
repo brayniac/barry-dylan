@@ -100,6 +100,12 @@ pub struct RackConfig {
     #[serde(default = "default_judge_max_tokens")]
     pub judge_max_tokens: u32,
 
+    /// Sampling temperature for the reviewers and the in-guest judge. Absent
+    /// leaves it to llama-server, which uses the model's own recommendation
+    /// from the GGUF. Set it only to pin a model that recommends nothing.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+
     /// Scheduling priority of the review on the rack. Higher runs first;
     /// equal priorities go oldest first.
     ///
@@ -191,6 +197,15 @@ pub struct Reviewer {
     /// agree with `shape`.
     #[serde(default)]
     pub host_tags: Option<Vec<String>>,
+
+    /// llama-server context window for this reviewer, overriding the
+    /// top-level `context_size`. The window is KV cache, and KV cache is what
+    /// decides whether a model fits beside its weights: gemma-4-31B at q4_k_m
+    /// is 17.4 GiB of weights and 5 GiB of KV at 65536 on a 24 GB card, and
+    /// fits at 32768. Two reviewers sharing a model share the first one's
+    /// server, and so its window.
+    #[serde(default)]
+    pub context_size: Option<u32>,
 }
 
 fn default_packages() -> Vec<String> {
@@ -260,6 +275,10 @@ impl Reviewer {
 
     pub fn host_tags<'a>(&'a self, cfg: &'a RackConfig) -> &'a [String] {
         self.host_tags.as_deref().unwrap_or(&cfg.host_tags)
+    }
+
+    pub fn context_size(&self, cfg: &RackConfig) -> u32 {
+        self.context_size.unwrap_or(cfg.context_size)
     }
 
     /// The llama-server log for this reviewer's server, uploaded as an

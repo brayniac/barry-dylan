@@ -121,6 +121,7 @@ mod tests {
             max_tokens: 4096,
             request_timeout_secs: 5,
             context_size: None,
+            temperature: None,
         }
     }
 

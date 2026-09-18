@@ -109,6 +109,12 @@ pub struct LlmProfile {
     /// true of a hosted API, and the personas run all at once as before.
     #[serde(default)]
     pub context_size: Option<u32>,
+    /// Sampling temperature for every request to this endpoint. Absent leaves
+    /// it to the endpoint: a local llama-server then uses the model's own
+    /// recommendation from the GGUF, a hosted API its default. Set it only to
+    /// pin a model that recommends nothing sensible.
+    #[serde(default)]
+    pub temperature: Option<f32>,
 }
 
 /// Also the fallback for an identity with no profile at all, which is only

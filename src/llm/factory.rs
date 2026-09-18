@@ -46,19 +46,25 @@ pub fn build_named(
             if host != "api.anthropic.com" {
                 return Err(FactoryError::EndpointMismatch { host });
             }
-            Arc::new(AnthropicClient::new(
+            Arc::new(
+                AnthropicClient::new(
+                    http,
+                    profile.endpoint.clone(),
+                    api_key,
+                    profile.model.clone(),
+                )
+                .with_temperature(profile.temperature),
+            )
+        }
+        LlmProviderKind::Openai => Arc::new(
+            OpenAiClient::new(
                 http,
                 profile.endpoint.clone(),
                 api_key,
                 profile.model.clone(),
-            ))
-        }
-        LlmProviderKind::Openai => Arc::new(OpenAiClient::new(
-            http,
-            profile.endpoint.clone(),
-            api_key,
-            profile.model.clone(),
-        )),
+            )
+            .with_temperature(profile.temperature),
+        ),
     };
 
     // Return the client wrapped with timing
@@ -161,6 +167,7 @@ mod tests {
             max_tokens: 1024,
             request_timeout_secs: 60,
             context_size: None,
+            temperature: None,
         }
     }
 

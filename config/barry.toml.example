@@ -76,6 +76,9 @@ endpoint = "https://api.anthropic.com"
 api_key_env = "ANTHROPIC_API_KEY"
 model = "claude-sonnet-4-6"
 max_tokens = 8192
+# Sampling temperature. Absent leaves it to the endpoint: a hosted API uses its
+# default, a local llama-server the model's own recommendation.
+# temperature = 0.7
 request_timeout_secs = 300
 
 [llm.other_barry]

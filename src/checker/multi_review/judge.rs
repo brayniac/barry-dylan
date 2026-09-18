@@ -97,7 +97,7 @@ async fn judge_once(
             content: user.to_string(),
         }],
         max_tokens,
-        temperature: 0.0,
+        temperature: None,
         response_schema: Some(verdict_schema()),
     };
     let resp = client.complete(&req).await?;
