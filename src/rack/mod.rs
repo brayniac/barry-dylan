@@ -782,8 +782,9 @@ model_name = "y"
         let http = reqwest::Client::new();
         let shutdown = CancellationToken::new();
 
-        let waiting = collect(&cfg, &http, "01a0", &shutdown);
-        tokio::pin!(waiting);
+        // Owned and boxed so that `drop` really drops the future (and the
+        // abandon guard inside it) here, not at the end of the scope.
+        let mut waiting = Box::pin(collect(&cfg, &http, "01a0", &shutdown));
         // Let it poll once, then stop barry and drop the review as the worker
         // does.
         let _ = tokio::time::timeout(Duration::from_millis(300), &mut waiting).await;
@@ -904,8 +905,11 @@ model_name = "y"
         // Stop barry while it is waiting: the id must be on the job for the
         // next process, and the experiment must be left alone.
         let files = one_file();
-        let waiting = review_for_job(&cfg, &http, &files, "t", &store, job, &shutdown);
-        tokio::pin!(waiting);
+        // Owned and boxed so that `drop` really drops the future (and the
+        // abandon guard inside it) here, not at the end of the scope.
+        let mut waiting = Box::pin(review_for_job(
+            &cfg, &http, &files, "t", &store, job, &shutdown,
+        ));
         let _ = tokio::time::timeout(Duration::from_millis(300), &mut waiting).await;
         shutdown.cancel();
         drop(waiting);
