@@ -245,6 +245,7 @@ The `/metrics` endpoint exposes Prometheus metrics:
 
 - `barry_multi_review_judge_total{verdict="agree"|"disagree"}`
 - `barry_multi_review_barry_alone_total` — Other Barry was unreachable
+- `barry_multi_review_synthesis_fallback_total{reason="truncated"|"invalid_json"}` — synthesis could not produce a review and the persona drafts stood in
 - `barry_multi_review_peer_round_total{outcome="revised"|"kept_first"}` — each reviewer read the other's first review and revised, or kept its first
 - `barry_relay_connected` — 1 while the relay holds the channel open
 - `barry_relay_events_total{event}`, `barry_relay_rejected_total{reason}`

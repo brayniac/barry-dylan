@@ -77,6 +77,26 @@ pub fn persona_concurrency(
     fit.clamp(1, personas.max(1))
 }
 
+/// The metric label for a synthesis fallback. Barry's own review of #48
+/// pointed out that counting parse failures under `truncated_total` misnamed
+/// them; the counter is now named for what it counts and labelled by why.
+fn synthesis_fallback_metric(e: &SynthesisError) -> &'static str {
+    match e {
+        SynthesisError::Truncated => "truncated",
+        SynthesisError::Parse(_) => "invalid_json",
+        _ => "other",
+    }
+}
+
+/// What to tell the reader when synthesis gave nothing usable.
+fn synthesis_fallback_reason(e: &SynthesisError) -> &'static str {
+    match e {
+        SynthesisError::Truncated => "synthesis truncated",
+        SynthesisError::Parse(_) => "synthesis produced invalid JSON twice",
+        _ => "synthesis failed",
+    }
+}
+
 /// Barry alone, from the persona drafts, when synthesis could not run.
 ///
 /// An error rather than a review when no draft was usable: the check-run
@@ -134,12 +154,11 @@ impl<'a> Orchestrator<'a> {
                     .await
                 {
                     Ok(t) => t,
-                    Err(SynthesisError::Truncated) => {
-                        tracing::warn!(
-                            "barry R1 synthesis truncated; using persona-draft fallback"
-                        );
-                        metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis").increment(1);
-                        return barry_from_drafts(&barry_drafts, "synthesis truncated");
+                    Err(e @ (SynthesisError::Truncated | SynthesisError::Parse(_))) => {
+                        let reason = synthesis_fallback_reason(&e);
+                        tracing::warn!(%e, "barry synthesis could not produce a review; using the persona drafts");
+                        metrics::counter!("barry_multi_review_synthesis_fallback_total", "reason" => synthesis_fallback_metric(&e)).increment(1);
+                        return barry_from_drafts(&barry_drafts, reason);
                     }
                     Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
                 };
@@ -176,11 +195,11 @@ impl<'a> Orchestrator<'a> {
         );
         let (barry_r1, barry_r1_tokens) = match barry_r1_res {
             Ok(t) => t,
-            Err(SynthesisError::Truncated) => {
-                tracing::warn!("barry R1 synthesis truncated; using persona-draft fallback");
-                metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
-                    .increment(1);
-                return barry_from_drafts(&barry_drafts, "synthesis truncated");
+            Err(e @ (SynthesisError::Truncated | SynthesisError::Parse(_))) => {
+                let reason = synthesis_fallback_reason(&e);
+                tracing::warn!(%e, "barry synthesis could not produce a review; using the persona drafts");
+                metrics::counter!("barry_multi_review_synthesis_fallback_total", "reason" => synthesis_fallback_metric(&e)).increment(1);
+                return barry_from_drafts(&barry_drafts, reason);
             }
             Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
         };
@@ -363,13 +382,11 @@ impl<'a> Orchestrator<'a> {
             .await
         {
             Ok(t) => t,
-            Err(SynthesisError::Truncated) => {
-                tracing::warn!(
-                    "barry synthesis truncated in run_barry_only; using persona-draft fallback"
-                );
-                metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
-                    .increment(1);
-                return barry_from_drafts(&barry_drafts, "synthesis truncated");
+            Err(e @ (SynthesisError::Truncated | SynthesisError::Parse(_))) => {
+                let reason = synthesis_fallback_reason(&e);
+                tracing::warn!(%e, "barry synthesis could not produce a review; using the persona drafts");
+                metrics::counter!("barry_multi_review_synthesis_fallback_total", "reason" => synthesis_fallback_metric(&e)).increment(1);
+                return barry_from_drafts(&barry_drafts, reason);
             }
             Err(e) => return Err(anyhow::anyhow!("barry synthesis failed: {e}")),
         };
@@ -891,6 +908,36 @@ mod tests {
                 assert_eq!(other_barry.summary, "ob revised");
             }
             other => panic!("wanted Disagree, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_synthesis_json_falls_back_to_the_drafts() {
+        // Barry: two drafts, then two malformed syntheses (the retry inside
+        // synthesize), then nothing else: the review is built from the drafts.
+        // Cut off mid-string: unmistakably not JSON.
+        let bad = || ok_resp(r#"{"outcome":"approve","summary":"cut off mid"#);
+        let c = clients(
+            vec![Ok(bad()), Ok(bad()), Ok(approve()), Ok(approve())],
+            vec![Ok(approve()), Ok(approve())],
+            vec![],
+        );
+        let p = personas();
+        let v = Orchestrator {
+            clients: &c,
+            personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
+        }
+        .run(&[file()])
+        .await
+        .unwrap();
+        match v {
+            Verdict::BarryAlone { barry, reason } => {
+                assert_eq!(reason, "synthesis produced invalid JSON twice");
+                assert!(barry.summary.contains("unreconciled"), "{}", barry.summary);
+            }
+            other => panic!("wanted BarryAlone, got {other:?}"),
         }
     }
 

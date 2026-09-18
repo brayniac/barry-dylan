@@ -129,11 +129,51 @@ pub async fn synthesize(
             return Err(SynthesisError::Truncated);
         }
     }
-    let tokens = TokenCount {
+    let mut tokens = TokenCount {
         input: u64::from(resp.input_tokens.unwrap_or(0)),
         output: u64::from(resp.output_tokens.unwrap_or(0)),
     };
-    Ok((parse(&resp.text)?, tokens))
+    // Without structured output the model's JSON is occasionally malformed:
+    // infra#22 on 2026-09-18 failed at column 442 of an otherwise fine
+    // review. The sampling is the model's own, so a second attempt is a
+    // different sample and usually parses. The bad text is logged so the
+    // next case can be read rather than guessed at.
+    match parse(&resp.text) {
+        Ok(review) => Ok((review, tokens)),
+        Err(first) => {
+            // The parse error and the size at warn; the text itself only at
+            // debug. It is the model's reading of someone's code, and warn
+            // lines travel further than debug lines do (Barry's own review of
+            // #48 raised this).
+            tracing::warn!(
+                error = %first,
+                chars = resp.text.len(),
+                "synthesis reply was not valid JSON; retrying once"
+            );
+            tracing::debug!(head = %resp.text.chars().take(300).collect::<String>(), "the invalid reply");
+            let again = client.complete(&req).await?;
+            tokens.input += u64::from(again.input_tokens.unwrap_or(0));
+            tokens.output += u64::from(again.output_tokens.unwrap_or(0));
+            // A retry that ran out of budget is a truncation, not a second
+            // parse failure, and is counted as one (both reviewers of #48).
+            if matches!(again.finish_reason, Some(FinishReason::Length)) {
+                tracing::warn!("synthesis retry truncated at max_tokens; giving up");
+                return Err(SynthesisError::Truncated);
+            }
+            match parse(&again.text) {
+                Ok(review) => Ok((review, tokens)),
+                Err(second) => {
+                    tracing::warn!(
+                        error = %second,
+                        chars = again.text.len(),
+                        "synthesis reply invalid again; giving up"
+                    );
+                    tracing::debug!(head = %again.text.chars().take(300).collect::<String>(), "the invalid reply");
+                    Err(SynthesisError::Parse(second))
+                }
+            }
+        }
+    }
 }
 
 /// What a persona draft is asked to contain. Tolerant on the way in: a draft
@@ -439,6 +479,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SynthesisError::Truncated));
+    }
+
+    /// Cut off mid-string, so no reader mistakes it for valid JSON. (Both
+    /// reviewers of #48 did, on an earlier fixture whose flaw was a quote in
+    /// the wrong place; it was invalid, but not visibly so.)
+    fn invalid_json() -> LlmResponse {
+        LlmResponse {
+            text: r#"{"outcome":"approve","summary":"cut off mid"#.into(),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            finish_reason: Some(FinishReason::Stop),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_json_is_retried_once_and_the_second_sample_can_win() {
+        let client = ScriptedClient(Mutex::new(vec![invalid_json(), ok_review()]));
+        let (review, tokens) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
+        assert_eq!(
+            review.outcome,
+            crate::checker::multi_review::review::Outcome::Approve
+        );
+        // Both attempts are paid for.
+        assert_eq!(tokens.output, 20 + 50);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_retry_after_invalid_json_is_a_truncation() {
+        let client = ScriptedClient(Mutex::new(vec![invalid_json(), truncated()]));
+        let err = synthesize(&client, &[], "diff", None, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SynthesisError::Truncated), "{err}");
+    }
+
+    #[tokio::test]
+    async fn invalid_json_twice_is_a_parse_error() {
+        let client = ScriptedClient(Mutex::new(vec![invalid_json(), invalid_json()]));
+        let err = synthesize(&client, &[], "diff", None, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SynthesisError::Parse(_)), "{err}");
     }
 
     #[tokio::test]
