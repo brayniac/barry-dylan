@@ -100,6 +100,19 @@ pub struct RackConfig {
     #[serde(default = "default_judge_max_tokens")]
     pub judge_max_tokens: u32,
 
+    /// Scheduling priority of the review on the rack. Higher runs first;
+    /// equal priorities go oldest first.
+    ///
+    /// `300` is "advisory review" in infra's `docs/guides/priorities.md`,
+    /// which is the one place the numbers are agreed across rack-ci, slipway
+    /// and barry: above an unmarked benchmark (`0`), below a claimed
+    /// measurement (`350`) and below gating CI (`400`). A review is forty
+    /// minutes holding a 4090 and it is advice; a check is three minutes and a
+    /// merge waits on it; a claimed measurement is what the rack exists for.
+    /// Nothing preempts, so this only decides who gets the next free host.
+    #[serde(default = "default_priority")]
+    pub priority: i32,
+
     /// How often to ask the control plane whether the experiment has finished.
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
@@ -260,6 +273,10 @@ fn default_max_tokens() -> u32 {
     4096
 }
 
+fn default_priority() -> i32 {
+    300
+}
+
 fn default_poll_interval_secs() -> u64 {
     10
 }
@@ -308,6 +325,8 @@ model_name = "llama-3.1-8b"
         assert_eq!(cfg.context_size, 65536);
         assert_eq!(cfg.max_tokens, 4096);
         assert_eq!(cfg.poll_interval_secs, 10);
+        // The agreed number for advisory review, from infra's priorities guide.
+        assert_eq!(cfg.priority, 300);
     }
 
     #[test]

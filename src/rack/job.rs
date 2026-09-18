@@ -260,11 +260,15 @@ pub fn spec(cfg: &RackConfig, files: &[ChangedFile], name: &str) -> anyhow::Resu
         }
     }
 
+    // `priority` is a sibling of the experiment in the submit body, not a key
+    // inside it: systemslab's `SubmitRequest` is `{experiment, context,
+    // priority}`, and a priority written inside the experiment is ignored.
     Ok(json!({
         "experiment": {
             "name": name,
             "jobs": jobs,
-        }
+        },
+        "priority": cfg.priority,
     }))
 }
 
@@ -634,6 +638,24 @@ host_tags = ["z1.baremetal"]
         let p = payload(&c, &all(&c), &files()).unwrap();
         assert_eq!(p.matches("-c 8192").count(), 2);
         assert_eq!(p.matches("max_tokens = 512").count(), 2);
+    }
+
+    #[test]
+    fn a_review_is_submitted_as_advisory_priority() {
+        // 300 per infra's priorities guide: ahead of an unmarked benchmark,
+        // behind a claimed measurement and behind gating CI. Sent where
+        // systemslab reads it, beside the experiment rather than inside it.
+        let s = spec(&cfg(), &files(), "t").unwrap();
+        assert_eq!(s["priority"], 300);
+        assert!(s["experiment"].get("priority").is_none());
+    }
+
+    #[test]
+    fn the_priority_is_configurable() {
+        let mut c = cfg();
+        c.priority = 200;
+        let s = spec(&c, &files(), "t").unwrap();
+        assert_eq!(s["priority"], 200);
     }
 
     #[test]

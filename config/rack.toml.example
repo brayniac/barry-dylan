@@ -66,6 +66,13 @@ packages = ["slipway=0.2.3-1", "llama-server=10502-1"]
 # the default sequential placement.
 judge = true
 
+# Where a review sits in the rack's queue when hosts are contended. 300 is
+# "advisory review" in infra's docs/guides/priorities.md, the one place the
+# numbers are agreed: above an unmarked benchmark (0), below a claimed
+# measurement (350) and below gating CI (400). Nothing preempts; this only
+# decides who gets the next free host.
+# priority = 300
+
 # One block per reviewer. `identity` matches barry's own identity slugs, and the
 # review comes back keyed by it. Order is the order they run in when sequential.
 #
