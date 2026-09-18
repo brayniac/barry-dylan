@@ -102,6 +102,32 @@ Checked before a delivery becomes a job, so an unlisted repository costs one
 string compare rather than a worker and a review. Case-insensitive, as GitHub
 is. Drops are counted as `barry_webhook_rejected_total{reason="repo"}`.
 
+### 3c. Choose Who Can Command Barry
+
+```toml
+commands_from = ["you"]
+```
+
+Every `/barry` command and every `@barry-dylan` mention in a pull request
+comment is checked against this list before it becomes a job. The login checked
+is the comment author's as GitHub signed it into the delivery, so someone else
+typing your name in the body gets nothing. Case-insensitive, as GitHub is.
+
+**Absent means nobody.** Every comment command is dropped and startup warns
+about it. The alternative default is "anyone who can comment on a pull request
+can re-run a forty-minute review", which is what barry did until 2026-09-18.
+The per-command role checks (`/barry approve` needs write access, `/barry
+confer` follows `[confer] allowed`) still apply after this gate.
+
+A commander's comment also gets through `repos`: `@barry-dylan` or `/barry
+review` on a pull request in a repository barry does not otherwise act on
+reviews the current head once. The repository stays unlisted, so a later push is
+not re-reviewed, a merge does not cancel a review in flight, and everyone else's
+comments there are dropped. Push again, ask again.
+
+Outcomes are counted as
+`barry_webhook_command_total{outcome="accepted"|"on_demand"|"rejected"}`.
+
 ### 4. Set Environment Variables
 
 ```bash
@@ -150,6 +176,7 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | `[github.other_other_barry]` | `app_id` | Other Other Barry's GitHub App ID |
 | | `private_key_path` | Path to Other Other Barry's PEM key |
 | (top level) | `repos` | `owner/name` list barry acts on; absent means all |
+| | `commands_from` | Logins who may command barry from comments; absent means nobody |
 | `[relay]` | `smee_url` | smee.io channel to hold open, when GitHub cannot reach Barry |
 | | `require_signature` | Forward GitHub's signature (default `true`) rather than re-signing |
 | `[storage]` | `sqlite_path` | Path to the SQLite database file |
@@ -187,11 +214,15 @@ restart, then edit; or read an `unknown field` on a freshly installed version as
 
 ## Slash Commands
 
+All commands require the comment author to be in `commands_from`; the "Who"
+column is the further check each command makes after that.
+
 | Command | Who | Behavior |
 |---|---|---|
 | `/barry approve` | Maintainer (write/maintain/admin) | Trusts the PR author, enabling automatic review on next PR event |
-| `/barry review` | Maintainer | Re-runs the full review pipeline on the current head |
-| `/barry confer` | Maintainer + PR author | Summons the next unposted reviewer (OB, then OOB) for an independent opinion |
+| `/barry review` | Any commander | Re-runs the full review pipeline on the current head |
+| `/barry confer` | Per `[confer] allowed` | Summons the next unposted reviewer (OB, then OOB) for an independent opinion |
+| `@barry-dylan` | Any commander | Same as `/barry review`. In a repository not in `repos`, this is how to get one reviewed |
 
 ## Security
 
@@ -235,6 +266,6 @@ On a sandbox repo with all three Apps installed:
 
 1. Open a PR. Confirm the four `barry/hygiene.*` Check Runs appear, plus `barry/llm-review`, and a review comment posted by **Barry** (or two reviews — one each from Barry and Other Barry — if the judge says they disagree).
 2. Push more commits within 30s. Confirm only one extra run fires (debounce).
-3. From a non-maintainer account, open a PR. Confirm only the "needs approval" comment appears. Comment `/barry approve` as a maintainer. Confirm the normal Check Runs and review now appear.
+3. From a non-maintainer account, open a PR. Confirm only the "needs approval" comment appears. Comment `/barry approve` as a maintainer who is in `commands_from`. Confirm the normal Check Runs and review now appear.
 4. After a review has posted, comment `/barry confer`. Confirm Other Barry posts an independent review on the same head SHA. Comment `/barry confer` again — Other Other Barry posts. A third `/barry confer` is rejected with "Maximum confers reached" (default `max_per_pr = 2`).
 5. Break `.barry.toml` (e.g. invalid TOML). Confirm a `barry/config` Check Run with `failure` appears, and other checkers do not run.

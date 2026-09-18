@@ -82,9 +82,12 @@ src/
 
 ### Slash Commands
 
+Every comment command is gated at the webhook on `commands_from` (GitHub logins, checked against the signed comment author). Absent means nobody can command Barry from a comment.
+
 - `/barry approve` — maintainer-only; trusts the PR author for this PR so reviews start running. Sticky for the lifetime of the PR.
 - `/barry review` — re-runs the full review pipeline on the current head.
 - `/barry confer` — summons the next un-posted Barry (OB then OOB) to post an independent review on the current head SHA.
+- `@barry-dylan` — same as `/barry review`. A commander's comment also gets through the `repos` allowlist, so this is how to get one review of a PR in a repository Barry does not otherwise act on.
 
 ### Configuration
 
@@ -97,6 +100,7 @@ src/
 - `barry_multi_review_judge_total{verdict="agree"|"disagree"}`
 - `barry_multi_review_barry_alone_total` — Other Barry was unreachable
 - `barry_confer_total{outcome="ob"|"oob"|"rejected_unauthorized"|"rejected_max_reached"|"rejected_no_run"|"rejected_all_posted"}`
+- `barry_webhook_command_total{outcome="accepted"|"on_demand"|"rejected"}` — comment commands, `on_demand` being one in a repository outside `repos`
 - plus the usual job/webhook counters.
 
 ### Security
