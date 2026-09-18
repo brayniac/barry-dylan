@@ -220,7 +220,12 @@ impl<'a> Orchestrator<'a> {
             self.clients.judge.as_ref(),
             &barry,
             &other,
-            self.clients.judge_max_tokens.min(512),
+            // The configured budget, not `.min(512)`. The clamp was sized for
+            // a small hosted model that answers in a sentence, and it silently
+            // undid every larger budget anyone configured: a thinking model
+            // spends 512 tokens reasoning and returns nothing, which posts as
+            // "judge unavailable; Barry alone" and drops the second review.
+            self.clients.judge_max_tokens,
         )
         .await
         {
@@ -444,6 +449,53 @@ impl<'a> Orchestrator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records the max_tokens of every request it sees.
+    struct BudgetClient(Arc<Mutex<Vec<u32>>>);
+
+    #[async_trait]
+    impl LlmClient for BudgetClient {
+        async fn complete(&self, req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            self.0.lock().unwrap().push(req.max_tokens);
+            Ok(LlmResponse {
+                text: r#"{"agree":true,"reason":"same"}"#.into(),
+                input_tokens: None,
+                output_tokens: None,
+                finish_reason: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_judge_gets_its_configured_budget_not_a_512_clamp() {
+        let seen = Arc::new(Mutex::new(vec![]));
+        let judge: Arc<dyn LlmClient> = Arc::new(BudgetClient(seen.clone()));
+        let clients = IdentityClients {
+            barry: judge.clone(),
+            other_barry: judge.clone(),
+            other_other_barry: judge.clone(),
+            judge,
+            barry_max_tokens: 1,
+            other_barry_max_tokens: 1,
+            other_other_barry_max_tokens: 1,
+            judge_max_tokens: 4096,
+            barry_context_size: None,
+            other_barry_context_size: None,
+            other_other_barry_context_size: None,
+        };
+        let o = Orchestrator {
+            clients: &clients,
+            personas: &[],
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 1,
+        };
+        let review = crate::checker::multi_review::review::parse(
+            r#"{"outcome":"approve","summary":"x","findings":[]}"#,
+        )
+        .unwrap();
+        let _ = o.judge_reviews(review.clone(), review).await;
+        assert_eq!(seen.lock().unwrap().as_slice(), &[4096]);
+    }
 
     #[test]
     fn unknown_context_runs_every_persona_at_once() {

@@ -99,7 +99,11 @@ pub async fn judge(
         clients.judge.as_ref(),
         a,
         b,
-        cfg.llm.max_tokens.min(512),
+        // The guest's `[llm] max_tokens` is `[rack] judge_max_tokens`, raised
+        // to 4096 on 2026-09-16 for exactly this model class. The `.min(512)`
+        // that sat here clamped it straight back, which is why the rack judge
+        // kept failing after the fix (barry-dylan#35, 2026-09-18).
+        cfg.llm.max_tokens,
     )
     .await?;
     Ok(crate::rack::RackVerdict {
