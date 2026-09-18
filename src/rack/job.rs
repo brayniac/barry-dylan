@@ -102,9 +102,14 @@ provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {max_tokens}
+context_size = {context_size}
 request_timeout_secs = 600
 OFFLINE
 
+# The server log is an artifact whether or not this reviewer started the
+# server (a reviewer sharing a model shares the server, and its log). Touched
+# so that the upload never fails on a file that was never written.
+touch /tmp/llama-{identity}.log
 barry-dylan review-offline \
     --config /tmp/offline-{identity}.toml \
     --files /tmp/changed.json \
@@ -114,6 +119,7 @@ barry-dylan review-offline \
             identity = r.identity,
             model_name = r.model_name,
             max_tokens = cfg.max_tokens,
+            context_size = cfg.context_size,
             artifact = r.artifact(),
         ));
 
@@ -195,6 +201,7 @@ fn job_value(
             "artifacts": reviewers
                 .iter()
                 .map(|r| format!("/tmp/{}", r.artifact()))
+                .chain(reviewers.iter().map(|r| format!("/tmp/{}", r.server_log())))
                 .chain(judging.then(|| format!("/tmp/{VERDICT_ARTIFACT}")))
                 .collect::<Vec<_>>(),
             // Guest-side telemetry around a GPU workload. The hypervisor cannot
@@ -206,6 +213,13 @@ fn job_value(
         steps.push(json!({
             "uses": "upload-artifact",
             "with": { "path": r.artifact() }
+        }));
+        // The llama-server log answers the questions a failed or odd review
+        // raises -- slot count, context per slot, what the model was really
+        // served with -- and until 2026-09-18 it died with the guest.
+        steps.push(json!({
+            "uses": "upload-artifact",
+            "with": { "path": r.server_log() }
         }));
     }
     if judging {
@@ -552,7 +566,8 @@ model_name = "qwen3.5-27b"
         let jobs = s["experiment"]["jobs"].as_object().unwrap();
         assert_eq!(jobs.len(), 1);
         let step = &jobs["review"]["steps"][0];
-        assert_eq!(step["with"]["artifacts"].as_array().unwrap().len(), 2);
+        // A review and a server log per reviewer.
+        assert_eq!(step["with"]["artifacts"].as_array().unwrap().len(), 4);
     }
 
     #[test]
@@ -566,12 +581,13 @@ model_name = "qwen3.5-27b"
         assert!(jobs.contains_key("review-barry"));
         assert!(jobs.contains_key("review-other_barry"));
         for (_, job) in jobs {
+            // A review and a server log for the one reviewer in this job.
             assert_eq!(
                 job["steps"][0]["with"]["artifacts"]
                     .as_array()
                     .unwrap()
                     .len(),
-                1
+                2
             );
         }
     }
@@ -638,6 +654,21 @@ host_tags = ["z1.baremetal"]
         let p = payload(&c, &all(&c), &files()).unwrap();
         assert_eq!(p.matches("-c 8192").count(), 2);
         assert_eq!(p.matches("max_tokens = 512").count(), 2);
+        // review-offline needs the window too, to run the personas in turns
+        // that fit it together.
+        assert_eq!(p.matches("context_size = 8192").count(), 2);
+    }
+
+    #[test]
+    fn the_server_logs_come_back_as_artifacts() {
+        let c = cfg();
+        let s = spec(&c, &files(), "t").unwrap();
+        let s = s.to_string();
+        assert!(s.contains("/tmp/llama-barry.log"), "{s}");
+        assert!(s.contains("/tmp/llama-other_barry.log"), "{s}");
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(p.contains("touch /tmp/llama-barry.log"), "{p}");
+        assert!(p.contains("touch /tmp/llama-other_barry.log"), "{p}");
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub async fn run(cfg: &OfflineConfig, files: &[ChangedFile]) -> anyhow::Result<U
         personas: &personas,
         tracker,
         job_id: OFFLINE_JOB_ID,
+        context_size: cfg.llm.context_size,
     };
 
     let verdict = orchestrator
@@ -119,6 +120,7 @@ mod tests {
             model: "test-model".into(),
             max_tokens: 4096,
             request_timeout_secs: 5,
+            context_size: None,
         }
     }
 

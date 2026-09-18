@@ -102,6 +102,13 @@ pub struct LlmProfile {
     pub max_tokens: u32,
     #[serde(default = "default_llm_timeout")]
     pub request_timeout_secs: u64,
+    /// The context window of the model behind `endpoint`, in tokens, when it
+    /// is known. A local llama-server shares one window across every request
+    /// in flight, so the personas, which run concurrently, must together fit
+    /// in it: prompt plus `max_tokens` each. Absent means "no idea", which is
+    /// true of a hosted API, and the personas run all at once as before.
+    #[serde(default)]
+    pub context_size: Option<u32>,
 }
 
 /// Also the fallback for an identity with no profile at all, which is only

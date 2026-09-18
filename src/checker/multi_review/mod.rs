@@ -126,6 +126,8 @@ impl Checker for MultiReviewChecker {
             personas: &self.personas,
             tracker: self.status_tracker.clone(),
             job_id: ctx.job_id,
+            // In-process reviews talk to hosted APIs, which have no shared window.
+            context_size: None,
         };
 
         // Pre-check: if OB isn't installed on this repo, skip OB's LLM phases
