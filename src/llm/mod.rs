@@ -28,7 +28,7 @@
 //!     pub system: Option<String>,  // System prompt
 //!     pub messages: Vec<LlmMessage>,
 //!     pub max_tokens: u32,
-//!     pub temperature: f32,
+//!     pub temperature: Option<f32>,
 //! }
 //! ```
 //!
@@ -117,7 +117,13 @@ pub struct LlmRequest {
     pub system: Option<String>,
     pub messages: Vec<LlmMessage>,
     pub max_tokens: u32,
-    pub temperature: f32,
+    /// Sampling temperature, or `None` to leave it to the endpoint. For a
+    /// local llama-server that means the model's own recommendation, read
+    /// from the GGUF (`general.sampling.*`); Qwen's thinking models ship
+    /// 1.0 / top_p 0.95 / top_k 20 and document that greedy decoding
+    /// degrades them and can loop. barry pinned 0.0 everywhere until
+    /// 2026-09-18.
+    pub temperature: Option<f32>,
     pub response_schema: Option<serde_json::Value>,
 }
 
@@ -222,7 +228,7 @@ mod tests {
             system: None,
             messages: vec![],
             max_tokens: 100,
-            temperature: 0.0,
+            temperature: None,
             response_schema: Some(schema.clone()),
         };
         assert_eq!(req.response_schema, Some(schema));

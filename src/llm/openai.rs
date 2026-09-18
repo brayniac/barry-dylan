@@ -7,6 +7,9 @@ pub struct OpenAiClient {
     endpoint: String,
     api_key: Option<String>,
     model: String,
+    /// Applied when a request leaves temperature unset; `None` leaves it to
+    /// the server, which for llama-server is the model's own recommendation.
+    temperature: Option<f32>,
 }
 
 impl OpenAiClient {
@@ -21,7 +24,14 @@ impl OpenAiClient {
             endpoint,
             api_key,
             model,
+            temperature: None,
         }
+    }
+
+    /// Temperature to apply when a request leaves it unset.
+    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
     }
 }
 
@@ -71,10 +81,12 @@ impl OpenAiClient {
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
-            "temperature": req.temperature,
             "messages": messages,
             "cache_prompt": true,
         });
+        if let Some(t) = req.temperature.or(self.temperature) {
+            body["temperature"] = serde_json::json!(t);
+        }
         if let Some(schema) = &req.response_schema {
             body["response_format"] = serde_json::json!({
                 "type": "json_schema",
@@ -155,7 +167,7 @@ mod tests {
                     content: "q".into(),
                 }],
                 max_tokens: 32,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: None,
             })
             .await
@@ -181,7 +193,7 @@ mod tests {
                     content: "q".into(),
                 }],
                 max_tokens: 32,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: None,
             })
             .await
@@ -210,7 +222,7 @@ mod tests {
                     content: "go".into(),
                 }],
                 max_tokens: 10,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: None,
             })
             .await
@@ -238,7 +250,7 @@ mod tests {
                     content: "go".into(),
                 }],
                 max_tokens: 100,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: None,
             })
             .await
@@ -271,13 +283,76 @@ mod tests {
                     content: "go".into(),
                 }],
                 max_tokens: 1024,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: Some(schema),
             })
             .await
             .unwrap();
         // response text is the JSON string from content
         assert!(r.text.contains("approve"));
+    }
+
+    async fn body_of_first_request(server: &MockServer) -> serde_json::Value {
+        let reqs = server.received_requests().await.unwrap_or_default();
+        serde_json::from_slice(&reqs[0].body).unwrap()
+    }
+
+    fn ask(temperature: Option<f32>) -> LlmRequest {
+        LlmRequest {
+            system: None,
+            messages: vec![LlmMessage {
+                role: Role::User,
+                content: "q".into(),
+            }],
+            max_tokens: 32,
+            temperature,
+            response_schema: None,
+        }
+    }
+
+    async fn ok_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [ { "message": { "content": "ok" } } ]
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn temperature_is_omitted_unless_someone_sets_it() {
+        // Omitted, llama-server uses the model's own recommendation, which
+        // for a thinking model is not greedy.
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        c.complete(&ask(None)).await.unwrap();
+        assert!(
+            body_of_first_request(&server)
+                .await
+                .get("temperature")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_profile_temperature_applies_when_the_request_has_none() {
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into())
+            .with_temperature(Some(0.7));
+        c.complete(&ask(None)).await.unwrap();
+        assert_eq!(body_of_first_request(&server).await["temperature"], 0.7);
+    }
+
+    #[tokio::test]
+    async fn a_request_temperature_wins_over_the_profile() {
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into())
+            .with_temperature(Some(0.7));
+        c.complete(&ask(Some(0.0))).await.unwrap();
+        assert_eq!(body_of_first_request(&server).await["temperature"], 0.0);
     }
 
     #[tokio::test]
@@ -299,7 +374,7 @@ mod tests {
                     content: "q".into(),
                 }],
                 max_tokens: 32,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: None,
             })
             .await

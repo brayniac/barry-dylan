@@ -46,7 +46,7 @@ pub async fn run_persona(
             ),
         }],
         max_tokens,
-        temperature: 0.0,
+        temperature: None,
         response_schema: None,
     };
     let resp = client.complete(&req).await?;
@@ -79,7 +79,7 @@ pub async fn synthesize(
             content: user,
         }],
         max_tokens,
-        temperature: 0.0,
+        temperature: None,
         response_schema: Some(review_schema()),
     };
     let mut resp = client.complete(&req).await?;

@@ -230,7 +230,7 @@ mod tests {
             system: None,
             messages: vec![],
             max_tokens: 1,
-            temperature: 0.0,
+            temperature: None,
             response_schema: None,
         }))
         .unwrap_err();

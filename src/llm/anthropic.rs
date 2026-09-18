@@ -7,6 +7,9 @@ pub struct AnthropicClient {
     endpoint: String,
     api_key: Option<String>,
     model: String,
+    /// Applied when a request leaves temperature unset; `None` omits it and
+    /// the API uses its default.
+    temperature: Option<f32>,
 }
 
 impl AnthropicClient {
@@ -21,7 +24,14 @@ impl AnthropicClient {
             endpoint,
             api_key,
             model,
+            temperature: None,
         }
+    }
+
+    /// Temperature to apply when a request leaves it unset.
+    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
     }
 }
 
@@ -72,9 +82,11 @@ impl AnthropicClient {
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
-            "temperature": req.temperature,
             "messages": messages,
         });
+        if let Some(t) = req.temperature.or(self.temperature) {
+            body["temperature"] = serde_json::json!(t);
+        }
         if let Some(sys) = &req.system {
             body["system"] = serde_json::Value::String(sys.clone());
         }
@@ -169,7 +181,7 @@ mod tests {
                     content: "go".into(),
                 }],
                 max_tokens: 64,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: None,
             })
             .await
@@ -199,7 +211,7 @@ mod tests {
                     content: "go".into(),
                 }],
                 max_tokens: 10,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: None,
             })
             .await
@@ -234,7 +246,7 @@ mod tests {
                     content: "go".into(),
                 }],
                 max_tokens: 1024,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: Some(schema),
             })
             .await
@@ -266,7 +278,7 @@ mod tests {
                     content: "go".into(),
                 }],
                 max_tokens: 100,
-                temperature: 0.0,
+                temperature: None,
                 response_schema: None,
             })
             .await

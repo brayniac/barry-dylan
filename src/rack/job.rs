@@ -91,7 +91,7 @@ curl -sf http://127.0.0.1:8080/health >/dev/null \
 "#,
                 identity = r.identity,
                 model = r.model,
-                context = cfg.context_size,
+                context = r.context_size(cfg),
             ));
         }
 
@@ -103,7 +103,7 @@ endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {max_tokens}
 context_size = {context_size}
-request_timeout_secs = 600
+{temperature}request_timeout_secs = 600
 OFFLINE
 
 # The server log is an artifact whether or not this reviewer started the
@@ -119,7 +119,8 @@ barry-dylan review-offline \
             identity = r.identity,
             model_name = r.model_name,
             max_tokens = cfg.max_tokens,
-            context_size = cfg.context_size,
+            context_size = r.context_size(cfg),
+            temperature = temperature_line(cfg),
             artifact = r.artifact(),
         ));
 
@@ -145,7 +146,7 @@ provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {judge_max_tokens}
-request_timeout_secs = 600
+{temperature}request_timeout_secs = 600
 OFFLINE
 
 barry-dylan judge-offline \
@@ -158,6 +159,7 @@ barry-dylan judge-offline \
 "#,
                 model_name = r.model_name,
                 judge_max_tokens = cfg.judge_max_tokens,
+                temperature = temperature_line(cfg),
                 a_artifact = a.artifact(),
                 b_artifact = b.artifact(),
                 verdict = VERDICT_ARTIFACT,
@@ -181,6 +183,15 @@ wait $SERVER_PID 2>/dev/null || true
 }
 
 /// Build one job's steps for the given reviewers.
+/// The `temperature = ` line for a guest-side `[llm]` profile, or nothing:
+/// absent means llama-server uses the model's own recommendation.
+fn temperature_line(cfg: &RackConfig) -> String {
+    match cfg.temperature {
+        Some(t) => format!("temperature = {t}\n"),
+        None => String::new(),
+    }
+}
+
 fn job_value(
     cfg: &RackConfig,
     reviewers: &[&Reviewer],
@@ -657,6 +668,32 @@ host_tags = ["z1.baremetal"]
         // review-offline needs the window too, to run the personas in turns
         // that fit it together.
         assert_eq!(p.matches("context_size = 8192").count(), 2);
+    }
+
+    #[test]
+    fn a_reviewer_can_have_its_own_context_window() {
+        // gemma-4-31B fits the card at 32k beside a 27B at 64k.
+        let mut c = cfg();
+        c.context_size = 65536;
+        c.reviewers[1].context_size = Some(32768);
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert_eq!(p.matches("-c 65536").count(), 1, "{p}");
+        assert_eq!(p.matches("-c 32768").count(), 1, "{p}");
+        assert_eq!(p.matches("context_size = 65536").count(), 1);
+        assert_eq!(p.matches("context_size = 32768").count(), 1);
+    }
+
+    #[test]
+    fn temperature_is_left_to_the_model_unless_set() {
+        let c = cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(!p.contains("temperature"), "{p}");
+
+        let mut c = judging_cfg();
+        c.temperature = Some(0.7);
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        // Both reviewers and the judge.
+        assert_eq!(p.matches("temperature = 0.7").count(), 3, "{p}");
     }
 
     #[test]

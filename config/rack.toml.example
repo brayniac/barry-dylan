@@ -100,6 +100,11 @@ model_name = "qwen3.5-9b"
 # `sequential` both of these are ignored.
 # shape = "z1.g"
 # host_tags = ["z1.baremetal"]
+# A window of its own, when the model needs it to fit: gemma-4-31B at q4_k_m is
+# 17.4 GiB of weights plus 5 GiB of KV cache at 65536, over the 24 GB card, and
+# fits at 32768. Reviewers sharing a model share the first one's server and
+# window.
+# context_size = 32768
 
 # llama-server context window. A review sends whole patches, so context is
 # usually the scarce resource rather than parameters -- a 9B q4 is 5.4 GiB on a
@@ -110,6 +115,13 @@ model_name = "qwen3.5-9b"
 
 # Cap on a single completion inside the guest.
 # max_tokens = 4096
+
+# Sampling temperature for the reviewers and the in-guest judge. Absent leaves
+# it to llama-server, which uses the model's own recommendation from the GGUF
+# (Qwen's thinking models ship 1.0 / top_p 0.95 / top_k 20 and document that
+# greedy decoding degrades them and can loop). Set it only to pin a model that
+# recommends nothing sensible.
+# temperature = 0.7
 
 # How often to ask whether the experiment has finished.
 # poll_interval_secs = 10
