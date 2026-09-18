@@ -114,6 +114,9 @@ request_timeout_secs = 300
 # waiting for it and worth nothing when they are not, so a busy rack gets a
 # quick "the rack was busy" rather than a place in the queue.
 # queue_timeout_secs = 900
+# Queue position when the rack is contended: 300 is "advisory review" in
+# infra's priorities guide, below claimed measurements (350) and gating CI (400).
+# priority = 300
 # The in-guest judge's completion cap. Not 512: a model that reasons before
 # answering spends that thinking and returns nothing.
 # judge_max_tokens = 4096
