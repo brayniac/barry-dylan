@@ -21,6 +21,7 @@ pub enum SynthesisError {
     Truncated,
 }
 
+#[derive(Debug)]
 pub struct PersonaDraft {
     pub persona: &'static str,
     pub raw: String,

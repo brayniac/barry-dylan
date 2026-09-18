@@ -357,8 +357,8 @@ impl<'a> Orchestrator<'a> {
             .map(|(p, diff)| p.prompt.len() + diff.len())
             .max()
             .unwrap_or(0);
-        let at_once =
-            persona_concurrency(self.context_size, max_tokens, largest, self.personas.len());
+        let context_size = self.clients.context_size_for(identity);
+        let at_once = persona_concurrency(context_size, max_tokens, largest, self.personas.len());
         if at_once < self.personas.len() {
             tracing::info!(
                 at_once,
