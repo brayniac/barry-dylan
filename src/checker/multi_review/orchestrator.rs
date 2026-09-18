@@ -915,7 +915,8 @@ mod tests {
     async fn invalid_synthesis_json_falls_back_to_the_drafts() {
         // Barry: two drafts, then two malformed syntheses (the retry inside
         // synthesize), then nothing else: the review is built from the drafts.
-        let bad = || ok_resp(r#"{"outcome":"approve","summary":"unterminated,"findings":[]}"#);
+        // Cut off mid-string: unmistakably not JSON.
+        let bad = || ok_resp(r#"{"outcome":"approve","summary":"cut off mid"#);
         let c = clients(
             vec![Ok(bad()), Ok(bad()), Ok(approve()), Ok(approve())],
             vec![Ok(approve()), Ok(approve())],

@@ -475,9 +475,12 @@ mod tests {
         assert!(matches!(err, SynthesisError::Truncated));
     }
 
+    /// Cut off mid-string, so no reader mistakes it for valid JSON. (Both
+    /// reviewers of #48 did, on an earlier fixture whose flaw was a quote in
+    /// the wrong place; it was invalid, but not visibly so.)
     fn invalid_json() -> LlmResponse {
         LlmResponse {
-            text: r#"{"outcome":"approve","summary":"unterminated,"findings":[]}"#.into(),
+            text: r#"{"outcome":"approve","summary":"cut off mid"#.into(),
             input_tokens: Some(10),
             output_tokens: Some(20),
             finish_reason: Some(FinishReason::Stop),
