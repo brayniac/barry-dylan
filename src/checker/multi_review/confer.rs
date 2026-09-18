@@ -197,7 +197,7 @@ async fn run_unified(
         total.output += draft.tokens.output;
         drafts.push(draft);
     }
-    let (r, synth_tokens) = synthesis::synthesize(client, &drafts, diff, max_tokens)
+    let (r, synth_tokens) = synthesis::synthesize(client, &drafts, diff, None, max_tokens)
         .await
         .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"))?;
     total.input += synth_tokens.input;

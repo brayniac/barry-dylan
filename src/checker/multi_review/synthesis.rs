@@ -75,16 +75,36 @@ pub async fn run_persona(
 }
 
 /// Run synthesis over N persona drafts and return a parsed UnifiedReview.
+///
+/// With `peer`, this is the second round: the reviewer sees the other
+/// reviewer's first-round review and revises. Findings that do not overlap
+/// are complementary, not a disagreement, and the reviewer is told so; what
+/// reaches the judge is then two positions that have each read the other,
+/// and "disagree" means contradiction rather than different coverage.
 pub async fn synthesize(
     client: &dyn LlmClient,
     drafts: &[PersonaDraft],
     diff_block: &str,
+    peer: Option<&UnifiedReview>,
     max_tokens: u32,
 ) -> Result<(UnifiedReview, TokenCount), SynthesisError> {
     let mut user = String::from(SYNTHESIS_TEMPLATE);
     user.push_str("\n\n=== persona drafts ===\n");
     for d in drafts {
         user.push_str(&format!("--- {} ---\n{}\n", d.persona, d.raw));
+    }
+    if let Some(peer) = peer {
+        user.push_str("\n=== the other reviewer's review of the same diff ===\n");
+        user.push_str(&serde_json::to_string_pretty(peer).unwrap_or_default());
+        user.push_str(
+            "\n=== end of the other review ===\n\
+             Treat it as a colleague's first pass over the same code. Adopt the findings \
+             you agree with, keeping their file and line. Drop findings of yours that it \
+             convincingly rebuts. Keep findings of yours that it simply did not cover: \
+             different coverage is complementary, not a disagreement. Contradict it only \
+             where you actually disagree about the code or the outcome, and say so in the \
+             summary. Do not name the other reviewer.\n",
+        );
     }
     let req = LlmRequest {
         system: Some(diff_block.to_string()),
@@ -116,17 +136,60 @@ pub async fn synthesize(
     Ok((parse(&resp.text)?, tokens))
 }
 
-pub fn review_from_drafts(drafts: &[PersonaDraft]) -> UnifiedReview {
-    let summary = drafts
-        .iter()
-        .map(|d| format!("**{}**\n{}", d.persona, d.raw))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    UnifiedReview {
+/// What a persona draft is asked to contain. Tolerant on the way in: a draft
+/// with only a summary, or only findings, still counts.
+#[derive(serde::Deserialize)]
+struct Draft {
+    #[serde(default)]
+    findings: Vec<crate::checker::multi_review::review::UnifiedFinding>,
+    #[serde(default)]
+    summary: String,
+}
+
+/// A review assembled from the persona drafts when synthesis could not run.
+///
+/// Each draft is parsed as the JSON the persona was asked for and rendered as
+/// prose; its findings become the review's findings. Drafts that are empty
+/// or not JSON are left out. `None` when nothing was usable: that is not a
+/// review, and until 2026-09-18 it was posted anyway as four empty headings
+/// (infra#17), or as raw JSON under a heading (infra#15, infra#22).
+pub fn review_from_drafts(drafts: &[PersonaDraft]) -> Option<UnifiedReview> {
+    let mut lines = Vec::new();
+    let mut findings = Vec::new();
+    for d in drafts {
+        let Some(json) = super::parse_util::locate_json(&d.raw) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<Draft>(json) else {
+            continue;
+        };
+        let summary = parsed.summary.trim();
+        if summary.is_empty() && parsed.findings.is_empty() {
+            continue;
+        }
+        lines.push(format!(
+            "**{}**: {}",
+            d.persona,
+            if summary.is_empty() {
+                "(findings only)"
+            } else {
+                summary
+            }
+        ));
+        findings.extend(parsed.findings);
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut summary = String::from(
+        "Synthesis did not complete, so these are the reviewer's own drafts, unreconciled.\n\n",
+    );
+    summary.push_str(&lines.join("\n"));
+    Some(UnifiedReview {
         outcome: crate::checker::multi_review::review::Outcome::Comment,
         summary,
-        findings: vec![],
-    }
+        findings,
+    })
 }
 
 fn review_schema() -> serde_json::Value {
@@ -296,7 +359,7 @@ mod tests {
                 tokens: TokenCount::default(),
             },
         ];
-        let (r, _) = synthesize(&client, &drafts, "DIFF-BLOCK", 1024)
+        let (r, _) = synthesize(&client, &drafts, "DIFF-BLOCK", None, 1024)
             .await
             .unwrap();
         assert_eq!(
@@ -362,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn synthesize_retries_once_on_length_then_succeeds() {
         let client = ScriptedClient(Mutex::new(vec![truncated(), ok_review()]));
-        let (review, _) = synthesize(&client, &[], "diff", 1024).await.unwrap();
+        let (review, _) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
         assert_eq!(
             review.outcome,
             crate::checker::multi_review::review::Outcome::Approve
@@ -372,43 +435,100 @@ mod tests {
     #[tokio::test]
     async fn synthesize_returns_truncated_after_both_attempts_fail() {
         let client = ScriptedClient(Mutex::new(vec![truncated(), truncated()]));
-        let err = synthesize(&client, &[], "diff", 1024).await.unwrap_err();
+        let err = synthesize(&client, &[], "diff", None, 1024)
+            .await
+            .unwrap_err();
         assert!(matches!(err, SynthesisError::Truncated));
     }
 
     #[tokio::test]
     async fn synthesize_does_not_retry_on_stop() {
         let client = ScriptedClient(Mutex::new(vec![ok_review()]));
-        let (review, _) = synthesize(&client, &[], "diff", 1024).await.unwrap();
+        let (review, _) = synthesize(&client, &[], "diff", None, 1024).await.unwrap();
         assert_eq!(
             review.outcome,
             crate::checker::multi_review::review::Outcome::Approve
         );
     }
 
+    #[tokio::test]
+    async fn the_peer_round_shows_the_other_review_and_how_to_treat_it() {
+        let recorded = Arc::new(Mutex::new(vec![]));
+        let client = StubClient {
+            responses: Mutex::new(vec![
+                r#"{"outcome":"comment","summary":"revised","findings":[]}"#.into(),
+            ]),
+            recorded: recorded.clone(),
+        };
+        let peer = crate::checker::multi_review::review::parse(
+            r#"{"outcome":"approve","summary":"PEER-SAID-THIS","findings":[{"file":"b.rs","line":9,"message":"peer finding"}]}"#,
+        )
+        .unwrap();
+        let drafts = vec![PersonaDraft {
+            persona: "security",
+            raw: "sd".into(),
+            tokens: TokenCount::default(),
+        }];
+        let (r, _) = synthesize(&client, &drafts, "diff", Some(&peer), 1024)
+            .await
+            .unwrap();
+        assert_eq!(r.summary, "revised");
+        let user = &recorded.lock().unwrap()[0].messages[0].content;
+        assert!(user.contains("PEER-SAID-THIS"), "{user}");
+        assert!(user.contains("peer finding"), "{user}");
+        assert!(user.contains("complementary, not a disagreement"), "{user}");
+    }
+
     #[test]
-    fn review_from_drafts_produces_comment_with_draft_text() {
+    fn drafts_are_rendered_as_prose_with_their_findings() {
         let drafts = vec![
             PersonaDraft {
                 persona: "security",
-                raw: "looks fine".into(),
+                raw: r#"{"findings":[],"summary":"No security issues."}"#.into(),
+                tokens: TokenCount::default(),
+            },
+            PersonaDraft {
+                persona: "correctness",
+                raw: "".into(),
                 tokens: TokenCount::default(),
             },
             PersonaDraft {
                 persona: "rust",
-                raw: "idiomatic".into(),
+                raw: "```json\n{\"findings\":[{\"file\":\"a.rs\",\"line\":4,\"message\":\"unwrap\"}],\"summary\":\"One unwrap.\"}\n```".into(),
                 tokens: TokenCount::default(),
             },
         ];
-        let r = review_from_drafts(&drafts);
+        let r = review_from_drafts(&drafts).expect("two usable drafts");
         assert_eq!(
             r.outcome,
             crate::checker::multi_review::review::Outcome::Comment
         );
-        assert!(r.summary.contains("security"));
-        assert!(r.summary.contains("looks fine"));
-        assert!(r.summary.contains("rust"));
-        assert!(r.summary.contains("idiomatic"));
-        assert!(r.findings.is_empty());
+        assert!(
+            r.summary.contains("**security**: No security issues."),
+            "{}",
+            r.summary
+        );
+        assert!(r.summary.contains("**rust**: One unwrap."), "{}", r.summary);
+        assert!(!r.summary.contains("correctness"), "{}", r.summary);
+        assert!(!r.summary.contains("{\""), "raw JSON leaked: {}", r.summary);
+        assert_eq!(r.findings.len(), 1);
+        assert_eq!(r.findings[0].line, 4);
+    }
+
+    #[test]
+    fn no_usable_draft_is_no_review() {
+        let drafts = vec![
+            PersonaDraft {
+                persona: "security",
+                raw: "   ".into(),
+                tokens: TokenCount::default(),
+            },
+            PersonaDraft {
+                persona: "rust",
+                raw: "not json at all".into(),
+                tokens: TokenCount::default(),
+            },
+        ];
+        assert!(review_from_drafts(&drafts).is_none());
     }
 }

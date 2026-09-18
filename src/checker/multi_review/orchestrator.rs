@@ -77,6 +77,22 @@ pub fn persona_concurrency(
     fit.clamp(1, personas.max(1))
 }
 
+/// Barry alone, from the persona drafts, when synthesis could not run.
+///
+/// An error rather than a review when no draft was usable: the check-run
+/// then says what happened instead of four empty headings.
+fn barry_from_drafts(drafts: &[PersonaDraft], reason: &str) -> anyhow::Result<Verdict> {
+    match synthesis::review_from_drafts(drafts) {
+        Some(barry) => Ok(Verdict::BarryAlone {
+            barry,
+            reason: reason.into(),
+        }),
+        None => Err(anyhow::anyhow!(
+            "{reason}, and no persona draft was usable to review from"
+        )),
+    }
+}
+
 impl<'a> Orchestrator<'a> {
     pub async fn run(&self, files: &[ChangedFile]) -> anyhow::Result<Verdict> {
         let span = tracing::info_span!("orchestrator.run", files = files.len());
@@ -114,7 +130,7 @@ impl<'a> Orchestrator<'a> {
                     .add_tokens(self.job_id, barry_draft_tokens, barry_draft_tokens_out);
                 self.tracker.set_phase(self.job_id, "R1 synthesis");
                 let (barry_r1, r1_tokens) = match self
-                    .synthesize_for(Identity::Barry, &diff, &barry_drafts)
+                    .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
                     .await
                 {
                     Ok(t) => t,
@@ -123,10 +139,7 @@ impl<'a> Orchestrator<'a> {
                             "barry R1 synthesis truncated; using persona-draft fallback"
                         );
                         metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis").increment(1);
-                        return Ok(Verdict::BarryAlone {
-                            barry: synthesis::review_from_drafts(&barry_drafts),
-                            reason: "synthesis truncated".into(),
-                        });
+                        return barry_from_drafts(&barry_drafts, "synthesis truncated");
                     }
                     Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
                 };
@@ -158,8 +171,8 @@ impl<'a> Orchestrator<'a> {
         tracing::debug!("R1 synthesis starting");
         let r1_start = std::time::Instant::now();
         let (barry_r1_res, ob_r1_res) = tokio::join!(
-            self.synthesize_for(Identity::Barry, &diff, &barry_drafts),
-            self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts),
+            self.synthesize_for(Identity::Barry, &diff, &barry_drafts, None),
+            self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts, None),
         );
         let (barry_r1, barry_r1_tokens) = match barry_r1_res {
             Ok(t) => t,
@@ -167,10 +180,7 @@ impl<'a> Orchestrator<'a> {
                 tracing::warn!("barry R1 synthesis truncated; using persona-draft fallback");
                 metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
                     .increment(1);
-                return Ok(Verdict::BarryAlone {
-                    barry: synthesis::review_from_drafts(&barry_drafts),
-                    reason: "synthesis truncated".into(),
-                });
+                return barry_from_drafts(&barry_drafts, "synthesis truncated");
             }
             Err(e) => return Err(anyhow::anyhow!("barry R1 failed: {e}")),
         };
@@ -200,7 +210,50 @@ impl<'a> Orchestrator<'a> {
             barry_r1_tokens.output + ob_r1_tokens.output,
         );
 
-        Ok(self.judge_reviews(barry_r1, ob_r1).await)
+        // Phase 3: the peer round. Each reviewer reads the other's first
+        // review and revises, in parallel. Removed on 2026-05-21 (#34) when a
+        // synthesis call was a round trip to a hosted model; restored on
+        // 2026-09-18 when it is ~45 s against a local one, because without it
+        // the judge was posting two reviews that raised the same concern in
+        // different words as a "disagreement", and reviews with disjoint
+        // findings as one too. A reviewer whose second round fails keeps its
+        // first: one revised review is still better than none.
+        self.tracker.set_phase(self.job_id, "peer round");
+        let r2_start = std::time::Instant::now();
+        let (barry_r2_res, ob_r2_res) = tokio::join!(
+            self.synthesize_for(Identity::Barry, &diff, &barry_drafts, Some(&ob_r1)),
+            self.synthesize_for(Identity::OtherBarry, &diff, &ob_drafts, Some(&barry_r1)),
+        );
+        let mut tokens_in = 0;
+        let mut tokens_out = 0;
+        let mut settle = |identity: &str,
+                          res: Result<(UnifiedReview, TokenCount), SynthesisError>,
+                          r1: UnifiedReview| match res {
+            Ok((r2, t)) => {
+                tokens_in += t.input;
+                tokens_out += t.output;
+                metrics::counter!("barry_multi_review_peer_round_total", "outcome" => "revised")
+                    .increment(1);
+                r2
+            }
+            Err(e) => {
+                tracing::warn!(identity, ?e, "peer round failed; keeping the first review");
+                metrics::counter!("barry_multi_review_peer_round_total", "outcome" => "kept_first")
+                    .increment(1);
+                r1
+            }
+        };
+        let barry = settle("barry", barry_r2_res, barry_r1);
+        let other = settle("other_barry", ob_r2_res, ob_r1);
+        self.tracker.add_tokens(self.job_id, tokens_in, tokens_out);
+        tracing::info!(
+            duration_ms = r2_start.elapsed().as_millis() as u64,
+            barry_outcome = ?barry.outcome,
+            ob_outcome = ?other.outcome,
+            "peer round complete"
+        );
+
+        Ok(self.judge_reviews(barry, other).await)
     }
 
     /// Reconcile two finished reviews into a verdict.
@@ -306,7 +359,7 @@ impl<'a> Orchestrator<'a> {
             .add_tokens(self.job_id, draft_tok_in, draft_tok_out);
         self.tracker.set_phase(self.job_id, "R1 synthesis");
         let (barry_r1, r1_tokens) = match self
-            .synthesize_for(Identity::Barry, &diff, &barry_drafts)
+            .synthesize_for(Identity::Barry, &diff, &barry_drafts, None)
             .await
         {
             Ok(t) => t,
@@ -316,10 +369,7 @@ impl<'a> Orchestrator<'a> {
                 );
                 metrics::counter!("barry_multi_review_truncated_total", "phase" => "r1_synthesis")
                     .increment(1);
-                return Ok(Verdict::BarryAlone {
-                    barry: synthesis::review_from_drafts(&barry_drafts),
-                    reason: "synthesis truncated".into(),
-                });
+                return barry_from_drafts(&barry_drafts, "synthesis truncated");
             }
             Err(e) => return Err(anyhow::anyhow!("barry synthesis failed: {e}")),
         };
@@ -423,12 +473,13 @@ impl<'a> Orchestrator<'a> {
         identity: Identity,
         diff: &str,
         drafts: &[PersonaDraft],
+        peer: Option<&UnifiedReview>,
     ) -> Result<(UnifiedReview, TokenCount), synthesis::SynthesisError> {
         let client = self.clients.for_identity(identity);
         let max_tokens = self.clients.max_tokens_for(identity);
         let start = std::time::Instant::now();
 
-        let result = synthesis::synthesize(client.as_ref(), drafts, diff, max_tokens).await;
+        let result = synthesis::synthesize(client.as_ref(), drafts, diff, peer, max_tokens).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         match result {
@@ -732,9 +783,10 @@ mod tests {
 
     #[tokio::test]
     async fn disagreement_returns_both() {
+        // Two drafts, a first review and a revised one per reviewer.
         let c = clients(
-            vec![Ok(approve()), Ok(approve()), Ok(approve())],
-            vec![Ok(comment()), Ok(comment()), Ok(comment())],
+            vec![Ok(approve()), Ok(approve()), Ok(approve()), Ok(approve())],
+            vec![Ok(comment()), Ok(comment()), Ok(comment()), Ok(comment())],
             vec![Ok(disagree())],
         );
         let p = personas();
@@ -756,6 +808,87 @@ mod tests {
                 assert_eq!(barry.outcome, Outcome::Approve);
                 assert_eq!(other_barry.outcome, Outcome::Comment);
                 assert_eq!(reason, "diff");
+            }
+            other => panic!("wanted Disagree, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_judge_sees_the_second_round_not_the_first() {
+        // Per reviewer, popped last-first: two drafts, R1, then R2 with the
+        // other's R1 in hand. The judge must be shown the R2s.
+        let c = clients(
+            vec![
+                Ok(ok_resp(
+                    r#"{"outcome":"approve","summary":"barry revised","findings":[]}"#,
+                )),
+                Ok(comment()),
+                Ok(approve()),
+                Ok(approve()),
+            ],
+            vec![
+                Ok(ok_resp(
+                    r#"{"outcome":"approve","summary":"ob revised","findings":[]}"#,
+                )),
+                Ok(comment()),
+                Ok(approve()),
+                Ok(approve()),
+            ],
+            vec![Ok(agree())],
+        );
+        let p = personas();
+        let v = Orchestrator {
+            clients: &c,
+            personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
+        }
+        .run(&[file()])
+        .await
+        .unwrap();
+        match v {
+            Verdict::Agree { barry } => assert_eq!(barry.summary, "barry revised"),
+            other => panic!("wanted Agree, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_second_round_keeps_that_reviewers_first() {
+        let c = clients(
+            vec![
+                Err("r2 down"),
+                Ok(ok_resp(
+                    r#"{"outcome":"comment","summary":"barry first","findings":[]}"#,
+                )),
+                Ok(approve()),
+                Ok(approve()),
+            ],
+            vec![
+                Ok(ok_resp(
+                    r#"{"outcome":"comment","summary":"ob revised","findings":[]}"#,
+                )),
+                Ok(comment()),
+                Ok(approve()),
+                Ok(approve()),
+            ],
+            vec![Ok(disagree())],
+        );
+        let p = personas();
+        let v = Orchestrator {
+            clients: &c,
+            personas: &p,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 0,
+        }
+        .run(&[file()])
+        .await
+        .unwrap();
+        match v {
+            Verdict::Disagree {
+                barry, other_barry, ..
+            } => {
+                assert_eq!(barry.summary, "barry first");
+                assert_eq!(other_barry.summary, "ob revised");
             }
             other => panic!("wanted Disagree, got {other:?}"),
         }
