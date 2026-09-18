@@ -269,6 +269,8 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         status_tracker.clone(),
         rack,
     ));
+    // One registry for the dispatcher, which registers each job's token, and
+    // the webhook handler, which fires it when the PR's head moves.
     let cancel_registry = crate::dispatcher::cancel::CancelRegistry::new();
     let deps = Arc::new(JobDeps {
         store: store.clone(),
@@ -278,7 +280,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         clients: Some(clients),
         personas: Some(personas),
         status_tracker: status_tracker.clone(),
-        cancel_registry,
+        cancel_registry: cancel_registry.clone(),
     });
 
     // Shared cancellation token for graceful shutdown.
@@ -346,6 +348,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         debounce_secs: cfg.dispatcher.debounce_secs,
         repos,
         commanders,
+        cancel_registry,
         relay: relay_status,
     };
     let router = crate::webhook::server::router(app_state);

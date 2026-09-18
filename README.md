@@ -229,6 +229,7 @@ column is the further check each command makes after that.
 - **HMAC-SHA256 verification** — Webhook signatures verified with constant-time compare (`subtle::ConstantTimeEq`) before any payload is parsed
 - **Key file permissions** — Private key `.pem` files must be mode `0600` or stricter; Barry refuses to start otherwise
 - **Trust gate** — Authors with read permission require `/barry approve` from a maintainer before review runs. Approval is sticky for the PR lifetime.
+- **No stale reviews** — A push cancels the review in flight for the head it replaced, on the rack included, and the new head is reviewed after the debounce. A close cancels it outright. And whatever the webhooks said, nothing is posted without re-checking that the PR is still open and its head is still the commit that was reviewed.
 - **Endpoint validation** — `provider = "anthropic"` is rejected with non-anthropic endpoint hosts, preventing misconfiguration from leaking diffs to wrong LLM endpoints
 - **Diff exposure** — Code diffs are sent to configured LLM endpoints. Do not run on repos containing secrets or PII that should not leave your environment
 
@@ -242,6 +243,8 @@ The `/metrics` endpoint exposes Prometheus metrics:
 - `barry_relay_events_total{event}`, `barry_relay_rejected_total{reason}`
 - `barry_rack_judge_total{outcome="verdict"|"missing"|"invalid"}`
 - `barry_confer_total{outcome="ob"|"oob"|"rejected_unauthorized"|"rejected_max_reached"|"rejected_no_run"|"rejected_all_posted"}`
+- `barry_review_superseded_total{by="push"}` — a push cancelled the review in flight for the old head
+- `barry_review_stale_total{reason="head_moved"|"closed"}` — an outcome was ready but the PR had moved on, so it was not posted
 - Job, webhook, and queue counters
 
 ## Build & Test

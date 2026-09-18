@@ -32,8 +32,10 @@ impl CancelRegistry {
         token
     }
 
-    /// Cancel (and remove) the token for this PR. Called by `handle_pr_closed`.
-    pub async fn cancel(&self, owner: &str, repo: &str, pr: i64) {
+    /// Cancel (and remove) the token for this PR. Called when the PR is
+    /// closed and when its head moves; either way the review in flight is of
+    /// a commit nobody is waiting on any more. Returns whether there was one.
+    pub async fn cancel(&self, owner: &str, repo: &str, pr: i64) -> bool {
         if let Some(token) = self
             .inner
             .lock()
@@ -41,6 +43,9 @@ impl CancelRegistry {
             .remove(&(owner.into(), repo.into(), pr))
         {
             token.cancel();
+            true
+        } else {
+            false
         }
     }
 
@@ -56,6 +61,16 @@ impl CancelRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancel_says_whether_anything_was_in_flight() {
+        let reg = CancelRegistry::new();
+        assert!(!reg.cancel("o", "r", 1).await, "nothing registered yet");
+        let token = reg.register("o", "r", 1).await;
+        assert!(reg.cancel("o", "r", 1).await, "the review in flight");
+        assert!(token.is_cancelled());
+        assert!(!reg.cancel("o", "r", 1).await, "already gone");
+    }
 
     #[tokio::test]
     async fn register_returns_uncancelled_token() {

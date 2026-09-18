@@ -115,6 +115,9 @@ pub struct AppState {
     /// allowlist, and a comment from one of them gets through that allowlist
     /// too: a commander can ask for a review anywhere the Apps are installed.
     pub commanders: Arc<Commanders>,
+    /// In-flight reviews, so a push can stop the review of the head it just
+    /// replaced. Shared with the dispatcher, which registers each job here.
+    pub cancel_registry: crate::dispatcher::cancel::CancelRegistry,
     /// Present when events arrive through [`crate::relay`] rather than
     /// directly. Reported by `/healthz`: smee keeps no backlog, so a relay
     /// that has quietly stopped looks exactly like a repository where nobody
@@ -299,6 +302,25 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                 .put_installation("barry", &owner, Some(e.installation.id), now)
                 .await;
 
+            // A push replaces the head, and a review of the old head is worth
+            // nothing to anyone: cancel it now rather than letting it finish
+            // (and, on the rack, hold a GPU host) or, worse, post against a
+            // commit that is no longer the one under review. The new head's
+            // review is enqueued below, after the debounce. Until 2026-09-18
+            // this happened only by accident, when the new job's registration
+            // evicted the old token -- thirty seconds late at best, never if
+            // no worker was free.
+            if e.action == "synchronize" && s.cancel_registry.cancel(&owner, &repo, pr).await {
+                tracing::info!(
+                    owner = %owner,
+                    repo = %repo,
+                    pr = pr,
+                    new_head = %head_sha,
+                    "head moved; cancelled the review in flight for the old head"
+                );
+                metrics::counter!("barry_review_superseded_total", "by" => "push").increment(1);
+            }
+
             Some((
                 NewJob {
                     installation_id: e.installation.id,
@@ -482,6 +504,7 @@ mod tests {
             debounce_secs: 30,
             repos: Arc::new(RepoFilter::new(repos.as_ref())),
             commanders: Arc::new(Commanders::default()),
+            cancel_registry: crate::dispatcher::cancel::CancelRegistry::new(),
             relay: None,
         };
         (router(state), store)
@@ -500,6 +523,7 @@ mod tests {
             debounce_secs: 30,
             repos: Arc::new(RepoFilter::new(Some(&repos))),
             commanders: Arc::new(Commanders::new(Some(&logins))),
+            cancel_registry: crate::dispatcher::cancel::CancelRegistry::new(),
             relay: None,
         };
         (router(state), store)
@@ -717,6 +741,84 @@ mod tests {
         assert!(!mentions_barry(""));
     }
 
+    /// A signed `pull_request` delivery for `owner/repo` with the given action.
+    fn pr_delivery_action(owner: &str, repo: &str, action: &str) -> (String, String) {
+        let body = serde_json::json!({
+            "action": action, "number": 1,
+            "installation": { "id": 9 },
+            "repository": { "name": repo, "owner": { "login": owner }, "default_branch": "main" },
+            "pull_request": {
+                "number": 1, "title": "feat: x", "body": "ok",
+                "user": { "login": "a" }, "draft": false, "state": "open",
+                "head": { "sha": "s2", "ref": "x" }, "base": { "sha": "s0", "ref": "main" }
+            }
+        })
+        .to_string();
+        let sig = sign(b"sec", body.as_bytes());
+        (body, sig)
+    }
+
+    async fn fresh_with_registry() -> (Router, Store, crate::dispatcher::cancel::CancelRegistry) {
+        let store = Store::in_memory().await.unwrap();
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let registry = crate::dispatcher::cancel::CancelRegistry::new();
+        let state = AppState {
+            store: store.clone(),
+            webhook_secret: Arc::new(b"sec".to_vec()),
+            metrics: recorder.handle(),
+            debounce_secs: 30,
+            repos: Arc::new(RepoFilter::default()),
+            commanders: Arc::new(Commanders::default()),
+            cancel_registry: registry.clone(),
+            relay: None,
+        };
+        (router(state), store, registry)
+    }
+
+    #[tokio::test]
+    async fn a_push_cancels_the_review_in_flight_for_the_old_head() {
+        // The dispatcher registered a token when it started reviewing the old
+        // head. The push must fire it now, not when the next job happens to
+        // start, and must still enqueue the new head's review.
+        let (app, store, registry) = fresh_with_registry().await;
+        let in_flight = registry.register("o", "r", 1).await;
+        let (body, sig) = pr_delivery_action("o", "r", "synchronize");
+        assert_eq!(
+            post_event(app, "pull_request", body, sig).await,
+            StatusCode::OK
+        );
+        assert!(
+            in_flight.is_cancelled(),
+            "the old head's review should be cancelled"
+        );
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn opening_a_pull_request_cancels_nothing() {
+        // Only a moved head invalidates a review. A reopen or ready_for_review
+        // has the same head as whatever is in flight, if anything is.
+        let (app, _store, registry) = fresh_with_registry().await;
+        let in_flight = registry.register("o", "r", 1).await;
+        let (body, sig) = pr_delivery_action("o", "r", "reopened");
+        assert_eq!(
+            post_event(app, "pull_request", body, sig).await,
+            StatusCode::OK
+        );
+        assert!(!in_flight.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_push_with_nothing_in_flight_is_just_a_push() {
+        let (app, store, _registry) = fresh_with_registry().await;
+        let (body, sig) = pr_delivery_action("o", "r", "synchronize");
+        assert_eq!(
+            post_event(app, "pull_request", body, sig).await,
+            StatusCode::OK
+        );
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
     /// A signed `pull_request` delivery for `owner/repo`.
     fn pr_delivery(owner: &str, repo: &str) -> (String, String) {
         let body = serde_json::json!({
@@ -805,6 +907,7 @@ mod tests {
             debounce_secs: 30,
             repos: Arc::new(RepoFilter::default()),
             commanders: Arc::new(Commanders::default()),
+            cancel_registry: crate::dispatcher::cancel::CancelRegistry::new(),
             relay: None,
         };
         (router(state), store)
