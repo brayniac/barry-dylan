@@ -903,7 +903,8 @@ model_name = "y"
 
         // Stop barry while it is waiting: the id must be on the job for the
         // next process, and the experiment must be left alone.
-        let waiting = review_for_job(&cfg, &http, &one_file(), "t", &store, job, &shutdown);
+        let files = one_file();
+        let waiting = review_for_job(&cfg, &http, &files, "t", &store, job, &shutdown);
         tokio::pin!(waiting);
         let _ = tokio::time::timeout(Duration::from_millis(300), &mut waiting).await;
         shutdown.cancel();
