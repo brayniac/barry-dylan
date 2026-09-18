@@ -7,4 +7,5 @@ mod multi_review_agreement;
 mod multi_review_confer;
 mod multi_review_disagreement;
 mod rerun;
+mod restart;
 mod trust_gate;

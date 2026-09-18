@@ -37,7 +37,30 @@ pub async fn run_worker(deps: Arc<JobDeps>, lease_secs: i64, shutdown: Cancellat
         );
         metrics::counter!("barry_job_leased_total").increment(1);
         let t = std::time::Instant::now();
-        let res = run_job(&deps, &leased).await;
+        // Stopping does not mean finishing the job in hand. A rack review is
+        // ten to twenty-five minutes and systemd stops waiting after ninety
+        // seconds, so "finish it" meant "get killed with the lease held for
+        // job_timeout_secs". Hand the job back instead: the lease clears, the
+        // next process leases it within seconds, and a rack review resumes
+        // the experiment it was waiting on rather than paying for another
+        // (#39). The drop is what leaves the experiment alone -- the abandon
+        // guard reads the same token.
+        let res = tokio::select! {
+            res = run_job(&deps, &leased) => res,
+            _ = shutdown.cancelled() => {
+                let _ = deps
+                    .store
+                    .reschedule_at(id, now_ts(), "barry stopped while this job was running; handed back")
+                    .await;
+                deps.status_tracker.complete(id);
+                metrics::counter!("barry_job_completed_total", "outcome" => "handed_back").increment(1);
+                tracing::info!(
+                    job_id = id, owner = %leased.repo_owner, repo = %leased.repo_name,
+                    pr = leased.pr_number, "shutdown mid-job; lease released for the next process",
+                );
+                break;
+            }
+        };
         let dur = t.elapsed();
         metrics::histogram!("barry_job_duration_ms").record(dur.as_millis() as f64);
 

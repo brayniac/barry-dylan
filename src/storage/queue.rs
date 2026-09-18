@@ -27,6 +27,9 @@ pub struct LeasedJob {
     pub delivery_id: String,
     pub attempts: i64,
     pub actor: Option<String>,
+    /// The rack experiment this job was waiting on when a previous process
+    /// stopped, to be resumed rather than resubmitted. See #39.
+    pub rack_experiment: Option<String>,
 }
 
 impl Store {
@@ -49,6 +52,39 @@ impl Store {
             .map_err(|_| crate::storage::DbError::Closed)?;
         rx.await.map_err(|_| crate::storage::DbError::Closed)??;
         Ok(())
+    }
+
+    /// Remember the rack experiment `job_id` is waiting on, or forget it with
+    /// `None` once the experiment is over.
+    pub async fn set_rack_experiment(
+        &self,
+        job_id: i64,
+        experiment: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::SetRackExperiment {
+                job_id,
+                experiment: experiment.map(str::to_string),
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(())
+    }
+
+    /// The rack experiment `job_id` is waiting on, if a previous process left
+    /// one behind.
+    pub async fn rack_experiment(&self, job_id: i64) -> anyhow::Result<Option<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::GetRackExperiment {
+                job_id,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let res: Option<String> = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(res)
     }
 
     /// Return the run_after timestamp of the pending job, if any.
@@ -267,6 +303,40 @@ mod lease_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_leased_job_carries_the_rack_experiment_it_was_left_with() {
+        let store = Store::in_memory().await.unwrap();
+        let job = NewJob {
+            installation_id: 1,
+            repo_owner: "o".into(),
+            repo_name: "r".into(),
+            pr_number: 1,
+            event_kind: "pull_request.opened".into(),
+            delivery_id: "d".into(),
+            actor: None,
+        };
+        store.enqueue(&job, 0, 0).await.unwrap();
+        let first = store.lease_next(1, 300).await.unwrap().unwrap();
+        assert_eq!(first.rack_experiment, None);
+        assert_eq!(store.rack_experiment(first.id).await.unwrap(), None);
+
+        store
+            .set_rack_experiment(first.id, Some("01a0"))
+            .await
+            .unwrap();
+        // barry stops: the lease is handed back and the next process leases it.
+        store
+            .reschedule_at(first.id, 1, "handed back")
+            .await
+            .unwrap();
+        let again = store.lease_next(2, 300).await.unwrap().unwrap();
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.rack_experiment.as_deref(), Some("01a0"));
+
+        store.set_rack_experiment(first.id, None).await.unwrap();
+        assert_eq!(store.rack_experiment(first.id).await.unwrap(), None);
+    }
 
     fn job(pr: i64, kind: &str, delivery: &str) -> NewJob {
         NewJob {

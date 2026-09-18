@@ -195,6 +195,7 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
     let mut pipeline = Pipeline::hygiene_only();
     let status_tracker = Arc::new(barry_dylan::telemetry::status::StatusTracker::new());
     pipeline.checkers.push(Arc::new(MultiReviewChecker {
+        shutdown: tokio_util::sync::CancellationToken::new(),
         clients: clients.clone(),
         personas: personas.clone(),
         gh_factory: factory.clone(),

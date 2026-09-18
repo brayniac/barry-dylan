@@ -15,7 +15,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- commands (the comment author), null for system events. Used to authorize
     -- /barry confer and /barry approve against the actual issuer rather than
     -- relying on a last-commenter heuristic.
-    actor TEXT
+    actor TEXT,
+    -- The systemslab experiment a rack review submitted for this job, while it
+    -- is in flight. Set on submit, cleared when the experiment reaches a
+    -- terminal state. A job leased with this set is resumed, not resubmitted:
+    -- the process that submitted it may have restarted underneath it.
+    rack_experiment TEXT
 );
 
 -- Partial unique index: at most one pending job per (repo, pr, event_kind).
