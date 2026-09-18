@@ -154,6 +154,12 @@ pub async fn synthesize(
             let again = client.complete(&req).await?;
             tokens.input += u64::from(again.input_tokens.unwrap_or(0));
             tokens.output += u64::from(again.output_tokens.unwrap_or(0));
+            // A retry that ran out of budget is a truncation, not a second
+            // parse failure, and is counted as one (both reviewers of #48).
+            if matches!(again.finish_reason, Some(FinishReason::Length)) {
+                tracing::warn!("synthesis retry truncated at max_tokens; giving up");
+                return Err(SynthesisError::Truncated);
+            }
             match parse(&again.text) {
                 Ok(review) => Ok((review, tokens)),
                 Err(second) => {
@@ -497,6 +503,15 @@ mod tests {
         );
         // Both attempts are paid for.
         assert_eq!(tokens.output, 20 + 50);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_retry_after_invalid_json_is_a_truncation() {
+        let client = ScriptedClient(Mutex::new(vec![invalid_json(), truncated()]));
+        let err = synthesize(&client, &[], "diff", None, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SynthesisError::Truncated), "{err}");
     }
 
     #[tokio::test]
