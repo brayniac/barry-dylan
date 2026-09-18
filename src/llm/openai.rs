@@ -337,20 +337,22 @@ mod tests {
         );
     }
 
+    // 0.5 rather than 0.7: it is exact in f32, so the JSON reads back as
+    // written instead of as 0.699999988079071.
     #[tokio::test]
     async fn a_profile_temperature_applies_when_the_request_has_none() {
         let server = ok_server().await;
         let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into())
-            .with_temperature(Some(0.7));
+            .with_temperature(Some(0.5));
         c.complete(&ask(None)).await.unwrap();
-        assert_eq!(body_of_first_request(&server).await["temperature"], 0.7);
+        assert_eq!(body_of_first_request(&server).await["temperature"], 0.5);
     }
 
     #[tokio::test]
     async fn a_request_temperature_wins_over_the_profile() {
         let server = ok_server().await;
         let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into())
-            .with_temperature(Some(0.7));
+            .with_temperature(Some(0.5));
         c.complete(&ask(Some(0.0))).await.unwrap();
         assert_eq!(body_of_first_request(&server).await["temperature"], 0.0);
     }
