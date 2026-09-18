@@ -84,12 +84,13 @@ async fn shutdown_mid_job_hands_the_job_back_at_once() {
     let shutdown = CancellationToken::new();
     let worker = tokio::spawn(run_worker(deps.clone(), 300, shutdown.clone()));
 
-    // Let the worker lease the job and get into the slow checker.
+    // Let the worker lease the job and get into the slow checker. While it
+    // holds the lease nobody else can lease it.
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    assert_eq!(
-        store.count_rows("jobs").await.unwrap(),
-        1,
-        "the job is leased, not gone"
+    let now = barry_dylan::util::now_ts();
+    assert!(
+        store.lease_next(now, 300).await.unwrap().is_none(),
+        "the job is leased by the worker"
     );
     let started = std::time::Instant::now();
     shutdown.cancel();
