@@ -40,9 +40,6 @@ pub struct Orchestrator<'a> {
     pub personas: &'a [Persona],
     pub tracker: Arc<StatusTracker>,
     pub job_id: i64,
-    /// The model's context window, when known. Bounds how many personas run
-    /// at once; see [`persona_concurrency`].
-    pub context_size: Option<u32>,
 }
 
 /// Rough token count for a prompt of `bytes` bytes. Diffs tokenize densely,
@@ -360,13 +357,13 @@ impl<'a> Orchestrator<'a> {
             .map(|(p, diff)| p.prompt.len() + diff.len())
             .max()
             .unwrap_or(0);
-        let at_once =
-            persona_concurrency(self.context_size, max_tokens, largest, self.personas.len());
+        let context_size = self.clients.context_size_for(identity);
+        let at_once = persona_concurrency(context_size, max_tokens, largest, self.personas.len());
         if at_once < self.personas.len() {
             tracing::info!(
                 at_once,
                 personas = self.personas.len(),
-                context_size = self.context_size,
+                context_size,
                 max_tokens,
                 largest_prompt_bytes = largest,
                 "personas run in turns so that those in flight fit the context together"
@@ -502,6 +499,8 @@ mod tests {
             in_flight: Arc::new(AtomicUsize::new(0)),
             peak: peak.clone(),
         });
+        // Four personas at ~1000 tokens each into a 2500-token window: two at
+        // a time. Other Barry's window is unknown: all at once.
         let clients = IdentityClients {
             barry: client.clone(),
             other_barry: client.clone(),
@@ -511,6 +510,9 @@ mod tests {
             other_barry_max_tokens: 1000,
             other_other_barry_max_tokens: 1000,
             judge_max_tokens: 1000,
+            barry_context_size: Some(2500),
+            other_barry_context_size: None,
+            other_other_barry_context_size: None,
         };
         // Tiny prompts, so the estimate is all `max_tokens` and the arithmetic
         // is legible: four personas at ~1000 tokens each into a 2500-token
@@ -535,18 +537,15 @@ mod tests {
             personas: &personas,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 1,
-            context_size: Some(2500),
         };
         o.run_persona_drafts(Identity::Barry, &files).await.unwrap();
         assert_eq!(peak.load(SeqCst), 2, "two personas in flight at most");
 
         // With no window known, all four go at once.
         peak.store(0, SeqCst);
-        let o = Orchestrator {
-            context_size: None,
-            ..o
-        };
-        o.run_persona_drafts(Identity::Barry, &files).await.unwrap();
+        o.run_persona_drafts(Identity::OtherBarry, &files)
+            .await
+            .unwrap();
         assert_eq!(peak.load(SeqCst), 4);
     }
 
@@ -625,6 +624,9 @@ mod tests {
             other_barry_max_tokens: 1024,
             other_other_barry_max_tokens: 1024,
             judge_max_tokens: 256,
+            barry_context_size: None,
+            other_barry_context_size: None,
+            other_other_barry_context_size: None,
         }
     }
 
@@ -666,7 +668,6 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
-            context_size: None,
         }
         .run(&[file()])
         .await
@@ -690,7 +691,6 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
-            context_size: None,
         }
         .run(&[file()])
         .await
@@ -723,7 +723,6 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
-            context_size: None,
         }
         .run(&[file()])
         .await
@@ -746,7 +745,6 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
-            context_size: None,
         }
         .run(&[file()])
         .await
@@ -774,7 +772,6 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
-            context_size: None,
         }
         .run_barry_only(&[file()], "Other Barry not installed".into())
         .await
@@ -809,7 +806,6 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
-            context_size: None,
         }
         .run(&[file()])
         .await
@@ -842,7 +838,6 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
-            context_size: None,
         }
         .run_barry_only(&[file()], "OB not installed".into())
         .await

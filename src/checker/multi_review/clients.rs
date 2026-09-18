@@ -73,6 +73,13 @@ pub struct IdentityClients {
     pub other_barry_max_tokens: u32,
     pub other_other_barry_max_tokens: u32,
     pub judge_max_tokens: u32,
+    /// The context window behind each reviewer's endpoint, when known. A
+    /// local server shares one window across every request in flight, so the
+    /// personas are gated to fit it together; `None` (a hosted API) gates
+    /// nothing. See `persona_concurrency`.
+    pub barry_context_size: Option<u32>,
+    pub other_barry_context_size: Option<u32>,
+    pub other_other_barry_context_size: Option<u32>,
 }
 
 impl fmt::Debug for IdentityClients {
@@ -97,6 +104,14 @@ impl IdentityClients {
             Identity::OtherOtherBarry => &self.other_other_barry,
         }
     }
+    pub fn context_size_for(&self, id: Identity) -> Option<u32> {
+        match id {
+            Identity::Barry => self.barry_context_size,
+            Identity::OtherBarry => self.other_barry_context_size,
+            Identity::OtherOtherBarry => self.other_other_barry_context_size,
+        }
+    }
+
     pub fn max_tokens_for(&self, id: Identity) -> u32 {
         match id {
             Identity::Barry => self.barry_max_tokens,
@@ -134,6 +149,7 @@ pub fn build(cfg: &Config) -> anyhow::Result<IdentityClients> {
             .map(|p| p.max_tokens)
             .unwrap_or(crate::config::DEFAULT_MAX_TOKENS)
     };
+    let context_size = |name: &str| cfg.llm.get(name).and_then(|p| p.context_size);
 
     Ok(IdentityClients {
         barry: client("barry")?,
@@ -144,6 +160,9 @@ pub fn build(cfg: &Config) -> anyhow::Result<IdentityClients> {
         other_barry_max_tokens: max_tokens("other_barry"),
         other_other_barry_max_tokens: max_tokens("other_other_barry"),
         judge_max_tokens: max_tokens("judge"),
+        barry_context_size: context_size("barry"),
+        other_barry_context_size: context_size("other_barry"),
+        other_other_barry_context_size: context_size("other_other_barry"),
     })
 }
 

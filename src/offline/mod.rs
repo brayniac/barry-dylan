@@ -37,6 +37,9 @@ fn clients_from_profile(profile: &LlmProfile) -> anyhow::Result<IdentityClients>
         other_barry_max_tokens: profile.max_tokens,
         other_other_barry_max_tokens: profile.max_tokens,
         judge_max_tokens: profile.max_tokens,
+        barry_context_size: profile.context_size,
+        other_barry_context_size: profile.context_size,
+        other_other_barry_context_size: profile.context_size,
     })
 }
 
@@ -61,7 +64,6 @@ pub async fn run(cfg: &OfflineConfig, files: &[ChangedFile]) -> anyhow::Result<U
         personas: &personas,
         tracker,
         job_id: OFFLINE_JOB_ID,
-        context_size: cfg.llm.context_size,
     };
 
     let verdict = orchestrator

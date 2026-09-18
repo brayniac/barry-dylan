@@ -188,6 +188,9 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
         other_barry_max_tokens: 1024,
         other_other_barry_max_tokens: 1024,
         judge_max_tokens: 256,
+        barry_context_size: None,
+        other_barry_context_size: None,
+        other_other_barry_context_size: None,
     });
     let personas = Arc::new(persona::resolve(&persona::PersonaOverrides::default()).unwrap());
     let factory: Arc<dyn MultiGhFactory> = Arc::new(StaticGh { gh: gh.clone() });
