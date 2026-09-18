@@ -103,6 +103,7 @@ Every comment command is gated at the webhook on `commands_from` (GitHub logins,
 `/metrics` (Prometheus) exposes:
 - `barry_multi_review_judge_total{verdict="agree"|"disagree"}`
 - `barry_multi_review_barry_alone_total` — Other Barry was unreachable
+- `barry_multi_review_synthesis_fallback_total{reason="truncated"|"invalid_json"}` — synthesis could not produce a review and the persona drafts stood in
 - `barry_multi_review_peer_round_total{outcome="revised"|"kept_first"}` — the peer round produced a revised review, or that reviewer kept its first
 - `barry_confer_total{outcome="ob"|"oob"|"rejected_unauthorized"|"rejected_max_reached"|"rejected_no_run"|"rejected_all_posted"}`
 - `barry_webhook_command_total{outcome="accepted"|"on_demand"|"rejected"}` — comment commands, `on_demand` being one in a repository outside `repos`

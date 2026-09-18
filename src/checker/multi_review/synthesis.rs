@@ -141,11 +141,16 @@ pub async fn synthesize(
     match parse(&resp.text) {
         Ok(review) => Ok((review, tokens)),
         Err(first) => {
+            // The parse error and the size at warn; the text itself only at
+            // debug. It is the model's reading of someone's code, and warn
+            // lines travel further than debug lines do (Barry's own review of
+            // #48 raised this).
             tracing::warn!(
                 error = %first,
-                head = %resp.text.chars().take(300).collect::<String>(),
+                chars = resp.text.len(),
                 "synthesis reply was not valid JSON; retrying once"
             );
+            tracing::debug!(head = %resp.text.chars().take(300).collect::<String>(), "the invalid reply");
             let again = client.complete(&req).await?;
             tokens.input += u64::from(again.input_tokens.unwrap_or(0));
             tokens.output += u64::from(again.output_tokens.unwrap_or(0));
@@ -154,9 +159,10 @@ pub async fn synthesize(
                 Err(second) => {
                     tracing::warn!(
                         error = %second,
-                        head = %again.text.chars().take(300).collect::<String>(),
+                        chars = again.text.len(),
                         "synthesis reply invalid again; giving up"
                     );
+                    tracing::debug!(head = %again.text.chars().take(300).collect::<String>(), "the invalid reply");
                     Err(SynthesisError::Parse(second))
                 }
             }
