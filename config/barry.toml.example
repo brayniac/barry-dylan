@@ -9,6 +9,21 @@
 #
 # repos = ["you/project", "you/other-project"]
 
+# GitHub logins who may command barry from a pull request comment: any
+# `/barry` command, or `@barry-dylan`, which means `/barry review`. Checked
+# against the comment's author as GitHub signed it into the delivery, so a
+# name typed in the body is not enough.
+#
+# Absent means NOBODY -- every comment command is dropped, and startup says so.
+# The alternative default is "anyone who can comment can spend a GPU host".
+#
+# A commander's comment also gets through `repos`: one review of the head as
+# it stands, in a repository barry does not otherwise act on. The repository
+# stays unlisted -- its pushes, closes and everyone else's comments are still
+# dropped -- so a second push needs a second ask.
+#
+commands_from = ["you"]
+
 [server]
 listen = "0.0.0.0:8181"
 public_url = "https://barry.example.com"

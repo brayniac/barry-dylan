@@ -12,7 +12,7 @@ use axum::response::sse::{Event, Sse};
 use axum::routing::get;
 use barry_dylan::relay::{self, RelayConfig};
 use barry_dylan::storage::Store;
-use barry_dylan::webhook::server::{AppState, RepoFilter, router};
+use barry_dylan::webhook::server::{AppState, Commanders, RepoFilter, router};
 use barry_dylan::webhook::verify;
 use futures::stream;
 use std::sync::Arc;
@@ -69,6 +69,7 @@ async fn a_delivery_survives_the_channel_and_becomes_a_job() {
         // No allowlist: this test is about the relay, not about which
         // repositories barry acts on.
         repos: Arc::new(RepoFilter::default()),
+        commanders: Arc::new(Commanders::default()),
         relay: None,
     };
 

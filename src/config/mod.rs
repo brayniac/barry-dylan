@@ -39,6 +39,22 @@ pub struct Config {
     #[serde(default)]
     pub repos: Option<Vec<String>>,
 
+    /// GitHub logins who may command barry from a pull request comment: any
+    /// `/barry` command, or `@barry-dylan`, which means `/barry review`. The
+    /// comment's author is what GitHub signed into the delivery, so this is a
+    /// real "who", not a string in the body.
+    ///
+    /// Absent means nobody. Until 2026-09-18 anyone who could comment on a
+    /// pull request could re-run a review, which is a GPU host for forty
+    /// minutes on a stranger's say-so.
+    ///
+    /// A commander's comment also gets through `repos`: it is one review of
+    /// the head as it stands, in a repository barry does not otherwise act on.
+    /// The repository stays unlisted -- its pushes, closes and everyone else's
+    /// comments are still dropped -- so a second push needs a second ask.
+    #[serde(default)]
+    pub commands_from: Option<Vec<String>>,
+
     /// When present, barry holds a smee.io channel open and feeds what arrives
     /// to its own webhook endpoint. Absent means barry is reachable directly,
     /// which is true of a laptop with a tunnel and not of this rack.
@@ -243,6 +259,19 @@ impl Config {
                 }
             }
         }
+        if let Some(logins) = &self.commands_from {
+            // GitHub logins have no `@` and no whitespace. A login written the
+            // way it is typed in a comment would never match the way it is
+            // delivered, and the way that fails is a command that is silently
+            // dropped.
+            for l in logins {
+                if l.is_empty() || l.starts_with('@') || l.chars().any(char::is_whitespace) {
+                    return Err(ConfigError::Validate(format!(
+                        "`commands_from` entry {l:?} is not a bare GitHub login"
+                    )));
+                }
+            }
+        }
         if let Some(rack) = &self.rack {
             rack.validate().map_err(ConfigError::Validate)?;
         }
@@ -416,6 +445,63 @@ model_name = "qwen3.5-9b"
         );
         let cfg = Config::load(f.path()).expect("should load");
         assert_eq!(cfg.dispatcher.worker_count, 4);
+    }
+
+    /// The minimal valid config with `extra` prepended at the top level.
+    fn minimal_with(extra: &str) -> tempfile::NamedTempFile {
+        write_tmp(&format!(
+            r#"
+            {extra}
+
+            [server]
+            listen = "0.0.0.0:8080"
+            [github.barry]
+            app_id = 1
+            private_key_path = "/tmp/b.pem"
+            webhook_secret_env = "WS"
+            [github.other_barry]
+            app_id = 2
+            private_key_path = "/tmp/ob.pem"
+            [github.other_other_barry]
+            app_id = 3
+            private_key_path = "/tmp/oob.pem"
+            [storage]
+            sqlite_path = "/tmp/b.db"
+            [dispatcher]
+            [llm.barry]
+            provider = "anthropic"
+            endpoint = "https://api.anthropic.com"
+            model = "x"
+            [llm.other_barry]
+            provider = "openai"
+            endpoint = "http://localhost:1/v1"
+            model = "x"
+            [llm.other_other_barry]
+            provider = "openai"
+            endpoint = "https://api.openai.com/v1"
+            model = "x"
+            [llm.judge]
+            provider = "anthropic"
+            endpoint = "https://api.anthropic.com"
+            model = "x"
+        "#
+        ))
+    }
+
+    #[test]
+    fn commanders_load() {
+        let f = minimal_with(r#"commands_from = ["brayniac"]"#);
+        let cfg = Config::load(f.path()).expect("should load");
+        assert_eq!(cfg.commands_from, Some(vec!["brayniac".to_string()]));
+    }
+
+    #[test]
+    fn a_commander_written_as_a_mention_is_refused() {
+        // `@brayniac` is how it is typed in a comment and never how GitHub
+        // delivers it, so it would silently match nobody.
+        let f = minimal_with(r#"commands_from = ["@brayniac"]"#);
+        let err = Config::load(f.path()).unwrap_err().to_string();
+        assert!(err.contains("not a bare GitHub login"), "{err}");
     }
 
     #[test]

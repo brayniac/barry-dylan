@@ -324,6 +324,20 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         ),
     }
 
+    let commanders = Arc::new(crate::webhook::server::Commanders::new(
+        cfg.commands_from.as_ref(),
+    ));
+    match commanders.configured_count() {
+        0 => tracing::warn!(
+            "no `commands_from` configured: nobody can command barry from a comment, \
+             so `/barry approve`, `/barry review` and `/barry confer` are all dead"
+        ),
+        n => tracing::info!(
+            logins = n,
+            "taking comment commands from a configured set of logins"
+        ),
+    }
+
     // HTTP server.
     let app_state = AppState {
         store: store.clone(),
@@ -331,6 +345,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         metrics,
         debounce_secs: cfg.dispatcher.debounce_secs,
         repos,
+        commanders,
         relay: relay_status,
     };
     let router = crate::webhook::server::router(app_state);
