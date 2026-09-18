@@ -64,7 +64,8 @@ pub fn build_named(
                 profile.model.clone(),
             )
             .with_temperature(profile.temperature)
-            .with_structured_output(profile.structured_output.unwrap_or(true)),
+            .with_structured_output(profile.structured_output.unwrap_or(true))
+            .with_thinking(profile.thinking),
         ),
     };
 
@@ -170,6 +171,7 @@ mod tests {
             context_size: None,
             temperature: None,
             structured_output: None,
+            thinking: None,
         }
     }
 

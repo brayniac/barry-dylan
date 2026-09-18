@@ -121,6 +121,13 @@ pub struct LlmProfile {
     /// the prompts still ask for JSON and barry still finds it in the reply.
     #[serde(default)]
     pub structured_output: Option<bool>,
+    /// `false` asks a Qwen-style chat template to skip its reasoning block
+    /// (`chat_template_kwargs.enable_thinking`, honoured by llama-server and
+    /// ferallm). Absent leaves the template's default. Reviews are structured
+    /// extraction from a diff, and on a local 27B the deliberation before
+    /// each answer was most of a review's wall-clock.
+    #[serde(default)]
+    pub thinking: Option<bool>,
 }
 
 /// Also the fallback for an identity with no profile at all, which is only

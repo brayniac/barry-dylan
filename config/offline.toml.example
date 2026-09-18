@@ -35,6 +35,8 @@ max_tokens = 8192
 # temperature = 0.7
 # false for a server that rejects OpenAI response_format, such as ferallm.
 # structured_output = false
+# false skips a Qwen-style template's reasoning block.
+# thinking = false
 request_timeout_secs = 300
 # api_key_env = "LOCAL_LLM_API_KEY"   # omit for an unauthenticated local server
 

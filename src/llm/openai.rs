@@ -16,6 +16,14 @@ pub struct OpenAiClient {
     /// and the callers still find it in the reply, which is how every review
     /// was parsed before structured outputs existed.
     structured_output: bool,
+    /// `Some(false)` sends `chat_template_kwargs: {"enable_thinking": false}`,
+    /// which llama-server and ferallm both pass to a Qwen chat template to
+    /// skip the reasoning block. `None` sends nothing and the model does what
+    /// its template does by default. A review's persona step is structured
+    /// extraction from a diff; on a 27B at ten tokens per second, several
+    /// thousand tokens of deliberation before each answer is most of the
+    /// review's wall-clock.
+    thinking: Option<bool>,
 }
 
 impl OpenAiClient {
@@ -32,7 +40,14 @@ impl OpenAiClient {
             model,
             temperature: None,
             structured_output: true,
+            thinking: None,
         }
+    }
+
+    /// `Some(false)` asks the chat template to skip the reasoning block.
+    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+        self.thinking = thinking;
+        self
     }
 
     /// Whether a request's schema is sent as `response_format`.
@@ -109,6 +124,9 @@ impl OpenAiClient {
         });
         if let Some(t) = req.temperature.or(self.temperature) {
             body["temperature"] = serde_json::json!(t);
+        }
+        if let Some(thinking) = self.thinking {
+            body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": thinking });
         }
         if let Some(schema) = req
             .response_schema
@@ -445,6 +463,29 @@ mod tests {
         c.complete(&req).await.unwrap();
         let body = body_of_first_request(&server).await;
         assert!(body.get("response_format").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn thinking_off_reaches_the_chat_template_and_unset_sends_nothing() {
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into())
+            .with_thinking(Some(false));
+        c.complete(&ask(None)).await.unwrap();
+        let body = body_of_first_request(&server).await;
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], false,
+            "{body}"
+        );
+
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        c.complete(&ask(None)).await.unwrap();
+        assert!(
+            body_of_first_request(&server)
+                .await
+                .get("chat_template_kwargs")
+                .is_none()
+        );
     }
 
     #[tokio::test]

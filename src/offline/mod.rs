@@ -129,6 +129,7 @@ mod tests {
             context_size: None,
             temperature: None,
             structured_output: None,
+            thinking: None,
         }
     }
 
