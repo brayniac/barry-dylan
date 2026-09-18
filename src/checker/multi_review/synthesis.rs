@@ -157,9 +157,31 @@ fn review_schema() -> serde_json::Value {
     })
 }
 
+/// What the model cannot know from its training: today's date and the
+/// toolchain in use.
+///
+/// A local model's training ends months before it reviews anything, so a
+/// correct date in a comment reads to it as the future and the current Rust
+/// edition as a typo. Qwen3.6-35B on 2026-09-18 filed four findings against
+/// comments naming that day, and Qwen3.5-9B blocked a PR over
+/// `edition = "2024"`. Stating both up front costs a line.
+pub fn review_context() -> String {
+    let today = time::OffsetDateTime::now_utc().date();
+    format!(
+        "=== context ===\n\
+         Today is {today} (UTC). The current Rust toolchain is {rustc} and the current \
+         Rust edition is {edition}; both exist. Dates up to today are not in the future. \
+         Your training may predate these facts; trust them over it.\n\
+         === context ends ===\n",
+        rustc = env!("BARRY_RUSTC_VERSION"),
+        edition = env!("BARRY_RUST_EDITION"),
+    )
+}
+
 /// Render a diff block from changed files, suitable for embedding in a user message.
 pub fn render_diff_block(files: &[ChangedFile]) -> String {
-    let mut s = String::from("=== diff begins ===\n");
+    let mut s = review_context();
+    s.push_str("=== diff begins ===\n");
     for f in files {
         s.push_str(&format!("File: {}\n```\n", f.filename));
         if let Some(p) = &f.patch {
@@ -287,6 +309,18 @@ mod tests {
         assert!(user.contains("sec-draft"));
         assert!(user.contains("style-draft"));
         assert!(!user.contains("peer review"));
+    }
+
+    #[test]
+    fn the_diff_block_opens_with_the_date_and_the_toolchain() {
+        let s = render_diff_block(&[file("a.rs", "@@ -1 +1 @@\n+x")]);
+        assert!(s.starts_with("=== context ===\nToday is 20"), "{s}");
+        assert!(s.contains("rustc 1."), "{s}");
+        assert!(s.contains("Rust edition is 2024"), "{s}");
+        assert!(
+            s.contains("=== context ends ===\n=== diff begins ==="),
+            "{s}"
+        );
     }
 
     #[test]
