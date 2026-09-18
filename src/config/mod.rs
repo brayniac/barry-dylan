@@ -115,6 +115,12 @@ pub struct LlmProfile {
     /// pin a model that recommends nothing sensible.
     #[serde(default)]
     pub temperature: Option<f32>,
+    /// Whether to ask this endpoint for structured output (OpenAI
+    /// `response_format` with a JSON schema; Anthropic tool use). Default
+    /// true. Set false for a server that rejects the field, such as ferallm:
+    /// the prompts still ask for JSON and barry still finds it in the reply.
+    #[serde(default)]
+    pub structured_output: Option<bool>,
 }
 
 /// Also the fallback for an identity with no profile at all, which is only

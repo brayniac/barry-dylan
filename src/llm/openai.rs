@@ -10,6 +10,12 @@ pub struct OpenAiClient {
     /// Applied when a request leaves temperature unset; `None` leaves it to
     /// the server, which for llama-server is the model's own recommendation.
     temperature: Option<f32>,
+    /// Whether to send a request's schema as OpenAI `response_format`.
+    /// llama-server and the hosted APIs take it; ferallm rejects the field
+    /// outright (400, "unknown field"). Off, the prompt still asks for JSON
+    /// and the callers still find it in the reply, which is how every review
+    /// was parsed before structured outputs existed.
+    structured_output: bool,
 }
 
 impl OpenAiClient {
@@ -25,7 +31,14 @@ impl OpenAiClient {
             api_key,
             model,
             temperature: None,
+            structured_output: true,
         }
+    }
+
+    /// Whether a request's schema is sent as `response_format`.
+    pub fn with_structured_output(mut self, on: bool) -> Self {
+        self.structured_output = on;
+        self
     }
 
     /// Temperature to apply when a request leaves it unset.
@@ -87,16 +100,21 @@ impl OpenAiClient {
                 "content": m.content,
             }));
         }
+        // No `cache_prompt`: llama-server has defaulted it to true since 2024,
+        // and ferallm rejects any field it does not know.
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
             "messages": messages,
-            "cache_prompt": true,
         });
         if let Some(t) = req.temperature.or(self.temperature) {
             body["temperature"] = serde_json::json!(t);
         }
-        if let Some(schema) = &req.response_schema {
+        if let Some(schema) = req
+            .response_schema
+            .as_ref()
+            .filter(|_| self.structured_output)
+        {
             body["response_format"] = serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
@@ -404,6 +422,29 @@ mod tests {
         let r = c.complete(&ask(None)).await.unwrap();
         assert_eq!(r.text, "");
         assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Length));
+    }
+
+    #[tokio::test]
+    async fn the_body_carries_no_llama_server_extensions() {
+        // ferallm on 2026-09-18: 400, `cache_prompt: unknown field`. Every
+        // persona of every review failed in under a second.
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        c.complete(&ask(None)).await.unwrap();
+        let body = body_of_first_request(&server).await;
+        assert!(body.get("cache_prompt").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn structured_output_off_keeps_the_schema_out_of_the_body() {
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into())
+            .with_structured_output(false);
+        let mut req = ask(None);
+        req.response_schema = Some(serde_json::json!({"type": "object"}));
+        c.complete(&req).await.unwrap();
+        let body = body_of_first_request(&server).await;
+        assert!(body.get("response_format").is_none(), "{body}");
     }
 
     #[tokio::test]
