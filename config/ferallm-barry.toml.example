@@ -75,6 +75,27 @@
 # Budget: 70.6 GiB weights + 12 GiB KV pool + up to 8 GiB radix + a few GiB of
 # activations is about 93 GiB, under the 100 GiB ceiling below, leaving the
 # rest of 128 GB to the person using the laptop.
+#
+# The same launch for Qwen3.6-35B-A3B (20.2 GiB, 3B active: several times the
+# decode speed, a third of the memory, three months newer). Its blocks are
+# 1.25 MiB (10 full-attention layers), so the pool can be larger for the same
+# bytes, and the batch can be wider because each slot is cheap:
+#
+#   ferallm serve \
+#     --config ~/ferallm-barry.toml \
+#     --model /Volumes/Models/Qwen/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-Q4_K_M.gguf \
+#     --served-model-name qwen3.6-35b-a3b \
+#     --bind 10.1.0.11:4242 \
+#     --workload serving \
+#     --max-batch-size 24 \
+#     --max-queue 64 \
+#     --num-cache-blocks 16384 \
+#     --radix-snapshot-interval 2048 \
+#     --radix-budget-gb 8 \
+#     --max-tokens-cap 16384
+#
+# Budget there: 20.2 + 20 (pool, 1M tokens) + 8 + a few GiB is about 52 GiB;
+# `memory_limit_gb = 60.0` is the matching ceiling.
 
 [memory]
 # Process memory ceiling for the MLX allocator, in GiB. Allocations past it
