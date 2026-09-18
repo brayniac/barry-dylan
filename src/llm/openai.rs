@@ -47,7 +47,16 @@ struct Choice {
 }
 #[derive(Deserialize)]
 struct Msg {
-    content: String,
+    /// `null` from llama-server and ferallm when the model produced only
+    /// reasoning, so it is not a `String`: that would fail the whole
+    /// response as malformed and hide what actually happened.
+    #[serde(default)]
+    content: Option<String>,
+    /// The model's thinking, split out by llama-server and ferallm. Not
+    /// returned to callers, but its size is the diagnosis when `content` is
+    /// empty: the budget went here.
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 #[derive(Deserialize)]
 struct Usage {
@@ -126,8 +135,28 @@ impl OpenAiClient {
             "length" => crate::llm::FinishReason::Length,
             other => crate::llm::FinishReason::Other(other.to_string()),
         });
+        let reasoning_chars = first
+            .message
+            .reasoning_content
+            .as_deref()
+            .map_or(0, str::len);
+        let text = first.message.content.unwrap_or_default();
+        if text.trim().is_empty() {
+            tracing::warn!(
+                ?finish_reason,
+                reasoning_chars,
+                output_tokens = r.usage.as_ref().and_then(|u| u.completion_tokens),
+                "model returned no content; a thinking model spent the budget thinking"
+            );
+        } else if reasoning_chars > 0 {
+            tracing::debug!(
+                reasoning_chars,
+                content_chars = text.len(),
+                "response carried reasoning"
+            );
+        }
         Ok(LlmResponse {
-            text: first.message.content,
+            text,
             input_tokens: r.usage.as_ref().and_then(|u| u.prompt_tokens),
             output_tokens: r.usage.as_ref().and_then(|u| u.completion_tokens),
             finish_reason,
@@ -355,6 +384,26 @@ mod tests {
             .with_temperature(Some(0.5));
         c.complete(&ask(Some(0.0))).await.unwrap();
         assert_eq!(body_of_first_request(&server).await["temperature"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn only_reasoning_and_a_null_content_is_an_empty_text_not_a_parse_error() {
+        // ferallm on 2026-09-18: 600 tokens of reasoning_content, content
+        // absent, finish_reason length. The caller decides what that means;
+        // the client's job is to report it faithfully.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [ { "message": { "content": null, "reasoning_content": "let me think..." }, "finish_reason": "length" } ],
+                "usage": { "prompt_tokens": 33, "completion_tokens": 600 }
+            })))
+            .mount(&server)
+            .await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        let r = c.complete(&ask(None)).await.unwrap();
+        assert_eq!(r.text, "");
+        assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Length));
     }
 
     #[tokio::test]

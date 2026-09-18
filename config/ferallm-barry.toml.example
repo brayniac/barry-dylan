@@ -1,0 +1,89 @@
+# ferallm config for serving barry's reviewers from a Mac.
+#
+# ferallm keeps its engine knobs in this file and its serving parameters on
+# the command line, so most of what matters is the launch line below. This
+# file only pins the process memory ceiling, which on a laptop that is also
+# someone's workstation is the setting that matters most.
+#
+# Sized for Qwen3.5-122B-A10B at q4_k_m (70.6 GiB of weights) on a 128 GB
+# M4 Max, serving both barry identities and the judge from one model:
+#
+#   ferallm serve \
+#     --config ~/ferallm-barry.toml \
+#     --model ~/models/Qwen3.5-122B-A10B \
+#     --served-model-name qwen3.5-122b-a10b \
+#     --bind 10.1.0.11:4242 \
+#     --workload serving \
+#     --max-batch-size 16 \
+#     --max-queue 64 \
+#     --num-cache-blocks 8192 \
+#     --radix-snapshot-interval 2048 \
+#     --radix-budget-gb 8 \
+#     --max-tokens-cap 16384
+#
+# Why each of those, so the numbers can be redone for another model or box:
+#
+# --workload serving      The profile for concurrent API clients: mixed-step
+#                         prefill/decode, 2048-token prefill chunks, layered
+#                         prefill, adaptive spec-decode. barry is exactly that
+#                         traffic: two identities x four personas in parallel,
+#                         then synthesis, then a judge, per pull request.
+#
+# --max-batch-size 16     Concurrent sequences decoding together. One review is
+#                         up to eight persona requests at once; four workers on
+#                         delta could offer thirty. Sixteen keeps per-token
+#                         latency sane on a 10B-active mixture while still
+#                         batching a whole review; the rest wait in the queue.
+#                         The profile default of 64 is for many small clients.
+#
+# --num-cache-blocks 8192 The full-attention KV pool, in 64-token blocks. This
+#                         model has 12 full-attention layers x 2 KV heads x
+#                         256-wide K and V in bf16 = 1.5 MiB per block, so 8192
+#                         blocks is 12 GiB holding 524k tokens: sixteen 23k-token
+#                         sequences (7k of diff + 16k of output) need 5,800, and
+#                         the rest is retained prefixes. The serving profile's
+#                         default of 49,152 blocks would be 72 GiB and refuse to
+#                         boot beside 70.6 GiB of weights.
+#
+# --radix-snapshot-interval 2048
+#                         Radix prefix reuse is worth keeping: barry sends the
+#                         diff as the system prompt, so the four persona
+#                         requests of one identity share a long prefix and only
+#                         the first pays to prefill it. But on this family every
+#                         cut point snapshots the 37 linear-attention layers'
+#                         SSM state (about 31 MiB per cut point on the 35B, more
+#                         here), and the profile's 256-token interval would put
+#                         a 23k sequence at ninety cut points. 2048 is eleven.
+#
+# --radix-budget-gb 8     Bounds retained-prefix snapshot memory across
+#                         requests, LRU-evicted. Reviews of different PRs share
+#                         nothing, so retention past the current review is
+#                         waste.
+#
+# --max-tokens-cap 16384  What barry asks for (`[rack] max_tokens` / the
+#                         profiles' `max_tokens`). Anything above is a bug on
+#                         barry's side and is better rejected than served.
+#
+# No --api-key            ferallm warns at boot that a non-loopback bind is
+#                         unauthenticated and serves anyway. The network is the
+#                         rack and two Macs, all one person's, so the warning is
+#                         accepted. To add one later: `--api-key <anything>`
+#                         here, and the same value in an env var named by
+#                         `[llm.*] api_key_env` on delta; barry sends it as a
+#                         bearer token.
+#
+# Budget: 70.6 GiB weights + 12 GiB KV pool + up to 8 GiB radix + a few GiB of
+# activations is about 93 GiB, under the 100 GiB ceiling below, leaving the
+# rest of 128 GB to the person using the laptop.
+
+[memory]
+# Process memory ceiling for the MLX allocator, in GiB. Allocations past it
+# fail rather than push the rest of the machine into swap. Lower it if the
+# laptop needs more for its own work; the server then admits fewer sequences.
+memory_limit_gb = 100.0
+# The GPU wired limit is left at the system default. On this 128 GB M4 Max
+# MLX reports a recommended working set of 107.5 GiB (`iogpu.wired_limit_mb`
+# is 0, so the kernel picks it), which already covers the 93 GiB budget above.
+# Setting `wired_limit_gb` only makes sense to raise it past that, at the cost
+# of everything else on the machine; there is no reason to here.
+# wired_limit_gb = 107.5

@@ -50,6 +50,19 @@ pub async fn run_persona(
         response_schema: None,
     };
     let resp = client.complete(&req).await?;
+    // An empty draft is not a draft. Until 2026-09-18 it was accepted and,
+    // when synthesis then failed too, posted as a review of four empty
+    // headings; the model had spent its whole budget thinking (infra#15,
+    // #17). Failing here makes the check say what happened instead.
+    if resp.text.trim().is_empty() {
+        return Err(LlmError::Empty {
+            finish: resp
+                .finish_reason
+                .as_ref()
+                .map_or_else(|| "unknown".to_string(), ToString::to_string),
+            output_tokens: resp.output_tokens.unwrap_or(0),
+        });
+    }
     Ok(PersonaDraft {
         persona: persona.name,
         raw: resp.text,
@@ -213,6 +226,30 @@ mod tests {
         let r = recorded.lock().unwrap();
         assert_eq!(r[0].system.as_deref(), Some("DIFF-BLOCK"));
         assert!(r[0].messages[0].content.contains("you are security"));
+    }
+
+    #[tokio::test]
+    async fn a_persona_that_returns_nothing_is_an_error_not_a_draft() {
+        let client = ScriptedClient(Mutex::new(vec![LlmResponse {
+            text: "   ".into(),
+            input_tokens: Some(7000),
+            output_tokens: Some(16384),
+            finish_reason: Some(FinishReason::Length),
+        }]));
+        let err = run_persona(&client, &persona("security"), "DIFF", 16384)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LlmError::Empty {
+                    output_tokens: 16384,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(err.to_string().contains("no content"), "{err}");
     }
 
     #[tokio::test]

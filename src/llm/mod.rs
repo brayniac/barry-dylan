@@ -145,6 +145,12 @@ pub enum LlmError {
     Api { status: u16, body: String },
     #[error("unexpected response shape: {0}")]
     Shape(String),
+    /// The model answered with no content at all. Distinct from `Shape`
+    /// because the fix is different: a thinking model given too small a
+    /// budget spends it all thinking, and the answer is a bigger budget or
+    /// a smaller prompt, not a parser.
+    #[error("model returned no content (finish reason {finish}, {output_tokens} output tokens)")]
+    Empty { finish: String, output_tokens: u32 },
 }
 
 /// Trait implemented by all LLM clients.
@@ -164,6 +170,7 @@ fn is_transient(e: &LlmError) -> bool {
         LlmError::Http(err) => err.is_connect() || err.is_timeout(),
         LlmError::Api { status, .. } => matches!(*status, 502..=504),
         LlmError::Shape(_) => false,
+        LlmError::Empty { .. } => false,
     }
 }
 
