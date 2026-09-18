@@ -261,6 +261,12 @@ impl Reviewer {
     pub fn host_tags<'a>(&'a self, cfg: &'a RackConfig) -> &'a [String] {
         self.host_tags.as_deref().unwrap_or(&cfg.host_tags)
     }
+
+    /// The llama-server log for this reviewer's server, uploaded as an
+    /// artifact alongside the review.
+    pub fn server_log(&self) -> String {
+        format!("llama-{}.log", self.identity)
+    }
 }
 
 /// A review sends whole patches, so context is usually scarcer than

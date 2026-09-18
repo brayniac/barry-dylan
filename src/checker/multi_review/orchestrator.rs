@@ -40,6 +40,44 @@ pub struct Orchestrator<'a> {
     pub personas: &'a [Persona],
     pub tracker: Arc<StatusTracker>,
     pub job_id: i64,
+    /// The model's context window, when known. Bounds how many personas run
+    /// at once; see [`persona_concurrency`].
+    pub context_size: Option<u32>,
+}
+
+/// Rough token count for a prompt of `bytes` bytes. Diffs tokenize densely,
+/// so three bytes per token is on the pessimistic side, which is the side to
+/// be on when the cost of guessing low is a failed review.
+fn estimate_tokens(bytes: usize) -> u32 {
+    (bytes / 3) as u32
+}
+
+/// How many persona requests may be in flight at once.
+///
+/// A local llama-server holds one context window shared by every request in
+/// flight (unified KV, its default when the slot count is auto), and a
+/// request that runs the shared window out fails with "Context size has been
+/// exceeded". Each persona costs its prompt plus up to `max_tokens` of
+/// output, so at most `context / cost` of them fit together. barry-dylan#38
+/// on 2026-09-18 is the case: a 466-line diff, four personas, 16384 tokens
+/// each, a 65536 window -- the 27B got through, the 9B thought longer and
+/// did not.
+///
+/// Never below one: a single persona that does not fit is the model's problem
+/// to report, not a reason to run nothing. Never above the persona count.
+/// Unknown context means a hosted API, which has no shared window to run out.
+pub fn persona_concurrency(
+    context_size: Option<u32>,
+    max_tokens: u32,
+    largest_prompt_bytes: usize,
+    personas: usize,
+) -> usize {
+    let Some(context) = context_size else {
+        return personas.max(1);
+    };
+    let cost = u64::from(max_tokens) + u64::from(estimate_tokens(largest_prompt_bytes));
+    let fit = (u64::from(context) / cost.max(1)) as usize;
+    fit.clamp(1, personas.max(1))
 }
 
 impl<'a> Orchestrator<'a> {
@@ -312,14 +350,38 @@ impl<'a> Orchestrator<'a> {
 
         tracing::debug!("persona drafts starting");
 
-        let mut futures = Vec::with_capacity(self.personas.len());
+        let mut prepared = Vec::with_capacity(self.personas.len());
         for p in self.personas {
-            let c = Arc::clone(client);
-            let p = p.clone();
             let diff = self.render_filtered_diff(files, p.name);
-            futures.push(
-                async move { synthesis::run_persona(c.as_ref(), &p, &diff, max_tokens).await },
+            prepared.push((p.clone(), diff));
+        }
+        let largest = prepared
+            .iter()
+            .map(|(p, diff)| p.prompt.len() + diff.len())
+            .max()
+            .unwrap_or(0);
+        let at_once =
+            persona_concurrency(self.context_size, max_tokens, largest, self.personas.len());
+        if at_once < self.personas.len() {
+            tracing::info!(
+                at_once,
+                personas = self.personas.len(),
+                context_size = self.context_size,
+                max_tokens,
+                largest_prompt_bytes = largest,
+                "personas run in turns so that those in flight fit the context together"
             );
+        }
+        let gate = Arc::new(tokio::sync::Semaphore::new(at_once));
+
+        let mut futures = Vec::with_capacity(self.personas.len());
+        for (p, diff) in prepared {
+            let c = Arc::clone(client);
+            let gate = Arc::clone(&gate);
+            futures.push(async move {
+                let _slot = gate.acquire().await.expect("semaphore is never closed");
+                synthesis::run_persona(c.as_ref(), &p, &diff, max_tokens).await
+            });
         }
         let start = std::time::Instant::now();
         let results = futures::future::join_all(futures).await;
@@ -385,6 +447,114 @@ impl<'a> Orchestrator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_context_runs_every_persona_at_once() {
+        assert_eq!(persona_concurrency(None, 16384, 1_000_000, 4), 4);
+    }
+
+    #[test]
+    fn personas_in_flight_together_must_fit_the_window() {
+        // barry-dylan#38: ~21 KB of diff, 16384 max_tokens, 65536 window.
+        // 16384 + 7000 ~= 23.4k each, so two fit and four do not.
+        assert_eq!(persona_concurrency(Some(65536), 16384, 21_000, 4), 2);
+        // A small diff fits three, as #37 did.
+        assert_eq!(persona_concurrency(Some(65536), 16384, 4_700, 4), 3);
+        // The old 4096 budget fit all four.
+        assert_eq!(persona_concurrency(Some(65536), 4096, 21_000, 4), 4);
+    }
+
+    #[test]
+    fn a_persona_that_does_not_fit_alone_still_runs_alone() {
+        // Not our error to pre-empt: the server reports it, and the log says
+        // what to change.
+        assert_eq!(persona_concurrency(Some(8192), 16384, 30_000, 4), 1);
+    }
+
+    /// A client that records how many requests it has in flight at once.
+    struct CountingClient {
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for CountingClient {
+        async fn complete(&self, _req: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            self.in_flight.fetch_sub(1, SeqCst);
+            Ok(LlmResponse {
+                text: r#"{"findings":[],"summary":"ok"}"#.into(),
+                input_tokens: None,
+                output_tokens: None,
+                finish_reason: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_gate_holds_personas_back_when_the_window_is_small() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let peak = Arc::new(AtomicUsize::new(0));
+        let client: Arc<dyn LlmClient> = Arc::new(CountingClient {
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak: peak.clone(),
+        });
+        let clients = IdentityClients {
+            barry: client.clone(),
+            other_barry: client.clone(),
+            other_other_barry: client.clone(),
+            judge: client,
+            barry_max_tokens: 1000,
+            other_barry_max_tokens: 1000,
+            other_other_barry_max_tokens: 1000,
+            judge_max_tokens: 1000,
+        };
+        // Tiny prompts, so the estimate is all `max_tokens` and the arithmetic
+        // is legible: four personas at ~1000 tokens each into a 2500-token
+        // window is two at a time.
+        let personas: Vec<Persona> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|n| Persona {
+                name: n,
+                prompt: Arc::new(format!("you are {n}")),
+            })
+            .collect();
+        let files = vec![ChangedFile {
+            filename: "a.rs".into(),
+            status: "modified".into(),
+            additions: 1,
+            deletions: 0,
+            changes: 1,
+            patch: Some("+x".into()),
+        }];
+        let o = Orchestrator {
+            clients: &clients,
+            personas: &personas,
+            tracker: Arc::new(StatusTracker::new()),
+            job_id: 1,
+            context_size: Some(2500),
+        };
+        o.run_persona_drafts(Identity::Barry, &files).await.unwrap();
+        assert_eq!(peak.load(SeqCst), 2, "two personas in flight at most");
+
+        // With no window known, all four go at once.
+        peak.store(0, SeqCst);
+        let o = Orchestrator {
+            context_size: None,
+            ..o
+        };
+        o.run_persona_drafts(Identity::Barry, &files).await.unwrap();
+        assert_eq!(peak.load(SeqCst), 4);
+    }
+
+    #[test]
+    fn the_gate_never_exceeds_the_persona_count() {
+        assert_eq!(persona_concurrency(Some(1_000_000), 16, 0, 4), 4);
+        assert_eq!(persona_concurrency(Some(1_000_000), 16, 0, 0), 1);
+    }
     use crate::llm::{LlmClient, LlmError, LlmRequest, LlmResponse};
     use crate::telemetry::status::StatusTracker;
     use async_trait::async_trait;
@@ -496,6 +666,7 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
+            context_size: None,
         }
         .run(&[file()])
         .await
@@ -519,6 +690,7 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
+            context_size: None,
         }
         .run(&[file()])
         .await
@@ -551,6 +723,7 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
+            context_size: None,
         }
         .run(&[file()])
         .await
@@ -573,6 +746,7 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
+            context_size: None,
         }
         .run(&[file()])
         .await
@@ -600,6 +774,7 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
+            context_size: None,
         }
         .run_barry_only(&[file()], "Other Barry not installed".into())
         .await
@@ -634,6 +809,7 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
+            context_size: None,
         }
         .run(&[file()])
         .await
@@ -666,6 +842,7 @@ mod tests {
             personas: &p,
             tracker: Arc::new(StatusTracker::new()),
             job_id: 0,
+            context_size: None,
         }
         .run_barry_only(&[file()], "OB not installed".into())
         .await

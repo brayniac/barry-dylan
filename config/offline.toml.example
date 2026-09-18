@@ -24,6 +24,12 @@ provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
 model = "qwen2.5-coder-32b"
 max_tokens = 8192
+# The model's context window in tokens, when the endpoint is a local server that
+# shares one window across every request in flight (llama-server does). The
+# personas then run only as many at a time as fit it together, prompt plus
+# max_tokens each. Leave unset for a hosted API. `review-rack` fills this in
+# from [rack] context_size.
+# context_size = 65536
 request_timeout_secs = 300
 # api_key_env = "LOCAL_LLM_API_KEY"   # omit for an unauthenticated local server
 

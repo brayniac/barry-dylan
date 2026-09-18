@@ -160,6 +160,7 @@ mod tests {
             model: "m".into(),
             max_tokens: 1024,
             request_timeout_secs: 60,
+            context_size: None,
         }
     }
 
