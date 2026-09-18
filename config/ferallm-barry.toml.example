@@ -16,7 +16,7 @@
 #     --workload serving \
 #     --max-batch-size 16 \
 #     --max-queue 64 \
-#     --num-cache-blocks 8192 \
+#     --num-cache-blocks 131072 \
 #     --radix-snapshot-interval 2048 \
 #     --radix-budget-gb 8 \
 #     --max-tokens-cap 16384
@@ -36,15 +36,20 @@
 #                         batching a whole review; the rest wait in the queue.
 #                         The profile default of 64 is for many small clients.
 #
-# --num-cache-blocks 8192 The full-attention KV pool, in 64-token blocks. This
-#                         model has 12 full-attention layers x 2 KV heads x
-#                         256-wide K and V in bf16 = 1.5 MiB per block, so 8192
-#                         blocks is 12 GiB holding 524k tokens: sixteen 23k-token
-#                         sequences (7k of diff + 16k of output) need 5,800, and
-#                         the rest is retained prefixes. The serving profile's
-#                         default of 49,152 blocks would be 72 GiB and refuse to
-#                         boot beside 70.6 GiB of weights.
-#
+# --num-cache-blocks 131072
+#                         The paged KV pool, in blocks of 64 tokens of ONE
+#                         full-attention layer, shared across every layer and
+#                         every sequence in flight. Capacity in tokens is
+#                         blocks * 64 / full-attention layers: the 27B has 16,
+#                         so 131072 blocks is 524k tokens for the whole
+#                         process, and the earlier 8192 was 32,768, which
+#                         three 12k-token persona prompts overflowed together
+#                         (infra#22, 2026-09-18: sequences dropped mid-step as
+#                         "length" with zero tokens; ferallm's own 400 spells
+#                         the formula out when one request alone cannot fit).
+#                         Each block is 64 KiB of K and 64 KiB of V in bf16 for
+#                         this model, so the pool is 16 GiB. Sixteen sequences
+#                         of 12k prompt + 16k output need 448k tokens.
 # --radix-snapshot-interval 2048
 #                         Radix prefix reuse is worth keeping: barry sends the
 #                         diff as the system prompt, so the four persona
@@ -72,14 +77,14 @@
 #                         `[llm.*] api_key_env` on delta; barry sends it as a
 #                         bearer token.
 #
-# Budget: 70.6 GiB weights + 12 GiB KV pool + up to 8 GiB radix + a few GiB of
-# activations is about 93 GiB, under the 100 GiB ceiling below, leaving the
-# rest of 128 GB to the person using the laptop.
+# Budget for the 27B at q4_k_m: 15.7 GiB weights + 16 GiB KV pool + up to 8 GiB
+# radix + a few GiB of activations is about 42 GiB. The 122B (70.6 GiB, 12
+# full-attention layers, so 131072 blocks is 700k tokens) is about 97 GiB.
 #
 # The same launch for Qwen3.6-35B-A3B (20.2 GiB, 3B active: several times the
 # decode speed, a third of the memory, three months newer). Its blocks are
-# 1.25 MiB (10 full-attention layers), so the pool can be larger for the same
-# bytes, and the batch can be wider because each slot is cheap:
+# shared across only 10 full-attention layers, so 81920 blocks is 524k tokens
+# for 10 GiB, and the batch can be wider because each slot is cheap:
 #
 #   ferallm serve \
 #     --config ~/ferallm-barry.toml \
@@ -89,13 +94,13 @@
 #     --workload serving \
 #     --max-batch-size 24 \
 #     --max-queue 64 \
-#     --num-cache-blocks 16384 \
+#     --num-cache-blocks 81920 \
 #     --radix-snapshot-interval 2048 \
 #     --radix-budget-gb 8 \
 #     --max-tokens-cap 16384
 #
-# Budget there: 20.2 + 20 (pool, 1M tokens) + 8 + a few GiB is about 52 GiB;
-# `memory_limit_gb = 60.0` is the matching ceiling.
+# Budget there: 20.2 + 10 (pool) + 8 + a few GiB is about 42 GiB; `memory_limit_gb
+# = 60.0` is a comfortable ceiling.
 
 [memory]
 # Process memory ceiling for the MLX allocator, in GiB. Allocations past it
