@@ -128,6 +128,8 @@ mod tests {
             request_timeout_secs: 5,
             context_size: None,
             temperature: None,
+            structured_output: None,
+            thinking: None,
         }
     }
 

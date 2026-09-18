@@ -177,6 +177,8 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | | `private_key_path` | Path to Other Other Barry's PEM key |
 | (top level) | `repos` | `owner/name` list barry acts on; absent means all |
 | `[llm.*]` | `temperature` | Sampling temperature; absent leaves it to the endpoint (a local llama-server uses the model's own recommendation) |
+| | `structured_output` | Send the schema as `response_format` (default true); false for servers that reject it, such as ferallm |
+| | `thinking` | `false` skips a Qwen-style template's reasoning block (llama-server, ferallm); absent keeps the template default |
 | `[rack]` | `temperature` | Same, for the reviewers and judge in the guest |
 | `[[rack.reviewers]]` | `context_size` | Per-reviewer llama-server window, when a model needs a smaller one to fit |
 | | `commands_from` | Logins who may command barry from comments; absent means nobody |

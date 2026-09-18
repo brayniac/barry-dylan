@@ -10,6 +10,20 @@ pub struct OpenAiClient {
     /// Applied when a request leaves temperature unset; `None` leaves it to
     /// the server, which for llama-server is the model's own recommendation.
     temperature: Option<f32>,
+    /// Whether to send a request's schema as OpenAI `response_format`.
+    /// llama-server and the hosted APIs take it; ferallm rejects the field
+    /// outright (400, "unknown field"). Off, the prompt still asks for JSON
+    /// and the callers still find it in the reply, which is how every review
+    /// was parsed before structured outputs existed.
+    structured_output: bool,
+    /// `Some(false)` sends `chat_template_kwargs: {"enable_thinking": false}`,
+    /// which llama-server and ferallm both pass to a Qwen chat template to
+    /// skip the reasoning block. `None` sends nothing and the model does what
+    /// its template does by default. A review's persona step is structured
+    /// extraction from a diff; on a 27B at ten tokens per second, several
+    /// thousand tokens of deliberation before each answer is most of the
+    /// review's wall-clock.
+    thinking: Option<bool>,
 }
 
 impl OpenAiClient {
@@ -25,7 +39,21 @@ impl OpenAiClient {
             api_key,
             model,
             temperature: None,
+            structured_output: true,
+            thinking: None,
         }
+    }
+
+    /// `Some(false)` asks the chat template to skip the reasoning block.
+    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+        self.thinking = thinking;
+        self
+    }
+
+    /// Whether a request's schema is sent as `response_format`.
+    pub fn with_structured_output(mut self, on: bool) -> Self {
+        self.structured_output = on;
+        self
     }
 
     /// Temperature to apply when a request leaves it unset.
@@ -87,16 +115,24 @@ impl OpenAiClient {
                 "content": m.content,
             }));
         }
+        // No `cache_prompt`: llama-server has defaulted it to true since 2024,
+        // and ferallm rejects any field it does not know.
         let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": req.max_tokens,
             "messages": messages,
-            "cache_prompt": true,
         });
         if let Some(t) = req.temperature.or(self.temperature) {
             body["temperature"] = serde_json::json!(t);
         }
-        if let Some(schema) = &req.response_schema {
+        if let Some(thinking) = self.thinking {
+            body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": thinking });
+        }
+        if let Some(schema) = req
+            .response_schema
+            .as_ref()
+            .filter(|_| self.structured_output)
+        {
             body["response_format"] = serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
@@ -404,6 +440,52 @@ mod tests {
         let r = c.complete(&ask(None)).await.unwrap();
         assert_eq!(r.text, "");
         assert_eq!(r.finish_reason, Some(crate::llm::FinishReason::Length));
+    }
+
+    #[tokio::test]
+    async fn the_body_carries_no_llama_server_extensions() {
+        // ferallm on 2026-09-18: 400, `cache_prompt: unknown field`. Every
+        // persona of every review failed in under a second.
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        c.complete(&ask(None)).await.unwrap();
+        let body = body_of_first_request(&server).await;
+        assert!(body.get("cache_prompt").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn structured_output_off_keeps_the_schema_out_of_the_body() {
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into())
+            .with_structured_output(false);
+        let mut req = ask(None);
+        req.response_schema = Some(serde_json::json!({"type": "object"}));
+        c.complete(&req).await.unwrap();
+        let body = body_of_first_request(&server).await;
+        assert!(body.get("response_format").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn thinking_off_reaches_the_chat_template_and_unset_sends_nothing() {
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into())
+            .with_thinking(Some(false));
+        c.complete(&ask(None)).await.unwrap();
+        let body = body_of_first_request(&server).await;
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"], false,
+            "{body}"
+        );
+
+        let server = ok_server().await;
+        let c = OpenAiClient::new(reqwest::Client::new(), server.uri(), None, "m".into());
+        c.complete(&ask(None)).await.unwrap();
+        assert!(
+            body_of_first_request(&server)
+                .await
+                .get("chat_template_kwargs")
+                .is_none()
+        );
     }
 
     #[tokio::test]

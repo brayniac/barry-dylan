@@ -63,7 +63,9 @@ pub fn build_named(
                 api_key,
                 profile.model.clone(),
             )
-            .with_temperature(profile.temperature),
+            .with_temperature(profile.temperature)
+            .with_structured_output(profile.structured_output.unwrap_or(true))
+            .with_thinking(profile.thinking),
         ),
     };
 
@@ -168,6 +170,8 @@ mod tests {
             request_timeout_secs: 60,
             context_size: None,
             temperature: None,
+            structured_output: None,
+            thinking: None,
         }
     }
 
