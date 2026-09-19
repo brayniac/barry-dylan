@@ -14,9 +14,10 @@
 #     --served-model-name qwen3.5-122b-a10b \
 #     --bind 10.1.0.11:4242 \
 #     --workload serving \
-#     --max-batch-size 16 \
+#     --max-batch-size 4 \
+#     --max-prefill-tokens-per-step 4096 \
 #     --max-queue 64 \
-#     --num-cache-blocks 131072 \
+#     --num-cache-blocks 32768 \
 #     --radix-snapshot-interval 2048 \
 #     --radix-budget-gb 8 \
 #     --max-tokens-cap 16384
@@ -29,27 +30,39 @@
 #                         traffic: two identities x four personas in parallel,
 #                         then synthesis, then a judge, per pull request.
 #
-# --max-batch-size 16     Concurrent sequences decoding together. One review is
-#                         up to eight persona requests at once; four workers on
-#                         delta could offer thirty. Sixteen keeps per-token
-#                         latency sane on a 10B-active mixture while still
-#                         batching a whole review; the rest wait in the queue.
-#                         The profile default of 64 is for many small clients.
+# --max-batch-size 4      Concurrent sequences, and so concurrent PREFILLS. One
+#                         review is eight persona requests at once; at batch 8
+#                         with a 16 GiB pool, eight 12k-token prefills exceeded
+#                         Metal's memory and the server aborted (SIGABRT,
+#                         "command buffer execution failed: Insufficient
+#                         memory", 2026-09-18 23:47Z). At 4 the eight run in two
+#                         waves; a 27-file review took about 25 minutes end to
+#                         end instead of crashing. The profile default of 64 is
+#                         for many small clients.
 #
-# --num-cache-blocks 131072
+# --max-prefill-tokens-per-step 4096
+#                         Caps prompt tokens ingested per step across all
+#                         sequences, which bounds the transient attention
+#                         memory of a prefill wave. The serving profile leaves
+#                         it unbounded; the interactive profile sets a finite
+#                         one for this reason.
+#
+# --num-cache-blocks 32768
 #                         The paged KV pool, in blocks of 64 tokens of ONE
 #                         full-attention layer, shared across every layer and
 #                         every sequence in flight. Capacity in tokens is
 #                         blocks * 64 / full-attention layers: the 27B has 16,
-#                         so 131072 blocks is 524k tokens for the whole
-#                         process, and the earlier 8192 was 32,768, which
-#                         three 12k-token persona prompts overflowed together
-#                         (infra#22, 2026-09-18: sequences dropped mid-step as
-#                         "length" with zero tokens; ferallm's own 400 spells
-#                         the formula out when one request alone cannot fit).
-#                         Each block is 64 KiB of K and 64 KiB of V in bf16 for
-#                         this model, so the pool is 16 GiB. Sixteen sequences
-#                         of 12k prompt + 16k output need 448k tokens.
+#                         so 32768 blocks is 131k tokens for the whole process.
+#                         8192 was 32,768, which three 12k-token persona prompts
+#                         overflowed together (infra#22, 2026-09-18: sequences
+#                         dropped mid-step as "length" with zero tokens;
+#                         ferallm's own 400 spells the formula out when one
+#                         request alone cannot fit). Measured at batch 4 on a
+#                         27-file review: peak 39,904 of 65,536 K+V blocks, so
+#                         a third to spare. Each block is 64 KiB of K and 64 KiB
+#                         of V in bf16 here, so the pool is 4 GiB; check
+#                         `ferallm_kv_blocks_used` and
+#                         `ferallm_cache_exhausted_total` on /metrics.
 # --radix-snapshot-interval 2048
 #                         Radix prefix reuse is worth keeping: barry sends the
 #                         diff as the system prompt, so the four persona
@@ -77,8 +90,9 @@
 #                         `[llm.*] api_key_env` on delta; barry sends it as a
 #                         bearer token.
 #
-# Budget for the 27B at q4_k_m: 15.7 GiB weights + 16 GiB KV pool + up to 8 GiB
-# radix + a few GiB of activations is about 42 GiB. The 122B (70.6 GiB, 12
+# Budget for the 27B at q4_k_m: 15.7 GiB weights + 4 GiB KV pool + up to 8 GiB
+# radix + prefill activations (bounded by the two flags above) is about 30 GiB
+# steady; the crash at batch 8 shows the activations are the term to respect. The 122B (70.6 GiB, 12
 # full-attention layers, so 131072 blocks is 700k tokens) is about 97 GiB.
 #
 # The same launch for Qwen3.6-35B-A3B (20.2 GiB, 3B active: several times the
