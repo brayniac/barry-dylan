@@ -133,12 +133,12 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         .unwrap_or_else(|_| "read".into());
     let bot_comments: Vec<BotComment> = prior_comments
         .iter()
-        .filter(|c| c.author.starts_with("barry-dylan"))
+        .filter(|c| trust::is_barry(c))
         .cloned()
         .collect();
     let bot_reviews: Vec<BotComment> = prior_reviews
         .iter()
-        .filter(|c| c.author.starts_with("barry-dylan"))
+        .filter(|c| trust::is_barry(c))
         .cloned()
         .collect();
 
