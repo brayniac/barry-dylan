@@ -166,6 +166,21 @@ pub enum ActorCommand {
         pr_number: i64,
         reply: Reply<()>,
     },
+    /// Record a webhook delivery by body hash, pruning deliveries seen before
+    /// `prune_before`. Replies `true` if the body was new, `false` if it was
+    /// already recorded.
+    ClaimDelivery {
+        body_sha256: String,
+        delivery_id: String,
+        now_ts: i64,
+        prune_before: i64,
+        reply: Reply<bool>,
+    },
+    /// Forget a delivery recorded by `ClaimDelivery`.
+    ReleaseDelivery {
+        body_sha256: String,
+        reply: Reply<()>,
+    },
 }
 
 /// RAII guard that logs when the actor thread exits. A normal shutdown drops
@@ -906,6 +921,56 @@ pub(crate) fn run(
                     });
                     let duration_ms = start.elapsed().as_millis() as u64;
                     record_db_timing("cancel_pr_jobs", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::ClaimDelivery {
+                    body_sha256,
+                    delivery_id,
+                    now_ts,
+                    prune_before,
+                    reply,
+                } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || {
+                        let body_sha256 = body_sha256.clone();
+                        let delivery_id = delivery_id.clone();
+                        async move {
+                            let conn = unsafe { &mut *raw };
+                            sqlx::query("DELETE FROM seen_deliveries WHERE seen_at < ?1")
+                                .bind(prune_before)
+                                .execute(&mut *conn)
+                                .await?;
+                            let inserted = sqlx::query(
+                                "INSERT OR IGNORE INTO seen_deliveries \
+                                 (body_sha256, delivery_id, seen_at) VALUES (?1, ?2, ?3)",
+                            )
+                            .bind(&body_sha256)
+                            .bind(&delivery_id)
+                            .bind(now_ts)
+                            .execute(&mut *conn)
+                            .await?
+                            .rows_affected();
+                            Ok(inserted == 1)
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("claim_delivery", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::ReleaseDelivery { body_sha256, reply } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || {
+                        let body_sha256 = body_sha256.clone();
+                        async move {
+                            sqlx::query("DELETE FROM seen_deliveries WHERE body_sha256 = ?1")
+                                .bind(&body_sha256)
+                                .execute(unsafe { &mut *raw })
+                                .await
+                                .map(|_| ())
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("release_delivery", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::RawQuery { sql, reply } => {

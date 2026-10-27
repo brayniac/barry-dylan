@@ -50,6 +50,7 @@
 //! - `installation_tokens`: Cached GitHub installation tokens
 //! - `audit_log`: Audit trail for checker outcomes
 //! - `multi_review_runs`: Deduplication state for multi-review runs
+//! - `seen_deliveries`: Webhook deliveries already accepted, by body hash
 //!
 //! # Usage
 //!
@@ -99,6 +100,7 @@ use crate::storage::cache::ReadCache;
 pub mod actor;
 pub mod audit;
 pub mod cache;
+pub mod deliveries;
 pub mod installation_cache;
 pub mod multi_review;
 pub mod queue;

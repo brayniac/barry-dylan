@@ -77,3 +77,16 @@ CREATE TABLE IF NOT EXISTS installation_cache (
     cached_at       INTEGER NOT NULL,
     PRIMARY KEY (identity, owner)
 );
+
+-- Webhook deliveries barry has accepted, keyed by the SHA-256 of the body
+-- (the part the signature covers), so a delivery sent a second time is
+-- refused instead of acted on again. `delivery_id` is for reading the table
+-- only. Rows older than the retention in `storage::deliveries` are pruned on
+-- each insert.
+CREATE TABLE IF NOT EXISTS seen_deliveries (
+    body_sha256 TEXT PRIMARY KEY,
+    delivery_id TEXT NOT NULL,
+    seen_at     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS seen_deliveries_seen_at_idx ON seen_deliveries(seen_at);

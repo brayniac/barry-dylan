@@ -23,15 +23,23 @@ const SECRET: &[u8] = b"a-shared-secret";
 
 /// A `pull_request` payload with keys in an order a sorting serializer would
 /// change, so that an ordering regression fails this test rather than
-/// production.
-const BODY: &str = r#"{"zaction":"opened","number":7,"installation":{"id":1234},"repository":{"name":"r","owner":{"login":"o"},"default_branch":"main"},"action":"opened","pull_request":{"number":7,"title":"feat: a thing","body":"a description long enough to pass hygiene","user":{"login":"someone"},"draft":false,"state":"open","head":{"sha":"abc123","ref":"topic"},"base":{"sha":"def456","ref":"main"}}}"#;
+/// production. `updated_at` is now, so barry does not refuse it as stale.
+fn body() -> String {
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    format!(
+        r#"{{"zaction":"opened","number":7,"installation":{{"id":1234}},"repository":{{"name":"r","owner":{{"login":"o"}},"default_branch":"main"}},"action":"opened","pull_request":{{"number":7,"title":"feat: a thing","body":"a description long enough to pass hygiene","user":{{"login":"someone"}},"draft":false,"state":"open","head":{{"sha":"abc123","ref":"topic"}},"base":{{"sha":"def456","ref":"main"}},"updated_at":"{now}"}}}}"#
+    )
+}
 
 /// One SSE frame carrying one delivery, shaped the way smee shapes it: the
 /// headers hoisted to top level, the body nested as parsed JSON.
 fn smee_envelope() -> String {
-    let signature = verify::sign(SECRET, BODY.as_bytes());
+    let body = body();
+    let signature = verify::sign(SECRET, body.as_bytes());
     format!(
-        r#"{{"host":"smee.io","content-type":"application/json","x-github-event":"pull_request","x-github-delivery":"delivery-1","x-hub-signature-256":"{signature}","body":{BODY},"timestamp":1757894400000}}"#
+        r#"{{"host":"smee.io","content-type":"application/json","x-github-event":"pull_request","x-github-delivery":"delivery-1","x-hub-signature-256":"{signature}","body":{body},"timestamp":1757894400000}}"#
     )
 }
 
