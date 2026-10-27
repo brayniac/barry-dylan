@@ -230,10 +230,10 @@ impl GitHub {
                   author { login }
                   headRefOid headRefName baseRefOid baseRefName
                   comments(last: 100) {
-                    nodes { databaseId id author { login } body }
+                    nodes { databaseId id author { __typename login } body }
                   }
                   reviews(last: 100) {
-                    nodes { databaseId id author { login } body }
+                    nodes { databaseId id author { __typename login } body }
                   }
                 }
                 config: object(expression: "HEAD:.barry.toml") {
@@ -320,6 +320,21 @@ struct PrCtxConnection<T> {
 #[derive(Deserialize)]
 struct PrCtxActor {
     login: String,
+    /// `Bot`, `User`, ...; requested on comment and review authors only.
+    #[serde(rename = "__typename", default)]
+    typename: Option<String>,
+}
+
+impl PrCtxActor {
+    /// The login as REST spells it. GraphQL gives a bot's login without the
+    /// `[bot]` suffix, so a user account and an App's bot can share a GraphQL
+    /// login; the suffix, which a user login cannot contain, tells them apart.
+    fn rest_login(self) -> String {
+        match self.typename.as_deref() {
+            Some("Bot") => format!("{}[bot]", self.login),
+            _ => self.login,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -375,7 +390,7 @@ impl PrCtxResponse {
                 id: c.database_id,
                 node_id: c.id,
                 body: c.body.unwrap_or_default(),
-                author: c.author.map(|a| a.login).unwrap_or_default(),
+                author: c.author.map(PrCtxActor::rest_login).unwrap_or_default(),
             })
             .collect();
         let reviews = p
@@ -386,7 +401,7 @@ impl PrCtxResponse {
                 id: r.database_id,
                 node_id: r.id,
                 body: r.body.unwrap_or_default(),
-                author: r.author.map(|a| a.login).unwrap_or_default(),
+                author: r.author.map(PrCtxActor::rest_login).unwrap_or_default(),
             })
             .collect();
         let config_text = self.data.repository.config.and_then(|c| c.text);
@@ -404,6 +419,7 @@ pub struct BotComment {
     pub id: i64,
     pub node_id: String,
     pub body: String,
+    /// The author's login as REST spells it: an App's bot is `<slug>[bot]`.
     pub author: String,
 }
 
@@ -548,6 +564,37 @@ mod tests {
             ctx.config_text.as_deref(),
             Some("[hygiene]\nenabled = true\n")
         );
+    }
+
+    #[test]
+    fn a_bot_comment_author_carries_the_bot_suffix_and_a_user_of_the_same_login_does_not() {
+        let raw = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "number": 1, "title": "t", "body": null,
+                        "state": "OPEN", "isDraft": false,
+                        "additions": 0, "deletions": 0, "changedFiles": 0,
+                        "author": { "login": "alice" },
+                        "headRefOid": "h", "headRefName": "f",
+                        "baseRefOid": "b", "baseRefName": "main",
+                        "comments": { "nodes": [
+                            {"databaseId": 1, "id": "IC_1", "author": {"__typename": "Bot", "login": "barry-dylan"}, "body": "a"},
+                            {"databaseId": 2, "id": "IC_2", "author": {"__typename": "User", "login": "barry-dylan"}, "body": "b"}
+                        ]},
+                        "reviews": { "nodes": [
+                            {"databaseId": 3, "id": "PR_1", "author": {"__typename": "Bot", "login": "barry-dylan"}, "body": "c"}
+                        ]}
+                    },
+                    "config": null
+                }
+            }
+        });
+        let parsed: PrCtxResponse = serde_json::from_value(raw).unwrap();
+        let ctx = parsed.into_context();
+        assert_eq!(ctx.comments[0].author, "barry-dylan[bot]");
+        assert_eq!(ctx.comments[1].author, "barry-dylan");
+        assert_eq!(ctx.reviews[0].author, "barry-dylan[bot]");
     }
 
     #[test]

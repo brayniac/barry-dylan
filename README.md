@@ -43,7 +43,7 @@ A guest that was asked to judge and could not writes the failure into its artifa
 2. **R1 synthesis** — Each identity synthesizes persona drafts into one unified review. Nothing is posted yet.
 3. **R2 synthesis** — Each identity reads the other's R1 review and may revise.
 4. **Judge** — The judge LLM receives both R2 reviews and decides `agree` or `disagree` with a reason.
-5. **Posting** — Depending on the verdict: only Barry posts (agree), both post (disagree), or Barry posts alone if Other Barry was unreachable.
+5. **Posting** — Depending on the verdict: only Barry posts (agree), both post (disagree), or Barry posts alone if Other Barry was unreachable. Every review is posted with the `COMMENT` or `REQUEST_CHANGES` event, never `APPROVE`, so a review cannot count toward a branch's required approvals. An approve outcome is posted as a `COMMENT` review whose header names the outcome.
 
 ### Key Patterns
 
@@ -55,7 +55,7 @@ A guest that was asked to judge and could not writes the failure into its artifa
 
 ### 1. Register Three GitHub Apps
 
-Create three GitHub Apps, one per reviewer identity. Each needs the following permissions:
+Create three GitHub Apps, one per reviewer identity. Barry's App must have the slug `barry-dylan`: barry recognises its own comments as the bot `barry-dylan[bot]` and answers `@barry-dylan`. Each needs the following permissions:
 
 | Permission | Required For |
 |---|---|

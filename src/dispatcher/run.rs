@@ -112,15 +112,11 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         return handle_command(deps, &gh, job, cmd).await;
     }
 
-    // Setup phase: one GraphQL query (PR metadata + comments + reviews + .barry.toml blob)
-    // and `list_pr_files` REST fired concurrently — the GraphQL files connection doesn't
-    // expose unified-diff patches that the LLM checker needs.
-    let (ctx_res, files_res) = tokio::join!(
-        gh.fetch_pr_context(&job.repo_owner, &job.repo_name, job.pr_number),
-        gh.list_pr_files(&job.repo_owner, &job.repo_name, job.pr_number),
-    );
-    let pr_ctx = ctx_res?;
-    let files = files_res?;
+    // Setup phase: one GraphQL query (PR metadata + comments + reviews + .barry.toml blob).
+    // The changed files are fetched only after the trust gate passes.
+    let pr_ctx = gh
+        .fetch_pr_context(&job.repo_owner, &job.repo_name, job.pr_number)
+        .await?;
     let pr = pr_ctx.pr;
     let cfg_text = pr_ctx.config_text;
     let prior_comments = pr_ctx.comments;
@@ -137,12 +133,12 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         .unwrap_or_else(|_| "read".into());
     let bot_comments: Vec<BotComment> = prior_comments
         .iter()
-        .filter(|c| c.author.starts_with("barry-dylan"))
+        .filter(|c| trust::is_barry(c))
         .cloned()
         .collect();
     let bot_reviews: Vec<BotComment> = prior_reviews
         .iter()
-        .filter(|c| c.author.starts_with("barry-dylan"))
+        .filter(|c| trust::is_barry(c))
         .cloned()
         .collect();
 
@@ -158,6 +154,14 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
         post_needs_approval_once(&gh, job, &pr, &bot_comments).await?;
         return Ok(());
     }
+
+    // `list_pr_files` makes up to 30 REST calls and holds every patch in memory,
+    // so it runs only for a PR whose checkers will run. The REST call is needed
+    // because the GraphQL files connection does not expose unified-diff patches,
+    // which the LLM checker needs.
+    let files = gh
+        .list_pr_files(&job.repo_owner, &job.repo_name, job.pr_number)
+        .await?;
 
     let repo_cfg = parse_repo_config_with_check(deps, &gh, job, &pr, cfg_text).await?;
 
