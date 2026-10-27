@@ -55,7 +55,7 @@ A guest that was asked to judge and could not writes the failure into its artifa
 
 ### 1. Register Three GitHub Apps
 
-Create three GitHub Apps, one per reviewer identity. Each needs the following permissions:
+Create three GitHub Apps, one per reviewer identity. Barry's App must have the slug `barry-dylan`: barry recognises its own comments as the bot `barry-dylan[bot]` and answers `@barry-dylan`. Each needs the following permissions:
 
 | Permission | Required For |
 |---|---|
