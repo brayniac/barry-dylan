@@ -303,22 +303,26 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                 .await;
 
             // A push replaces the head, and a review of the old head is worth
-            // nothing to anyone: cancel it now rather than letting it finish
+            // nothing to anyone: stop it now rather than letting it finish
             // (and, on the rack, hold a GPU host) or, worse, post against a
             // commit that is no longer the one under review. The new head's
-            // review is enqueued below, after the debounce. Until 2026-09-18
-            // this happened only by accident, when the new job's registration
-            // evicted the old token -- thirty seconds late at best, never if
-            // no worker was free.
-            if e.action == "synchronize" && s.cancel_registry.cancel(&owner, &repo, pr).await {
+            // review is enqueued below, after the debounce. The delivery's head
+            // is not proof of the PR's current head (a redelivered or late
+            // delivery carries an old one), so the review in flight is only
+            // asked to re-check; it reads the head from GitHub and cancels
+            // itself if the head has moved.
+            if e.action == "synchronize"
+                && s.cancel_registry
+                    .push_arrived(&owner, &repo, pr, &head_sha)
+                    .await
+            {
                 tracing::info!(
                     owner = %owner,
                     repo = %repo,
                     pr = pr,
-                    new_head = %head_sha,
-                    "head moved; cancelled the review in flight for the old head"
+                    delivered_head = %head_sha,
+                    "push arrived; asked the review in flight to re-check its head"
                 );
-                metrics::counter!("barry_review_superseded_total", "by" => "push").increment(1);
             }
 
             Some((
@@ -743,6 +747,15 @@ mod tests {
 
     /// A signed `pull_request` delivery for `owner/repo` with the given action.
     fn pr_delivery_action(owner: &str, repo: &str, action: &str) -> (String, String) {
+        pr_delivery_action_at(owner, repo, action, "s2")
+    }
+
+    fn pr_delivery_action_at(
+        owner: &str,
+        repo: &str,
+        action: &str,
+        head_sha: &str,
+    ) -> (String, String) {
         let body = serde_json::json!({
             "action": action, "number": 1,
             "installation": { "id": 9 },
@@ -750,7 +763,7 @@ mod tests {
             "pull_request": {
                 "number": 1, "title": "feat: x", "body": "ok",
                 "user": { "login": "a" }, "draft": false, "state": "open",
-                "head": { "sha": "s2", "ref": "x" }, "base": { "sha": "s0", "ref": "main" }
+                "head": { "sha": head_sha, "ref": "x" }, "base": { "sha": "s0", "ref": "main" }
             }
         })
         .to_string();
@@ -775,23 +788,48 @@ mod tests {
         (router(state), store, registry)
     }
 
+    /// Whether `n` is notified within 100ms.
+    async fn notified(n: &tokio::sync::Notify) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(100), n.notified())
+            .await
+            .is_ok()
+    }
+
     #[tokio::test]
-    async fn a_push_cancels_the_review_in_flight_for_the_old_head() {
-        // The dispatcher registered a token when it started reviewing the old
-        // head. The push must fire it now, not when the next job happens to
-        // start, and must still enqueue the new head's review.
+    async fn a_push_asks_the_review_in_flight_for_another_head_to_recheck() {
+        // The dispatcher registered when it started reviewing s1. A push of
+        // s2 must reach that review now, not when the next job happens to
+        // start, and must still enqueue the new head's review. The delivery
+        // alone cancels nothing: the review reads the current head from GitHub
+        // and cancels itself (tests/integration/cancel.rs).
         let (app, store, registry) = fresh_with_registry().await;
-        let in_flight = registry.register("o", "r", 1).await;
-        let (body, sig) = pr_delivery_action("o", "r", "synchronize");
+        let in_flight = registry.register("o", "r", 1, "s1").await.unwrap();
+        let (body, sig) = pr_delivery_action_at("o", "r", "synchronize", "s2");
         assert_eq!(
             post_event(app, "pull_request", body, sig).await,
             StatusCode::OK
         );
         assert!(
-            in_flight.is_cancelled(),
-            "the old head's review should be cancelled"
+            notified(&in_flight.recheck).await,
+            "the review should re-check"
         );
+        assert!(!in_flight.token.is_cancelled());
         assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_push_of_the_head_under_review_does_not_disturb_it() {
+        // A redelivered `synchronize` can carry the head the review in flight
+        // is already of. That review is current.
+        let (app, _store, registry) = fresh_with_registry().await;
+        let in_flight = registry.register("o", "r", 1, "s2").await.unwrap();
+        let (body, sig) = pr_delivery_action_at("o", "r", "synchronize", "s2");
+        assert_eq!(
+            post_event(app, "pull_request", body, sig).await,
+            StatusCode::OK
+        );
+        assert!(!notified(&in_flight.recheck).await);
+        assert!(!in_flight.token.is_cancelled());
     }
 
     #[tokio::test]
@@ -799,13 +837,14 @@ mod tests {
         // Only a moved head invalidates a review. A reopen or ready_for_review
         // has the same head as whatever is in flight, if anything is.
         let (app, _store, registry) = fresh_with_registry().await;
-        let in_flight = registry.register("o", "r", 1).await;
+        let in_flight = registry.register("o", "r", 1, "s2").await.unwrap();
         let (body, sig) = pr_delivery_action("o", "r", "reopened");
         assert_eq!(
             post_event(app, "pull_request", body, sig).await,
             StatusCode::OK
         );
-        assert!(!in_flight.is_cancelled());
+        assert!(!notified(&in_flight.recheck).await);
+        assert!(!in_flight.token.is_cancelled());
     }
 
     #[tokio::test]

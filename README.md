@@ -252,6 +252,7 @@ The `/metrics` endpoint exposes Prometheus metrics:
 - `barry_rack_judge_total{outcome="verdict"|"missing"|"invalid"}`
 - `barry_confer_total{outcome="ob"|"oob"|"rejected_unauthorized"|"rejected_max_reached"|"rejected_no_run"|"rejected_all_posted"}`
 - `barry_review_superseded_total{by="push"}` — a push cancelled the review in flight for the old head
+- `barry_review_skipped_total{reason="in_flight"}` — a job did not start a review because a review of the same head was already in flight
 - `barry_review_stale_total{reason="head_moved"|"closed"}` — an outcome was ready but the PR had moved on, so it was not posted
 - Job, webhook, and queue counters
 

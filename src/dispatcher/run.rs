@@ -183,12 +183,28 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
     let ctx_ref = &ctx;
     let rate_limit_reset: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
 
-    // Register a cancellation token for this PR. A concurrent `pull_request.closed`
-    // job will fire it, causing all checker tasks to abort before posting results.
-    let cancel = deps
+    // Register a cancellation token for this PR and the head under review. A
+    // concurrent `pull_request.closed` job fires it, and so does the head
+    // watcher below when a push has moved the head, causing all checker tasks
+    // to abort before posting results.
+    let Some(registered) = deps
         .cancel_registry
-        .register(&job.repo_owner, &job.repo_name, job.pr_number)
-        .await;
+        .register(
+            &job.repo_owner,
+            &job.repo_name,
+            job.pr_number,
+            &ctx.pr.head.sha,
+        )
+        .await
+    else {
+        tracing::info!(
+            head = %ctx.pr.head.sha,
+            "a review of this head is already in flight; not starting another"
+        );
+        metrics::counter!("barry_review_skipped_total", "reason" => "in_flight").increment(1);
+        return Ok(());
+    };
+    let cancel = registered.token.clone();
 
     let gh_factory = deps.gh_factory.clone();
     let installation_id = job.installation_id;
@@ -222,7 +238,10 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                 let dur = t.elapsed();
                 let outcome = match run_result {
                     None => {
-                        tracing::info!(checker = checker_name, "checker cancelled: PR closed");
+                        tracing::info!(
+                            checker = checker_name,
+                            "checker cancelled: PR closed or head moved"
+                        );
                         return;
                     }
                     Some(Ok(Ok(o))) => o,
@@ -290,11 +309,25 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
             .instrument(span),
         );
     }
-    futures::future::join_all(tasks).await;
+    let checkers = futures::future::join_all(tasks);
+    tokio::pin!(checkers);
+    tokio::select! {
+        _ = &mut checkers => {}
+        _ = watch_head(
+            gh_ref,
+            deps.gh_factory.as_ref(),
+            job_ref,
+            &pr_ref.head.sha,
+            &registered,
+            RECHECK_INTERVAL,
+        ) => {
+            checkers.await;
+        }
+    }
 
-    deps.cancel_registry
-        .remove(&job.repo_owner, &job.repo_name, job.pr_number)
-        .await;
+    // Unregisters this review, unless a review of a newer head has since
+    // replaced it. A panic or early return unregisters it the same way.
+    drop(registered);
 
     let reset_in_secs = rate_limit_reset.load(Ordering::SeqCst);
     if reset_in_secs > 0 {
@@ -481,10 +514,93 @@ fn default_repo_config() -> crate::config::repo::RepoConfig {
     crate::config::repo::RepoConfig::default()
 }
 
+/// The least time between two of [`watch_head`]'s lookups of the PR.
+const RECHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Cancel the review when a push has moved the PR's head off `reviewed_head`.
+///
+/// Each lookup uses a client freshly minted by `gh_factory`, falling back to
+/// `gh` when minting fails.
+///
+/// Woken by [`CancelRegistry::push_arrived`](crate::dispatcher::cancel::CancelRegistry::push_arrived)
+/// for each push delivery whose head differs from `reviewed_head`. The
+/// delivery's head is not trusted as the current one, since a redelivered or
+/// late delivery carries an old head; the current head is read from GitHub.
+/// A wake's lookup that does not show a moved head, including one that fails,
+/// is repeated once after `interval`, in case GitHub's read lags the push.
+/// Lookups are at least `interval` apart, so a stream of deliveries costs at
+/// most one lookup per `interval`. A lookup that fails leaves the review
+/// running, and [`still_current`] checks the head again before anything is
+/// posted. Returns once the review is cancelled, by this watcher or anything
+/// else.
+async fn watch_head(
+    gh: &Arc<GitHub>,
+    gh_factory: &dyn GhFactory,
+    job: &LeasedJob,
+    reviewed_head: &str,
+    registered: &crate::dispatcher::cancel::Registered,
+    interval: Duration,
+) {
+    // Whether the next lookup is the repeat of one that showed no move,
+    // rather than one waiting for a wake.
+    let mut repeat = false;
+    loop {
+        if !repeat {
+            tokio::select! {
+                _ = registered.token.cancelled() => return,
+                _ = registered.recheck.notified() => {}
+            }
+        }
+        // The review can outlive the token `gh` was minted with, so each
+        // lookup mints its own, as posting does.
+        let lookup_gh = match gh_factory.for_installation(job.installation_id).await {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    "failed to re-mint token before re-checking the head; using original"
+                );
+                Arc::clone(gh)
+            }
+        };
+        match lookup_gh
+            .get_pr(&job.repo_owner, &job.repo_name, job.pr_number)
+            .await
+        {
+            Ok(now) if now.head.sha != reviewed_head => {
+                tracing::info!(
+                    pr = job.pr_number,
+                    owner = %job.repo_owner,
+                    repo = %job.repo_name,
+                    reviewed = %reviewed_head,
+                    head = %now.head.sha,
+                    "head moved; cancelling the review of the old head"
+                );
+                metrics::counter!("barry_review_superseded_total", "by" => "push").increment(1);
+                registered.token.cancel();
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    pr = job.pr_number,
+                    "could not re-check the head after a push"
+                );
+            }
+        }
+        repeat = !repeat;
+        tokio::select! {
+            _ = registered.token.cancelled() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+    }
+}
+
 /// Whether the pull request is still the one this outcome was produced for.
 ///
-/// A push cancels the review in flight from the webhook, but the delivery can
-/// lag or, through smee, never arrive; and a review that finished a moment
+/// A push cancels the review in flight through [`watch_head`], but the
+/// delivery can lag or, through smee, never arrive; and a review that finished a moment
 /// before the push still has its outcome in hand. So the head is checked once
 /// more here, at the last moment before anything is written. A review of a
 /// commit that is no longer the head is worth nothing, and posting it
@@ -695,5 +811,210 @@ mod tests {
         let s = summarize_error(&e);
         assert!(!s.contains("second line"), "multi-line summary");
         assert!(s.chars().count() <= 301, "{} chars", s.chars().count());
+    }
+
+    fn rest_pr(head: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": 1, "title": "feat: x", "body": "ok",
+            "user": { "login": "alice" }, "draft": false, "state": "open",
+            "head": { "sha": head, "ref": "x" }, "base": { "sha": "base", "ref": "main" },
+            "additions": 1, "deletions": 0, "changed_files": 1
+        })
+    }
+
+    fn job() -> LeasedJob {
+        LeasedJob {
+            id: 1,
+            installation_id: 1,
+            repo_owner: "o".into(),
+            repo_name: "r".into(),
+            pr_number: 1,
+            event_kind: "pull_request.synchronize".into(),
+            delivery_id: "d".into(),
+            attempts: 0,
+            actor: None,
+            rack_experiment: None,
+        }
+    }
+
+    /// Mints `self.0` for every installation.
+    struct SameGh(Arc<GitHub>);
+
+    #[async_trait::async_trait]
+    impl GhFactory for SameGh {
+        async fn for_installation(&self, _id: i64) -> anyhow::Result<Arc<GitHub>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Fails to mint any client.
+    struct NoGh;
+
+    #[async_trait::async_trait]
+    impl GhFactory for NoGh {
+        async fn for_installation(&self, _id: i64) -> anyhow::Result<Arc<GitHub>> {
+            anyhow::bail!("could not mint an installation token")
+        }
+    }
+
+    async fn pr_lookups(server: &wiremock::MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "GET" && r.url.path() == "/repos/o/r/pulls/1")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_stream_of_wakes_costs_at_most_one_lookup_per_interval() {
+        // Replayed deliveries of an old push each wake the watcher. GitHub
+        // keeps saying the head is the one under review, so nothing is
+        // cancelled, and the lookups are spaced by the interval rather than
+        // made back to back.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr("h1")))
+            .mount(&server)
+            .await;
+        let gh =
+            Arc::new(GitHub::new(reqwest::Client::new(), "tok".into()).with_base(server.uri()));
+        let reg = crate::dispatcher::cancel::CancelRegistry::new();
+        let r = reg.register("o", "r", 1, "h1").await.unwrap();
+        let job = job();
+        let factory = SameGh(gh.clone());
+        let watcher = watch_head(&gh, &factory, &job, "h1", &r, Duration::from_millis(200));
+        let wakes = async {
+            loop {
+                r.recheck.notify_one();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let ran = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                _ = watcher => {}
+                _ = wakes => {}
+            }
+        })
+        .await;
+        assert!(ran.is_err(), "the watcher should still be watching");
+        assert!(!r.token.is_cancelled());
+        let n = pr_lookups(&server).await;
+        assert!(n <= 6, "{n} lookups in 1s at one per 200ms");
+    }
+
+    #[tokio::test]
+    async fn a_head_github_has_not_yet_moved_is_looked_up_once_more() {
+        // A push was delivered, but the first lookup still returns the head
+        // under review. One more lookup after the interval sees the new head.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr("h1")))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr("h2")))
+            .mount(&server)
+            .await;
+        let gh =
+            Arc::new(GitHub::new(reqwest::Client::new(), "tok".into()).with_base(server.uri()));
+        let reg = crate::dispatcher::cancel::CancelRegistry::new();
+        let r = reg.register("o", "r", 1, "h1").await.unwrap();
+        let job = job();
+        r.recheck.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            watch_head(
+                &gh,
+                &SameGh(gh.clone()),
+                &job,
+                "h1",
+                &r,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("the watcher should have looked again and cancelled");
+        assert!(r.token.is_cancelled());
+        assert_eq!(pr_lookups(&server).await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_uses_a_freshly_minted_client_not_the_one_the_job_started_with() {
+        // A review can outlive the installation token it started with. GitHub
+        // rejects the expired token, and accepts only the one minted for the
+        // lookup, which shows the head has moved.
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .and(header("Authorization", "Bearer fresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr("h2")))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let expired =
+            Arc::new(GitHub::new(reqwest::Client::new(), "expired".into()).with_base(server.uri()));
+        let fresh =
+            Arc::new(GitHub::new(reqwest::Client::new(), "fresh".into()).with_base(server.uri()));
+        let reg = crate::dispatcher::cancel::CancelRegistry::new();
+        let r = reg.register("o", "r", 1, "h1").await.unwrap();
+        let job = job();
+        r.recheck.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            watch_head(
+                &expired,
+                &SameGh(fresh),
+                &job,
+                "h1",
+                &r,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("the watcher should have seen the moved head and cancelled");
+        assert!(r.token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_lookup_falls_back_to_the_job_client_when_minting_fails() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr("h2")))
+            .mount(&server)
+            .await;
+        let gh =
+            Arc::new(GitHub::new(reqwest::Client::new(), "tok".into()).with_base(server.uri()));
+        let reg = crate::dispatcher::cancel::CancelRegistry::new();
+        let r = reg.register("o", "r", 1, "h1").await.unwrap();
+        let job = job();
+        r.recheck.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            watch_head(&gh, &NoGh, &job, "h1", &r, Duration::from_millis(100)),
+        )
+        .await
+        .expect("the watcher should have looked up with the job's client and cancelled");
+        assert!(r.token.is_cancelled());
     }
 }
