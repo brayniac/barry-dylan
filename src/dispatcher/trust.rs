@@ -2,6 +2,16 @@ use crate::github::pr::BotComment;
 
 pub const APPROVE_MARKER: &str = "<!-- barry-dylan:approved:v1 -->";
 
+/// The login of barry's App bot. Logins with a `[bot]` suffix belong only to
+/// App bots, and an App's slug is unique, so no user can post as this login.
+pub const BOT_LOGIN: &str = "barry-dylan[bot]";
+
+/// Whether barry's App posted `c`. Only these comments and reviews carry
+/// markers barry acts on; anyone can type a marker into their own comment.
+pub fn is_barry(c: &BotComment) -> bool {
+    c.author == BOT_LOGIN
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trust {
     Trusted,
@@ -69,6 +79,18 @@ mod tests {
             body: body.into(),
             author: "barry-dylan[bot]".into(),
         }
+    }
+
+    #[test]
+    fn only_barrys_bot_login_is_barry() {
+        let by = |author: &str| BotComment {
+            author: author.into(),
+            ..cmt("")
+        };
+        assert!(is_barry(&by("barry-dylan[bot]")));
+        assert!(!is_barry(&by("barry-dylan")));
+        assert!(!is_barry(&by("barry-dylan-x")));
+        assert!(!is_barry(&by("barry-dylan-x[bot]")));
     }
 
     #[test]
