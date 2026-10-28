@@ -180,8 +180,11 @@ fn default_workers() -> usize {
 fn default_job_timeout() -> u64 {
     1800
 }
+/// Long enough that, after the tie-break's post reserve
+/// (`checker::multi_review::post_reserve`, 510 s), Barry, Other Barry, the
+/// judge and Other Other Barry still have 690 s to review.
 fn default_checker_timeout() -> u64 {
-    600
+    1200
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -452,6 +455,15 @@ model_name = "qwen3.5-9b"
         let cfg = Config::load(write_tmp(RACK_ONLY).path()).unwrap();
         assert!(cfg.confer.tie_break, "on by default");
         assert!(!cfg.tie_break_configured());
+    }
+
+    #[test]
+    fn the_default_checker_timeout_leaves_the_tie_break_time_to_review() {
+        let cfg = Config::load(minimal_with("").path()).unwrap();
+        assert_eq!(cfg.dispatcher.checker_timeout_secs, 1200);
+        let left = std::time::Duration::from_secs(cfg.dispatcher.checker_timeout_secs)
+            - crate::checker::multi_review::post_reserve();
+        assert_eq!(left.as_secs(), 690);
     }
 
     #[test]

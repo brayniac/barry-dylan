@@ -75,15 +75,22 @@ struct Progress {
     tie_break: Option<review::UnifiedReview>,
 }
 
-/// How long posting the tie-break review can take. After the review, the
-/// tie-break re-checks the head (an installation token and a PR lookup, as
-/// Barry), mints Other Other Barry's token, and creates the review, which
-/// retries for up to [`crate::github::client::WriteRetry`]'s deadline, then
-/// makes one last attempt and a lookup for a copy that landed. GitHub's
-/// client gives each request up to 30 s.
+/// How long posting the tie-break review can take, from the end of the
+/// review. GitHub's client gives each request up to 30 s. After the review
+/// the tie-break makes, in turn:
+///
+/// - Barry's client, for the head re-check: an installation lookup and a
+///   token mint when the token cache is cold (two requests);
+/// - the PR lookup for the head re-check (one);
+/// - Other Other Barry's client, for the post: an installation lookup and a
+///   token mint (two);
+/// - the review's creation, which retries for up to
+///   [`crate::github::client::WriteRetry`]'s deadline, and after the last
+///   wait may still look for a copy that landed and make one more attempt
+///   (two).
 pub fn post_reserve() -> std::time::Duration {
     const REQUEST: std::time::Duration = std::time::Duration::from_secs(30);
-    crate::github::client::WriteRetry::default().deadline + 3 * REQUEST
+    crate::github::client::WriteRetry::default().deadline + 7 * REQUEST
 }
 
 /// When the tie-break must stop, from when the checker started.
@@ -108,8 +115,12 @@ impl TieBreakDeadlines {
         post_reserve: std::time::Duration,
     ) -> Self {
         let start = tokio::time::Instant::from_std(start);
-        let checker = start + checker_timeout;
-        let kept_back = post_reserve.max(checker_timeout / 10);
+        // A timeout past what the clock can represent is, for this purpose,
+        // no timeout: thirty years from now.
+        let checker = start
+            .checked_add(checker_timeout)
+            .unwrap_or_else(|| start + std::time::Duration::from_secs(30 * 365 * 86_400));
+        let kept_back = post_reserve.max((checker - start) / 10);
         Self {
             review: checker.checked_sub(kept_back).unwrap_or(start).max(start),
             checker,
@@ -746,18 +757,18 @@ mod checker_tests {
         use std::time::Duration;
         let start = std::time::Instant::now();
         let at = |secs| tokio::time::Instant::from_std(start) + Duration::from_secs(secs);
-        let t = Duration::from_secs(600);
 
-        // The default reserve is longer than a tenth of the default timeout.
-        assert_eq!(post_reserve(), Duration::from_secs(390));
-        let d = TieBreakDeadlines::new(start, t, post_reserve());
-        assert_eq!(d.review, at(210));
-        assert_eq!(d.checker, at(600));
-        assert!(d.time_to_post(at(210)));
-        assert!(!d.time_to_post(at(211)));
+        // The default reserve is longer than a tenth of the default timeout,
+        // and leaves the review 690 s of it.
+        assert_eq!(post_reserve(), Duration::from_secs(510));
+        let d = TieBreakDeadlines::new(start, Duration::from_secs(1200), post_reserve());
+        assert_eq!(d.review, at(690));
+        assert_eq!(d.checker, at(1200));
+        assert!(d.time_to_post(at(690)));
+        assert!(!d.time_to_post(at(691)));
 
         // A short reserve: a tenth of the timeout is kept back instead.
-        let d = TieBreakDeadlines::new(start, t, Duration::from_secs(30));
+        let d = TieBreakDeadlines::new(start, Duration::from_secs(600), Duration::from_secs(30));
         assert_eq!(d.review, at(540));
         assert!(d.time_to_post(at(570)));
 
@@ -766,15 +777,30 @@ mod checker_tests {
         assert_eq!(d.review, at(0));
     }
 
-    /// A record written by the deployed version must still decode after an
-    /// upgrade: one that does not is ignored, and the job then reviews and
-    /// posts again. A change to `Verdict`, `UnifiedReview` or `Identity` that
-    /// breaks this needs a migration, not an edit to the fixture.
+    #[test]
+    fn a_checker_timeout_too_large_for_the_clock_does_not_panic() {
+        use std::time::Duration;
+        let start = std::time::Instant::now();
+        let d = TieBreakDeadlines::new(start, Duration::from_secs(u64::MAX), post_reserve());
+        let now = tokio::time::Instant::from_std(start);
+        assert!(d.review > now + Duration::from_secs(86_400 * 365));
+        assert!(d.time_to_post(now));
+    }
+
+    /// A record in the shape this version writes must still decode after a
+    /// later change: one that does not is ignored, and a resumed job then
+    /// reviews and posts again. A change to `Verdict`, `UnifiedReview` or
+    /// `Identity` that breaks this needs a migration, not an edit to the
+    /// fixture. Re-encoding must give the fixture back, so the fixture is the
+    /// shape the encoder writes.
     #[test]
     fn a_recorded_review_progress_still_decodes() {
-        let p: Progress =
-            serde_json::from_str(include_str!("../../../tests/fixtures/review_progress.json"))
-                .unwrap();
+        let text = include_str!("../../../tests/fixtures/review_progress.json");
+        let p: Progress = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::from_str::<serde_json::Value>(text).unwrap()
+        );
         assert_eq!(p.head_sha, "sha1");
         assert_eq!(p.posted, vec![Identity::Barry, Identity::OtherBarry]);
         match p.verdict {

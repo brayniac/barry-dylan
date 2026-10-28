@@ -35,6 +35,8 @@ pub struct LeasedJob {
 impl Store {
     /// Enqueue a job, coalescing with any existing pending job for the same
     /// (repo, pr, event_kind). `now_ts` and `run_after_ts` are unix seconds.
+    /// Coalescing clears the pending job's `review_progress`, so a merged
+    /// event, on the same head included, starts the review over.
     pub async fn enqueue(
         &self,
         job: &NewJob,

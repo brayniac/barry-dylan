@@ -2,7 +2,7 @@
 
 Automated PR review powered by multiple LLM reviewers — single Rust binary, embedded SQLite, webhook-driven.
 
-Barry Dylan deploys three GitHub App identities (Barry, Other Barry, Other Other Barry), each with its own LLM provider and review persona. A hidden judge decides whether the two primary reviewers materially agree. When they do, only Barry posts and his outcome sets the `barry/llm-review` check-run. When they disagree, both post, then Other Other Barry reviews the same head as a tie-break, posts a review marked `(tie-break)`, and his outcome sets the check-run: Approve is `success`, Comment is `neutral`, RequestChanges is `failure`. If the tie-break fails, or Other Other Barry is not installed on the repo, has no `[llm.other_other_barry]` profile, or `[confer] tie_break = false`, the check-run goes neutral with "No consensus". The tie-break keeps back 390 s, or a tenth of `checker_timeout_secs` if that is longer, to post its review (GitHub writes are retried for up to 5 minutes); a review not done by then fails, and the summary says `tie-break failed: timed out`. Measured from when the check started, so with the default 600 s timeout Barry, Other Barry, the judge and Other Other Barry together have 210 s; raise `checker_timeout_secs` for slower models. It is not posted when the PR's head moved or the PR closed while it ran.
+Barry Dylan deploys three GitHub App identities (Barry, Other Barry, Other Other Barry), each with its own LLM provider and review persona. A hidden judge decides whether the two primary reviewers materially agree. When they do, only Barry posts and his outcome sets the `barry/llm-review` check-run. When they disagree, both post, then Other Other Barry reviews the same head as a tie-break, posts a review marked `(tie-break)`, and his outcome sets the check-run: Approve is `success`, Comment is `neutral`, RequestChanges is `failure`. If the tie-break fails, or Other Other Barry is not installed on the repo, has no `[llm.other_other_barry]` profile, or `[confer] tie_break = false`, the check-run goes neutral with "No consensus". The tie-break keeps back 510 s, or a tenth of `checker_timeout_secs` if that is longer, to post its review (GitHub writes are retried for up to 5 minutes, plus up to seven 30 s requests around them); a review not done by then fails, and the summary says `tie-break failed: timed out`. Measured from when the check started, so with the default 1200 s timeout Barry, Other Barry, the judge and Other Other Barry together have 690 s; raise `checker_timeout_secs` for slower models. It is not posted when the PR's head moved or the PR closed while it ran.
 
 ## Status
 
@@ -48,7 +48,7 @@ A guest that was asked to judge and could not writes the failure into its artifa
 ### Key Patterns
 
 - **Single-actor SQLite** — All database access goes through a single blocking thread via message passing
-- **Job queue** — Jobs are leased with a timeout; concurrent workers process without duplicates. Events for the same PR are coalesced.
+- **Job queue** — Jobs are leased with a timeout; concurrent workers process without duplicates. Events for the same PR are coalesced. An event merged into a job waiting to run, a handed-back one included, starts that job's review over, even on the same head.
 - **Cancellation propagation** — `CancellationToken` per PR; when a PR closes, all in-flight checkers are cancelled between API calls
 
 ## Setup
@@ -188,7 +188,7 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | `[dispatcher]` | `debounce_secs` | Seconds to debounce synchronize events (default: 30) |
 | | `worker_count` | Parallel worker pool size (default: 4) |
 | | `job_timeout_secs` | Per-job timeout (default: 1800) |
-| | `checker_timeout_secs` | Per-checker timeout (default: 600) |
+| | `checker_timeout_secs` | Per-checker timeout, multi-review tie-break included (default: 1200) |
 | `[llm.*]` | `provider` | `"anthropic"` or `"openai"` |
 | | `endpoint` | API base URL |
 | | `api_key_env` | Env var for API key |
