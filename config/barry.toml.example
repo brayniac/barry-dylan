@@ -65,7 +65,10 @@ sqlite_path = "/var/lib/barry/barry.db"
 debounce_secs = 30
 worker_count = 4
 job_timeout_secs = 1800
-checker_timeout_secs = 600
+# Covers the whole multi-review, tie-break included. The tie-break keeps 510 s
+# of it back to post its review (GitHub writes retry for up to 5 minutes), so
+# with 1200 the reviewers have 690 s.
+checker_timeout_secs = 1200
 
 # Per-identity LLM endpoints. Mix providers freely — Barry can be
 # Anthropic, Other Barry a local llama.cpp, Other Other Barry OpenAI,
@@ -172,6 +175,10 @@ request_timeout_secs = 60
 [confer]
 allowed = ["author", "write", "maintain", "admin"]
 max_per_pr = 2
+# When the judge says Barry and Other Barry disagree, Other Other Barry reviews
+# the same head and his outcome sets the barry/llm-review check-run. Needs an
+# [llm.other_other_barry] profile. false leaves a disagreement neutral.
+tie_break = true
 
 # Persona overrides — custom prompts for each reviewer identity.
 # Each persona has a `prompt_path` field to override the default prompt.

@@ -8,11 +8,12 @@ use crate::github::pr::ChangedFile;
 use crate::telemetry::status::StatusTracker;
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// Judge said the two reviewers materially agree. Only Barry posts.
     Agree { barry: UnifiedReview },
-    /// Judge said they disagree. Both post.
+    /// Judge said they disagree. Both post, and the checker hands the
+    /// disagreement to Other Other Barry when the tie-break is configured.
     Disagree {
         barry: UnifiedReview,
         other_barry: UnifiedReview,
@@ -30,7 +31,8 @@ impl Verdict {
         match self {
             Verdict::Agree { barry } => barry.outcome,
             Verdict::BarryAlone { barry, .. } => barry.outcome,
-            Verdict::Disagree { .. } => Outcome::Comment, // neutral check-run
+            // Neutral, unless the checker's tie-break decides the check.
+            Verdict::Disagree { .. } => Outcome::Comment,
         }
     }
 }
@@ -75,6 +77,43 @@ pub fn persona_concurrency(
     let cost = u64::from(max_tokens) + u64::from(estimate_tokens(largest_prompt_bytes));
     let fit = (u64::from(context) / cost.max(1)) as usize;
     fit.clamp(1, personas.max(1))
+}
+
+/// Run each persona over its diff, as many at once as fit `context_size`
+/// together (see [`persona_concurrency`]), and return the results in persona
+/// order. Shared by the primary reviewers and by the confer/tie-break review,
+/// so every identity's personas respect its endpoint's window.
+pub(crate) async fn run_personas_gated(
+    client: &dyn crate::llm::LlmClient,
+    max_tokens: u32,
+    context_size: Option<u32>,
+    prepared: Vec<(Persona, String)>,
+) -> Vec<Result<PersonaDraft, crate::llm::LlmError>> {
+    let largest = prepared
+        .iter()
+        .map(|(p, diff)| p.prompt.len() + diff.len())
+        .max()
+        .unwrap_or(0);
+    let at_once = persona_concurrency(context_size, max_tokens, largest, prepared.len());
+    if at_once < prepared.len() {
+        tracing::info!(
+            at_once,
+            personas = prepared.len(),
+            context_size,
+            max_tokens,
+            largest_prompt_bytes = largest,
+            "personas run in turns so that those in flight fit the context together"
+        );
+    }
+    let gate = tokio::sync::Semaphore::new(at_once);
+    let futures = prepared.iter().map(|(p, diff)| {
+        let gate = &gate;
+        async move {
+            let _slot = gate.acquire().await.expect("semaphore is never closed");
+            synthesis::run_persona(client, p, diff, max_tokens).await
+        }
+    });
+    futures::future::join_all(futures).await
 }
 
 /// The metric label for a synthesis fallback. Barry's own review of #48
@@ -424,36 +463,14 @@ impl<'a> Orchestrator<'a> {
             let diff = self.render_filtered_diff(files, p.name);
             prepared.push((p.clone(), diff));
         }
-        let largest = prepared
-            .iter()
-            .map(|(p, diff)| p.prompt.len() + diff.len())
-            .max()
-            .unwrap_or(0);
-        let context_size = self.clients.context_size_for(identity);
-        let at_once = persona_concurrency(context_size, max_tokens, largest, self.personas.len());
-        if at_once < self.personas.len() {
-            tracing::info!(
-                at_once,
-                personas = self.personas.len(),
-                context_size,
-                max_tokens,
-                largest_prompt_bytes = largest,
-                "personas run in turns so that those in flight fit the context together"
-            );
-        }
-        let gate = Arc::new(tokio::sync::Semaphore::new(at_once));
-
-        let mut futures = Vec::with_capacity(self.personas.len());
-        for (p, diff) in prepared {
-            let c = Arc::clone(client);
-            let gate = Arc::clone(&gate);
-            futures.push(async move {
-                let _slot = gate.acquire().await.expect("semaphore is never closed");
-                synthesis::run_persona(c.as_ref(), &p, &diff, max_tokens).await
-            });
-        }
         let start = std::time::Instant::now();
-        let results = futures::future::join_all(futures).await;
+        let results = run_personas_gated(
+            client.as_ref(),
+            max_tokens,
+            self.clients.context_size_for(identity),
+            prepared,
+        )
+        .await;
         tracing::info!(
             duration_ms = start.elapsed().as_millis() as u64,
             "persona drafts complete"

@@ -2,7 +2,7 @@
 
 Automated PR review powered by multiple LLM reviewers — single Rust binary, embedded SQLite, webhook-driven.
 
-Barry Dylan deploys three GitHub App identities (Barry, Other Barry, Other Other Barry), each with its own LLM provider and review persona. A hidden judge decides whether the two primary reviewers materially agree. When they do, only Barry posts. When they disagree, both post independently and the check-run goes neutral.
+Barry Dylan deploys three GitHub App identities (Barry, Other Barry, Other Other Barry), each with its own LLM provider and review persona. A hidden judge decides whether the two primary reviewers materially agree. When they do, only Barry posts and his outcome sets the `barry/llm-review` check-run. When they disagree, both post, then Other Other Barry reviews the same head as a tie-break, posts a review marked `(tie-break)`, and his outcome sets the check-run: Approve is `success`, Comment is `neutral`, RequestChanges is `failure`. If the tie-break fails, or Other Other Barry is not installed on the repo, has no `[llm.other_other_barry]` profile, or `[confer] tie_break = false`, the check-run goes neutral with "No consensus". The tie-break keeps back 510 s, or a tenth of `checker_timeout_secs` if that is longer, to post its review (GitHub writes are retried for up to 5 minutes, plus up to seven 30 s requests around them); a review not done by then fails, and the summary says `tie-break failed: timed out`. Measured from when the check started, so with the default 1200 s timeout Barry, Other Barry, the judge and Other Other Barry together have 690 s; raise `checker_timeout_secs` for slower models. It is not posted when the PR's head moved or the PR closed while it ran.
 
 ## Status
 
@@ -43,12 +43,12 @@ A guest that was asked to judge and could not writes the failure into its artifa
 2. **R1 synthesis** — Each identity synthesizes persona drafts into one unified review. Nothing is posted yet.
 3. **R2 synthesis** — Each identity reads the other's R1 review and may revise.
 4. **Judge** — The judge LLM receives both R2 reviews and decides `agree` or `disagree` with a reason.
-5. **Posting** — Depending on the verdict: only Barry posts (agree), both post (disagree), or Barry posts alone if Other Barry was unreachable. Every review is posted with the `COMMENT` or `REQUEST_CHANGES` event, never `APPROVE`, so a review cannot count toward a branch's required approvals. An approve outcome is posted as a `COMMENT` review whose header names the outcome.
+5. **Posting** — Depending on the verdict: only Barry posts (agree), both post and Other Other Barry posts a tie-break (disagree), or Barry posts alone if Other Barry was unreachable. Every review is posted with the `COMMENT` or `REQUEST_CHANGES` event, never `APPROVE`, so a review cannot count toward a branch's required approvals. An approve outcome is posted as a `COMMENT` review whose header names the outcome.
 
 ### Key Patterns
 
 - **Single-actor SQLite** — All database access goes through a single blocking thread via message passing
-- **Job queue** — Jobs are leased with a timeout; concurrent workers process without duplicates. Events for the same PR are coalesced.
+- **Job queue** — Jobs are leased with a timeout; concurrent workers process without duplicates. Events for the same PR are coalesced. An event merged into a job waiting to run, a handed-back one included, starts that job's review over, even on the same head.
 - **Cancellation propagation** — `CancellationToken` per PR; when a PR closes, all in-flight checkers are cancelled between API calls
 
 ## Setup
@@ -188,7 +188,7 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | `[dispatcher]` | `debounce_secs` | Seconds to debounce synchronize events (default: 30) |
 | | `worker_count` | Parallel worker pool size (default: 4) |
 | | `job_timeout_secs` | Per-job timeout (default: 1800) |
-| | `checker_timeout_secs` | Per-checker timeout (default: 600) |
+| | `checker_timeout_secs` | Per-checker timeout, multi-review tie-break included (default: 1200) |
 | `[llm.*]` | `provider` | `"anthropic"` or `"openai"` |
 | | `endpoint` | API base URL |
 | | `api_key_env` | Env var for API key |
@@ -197,6 +197,7 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | | `request_timeout_secs` | Request timeout |
 | `[confer]` | `allowed` | Roles allowed to run `/barry confer` |
 | | `max_per_pr` | Max additional reviewers per PR |
+| | `tie_break` | Other Other Barry breaks a disagreement and sets the check-run (default: `true`; needs an `[llm.other_other_barry]` profile) |
 | `[personas.*]` | `prompt_path` | Optional custom prompt file override |
 
 ### Per-Repo Config (`.barry.toml`)
@@ -226,7 +227,7 @@ column is the further check each command makes after that.
 |---|---|---|
 | `/barry approve` | Maintainer (write/maintain/admin) | Trusts the PR author, enabling automatic review on next PR event |
 | `/barry review` | Any commander | Re-runs the full review pipeline on the current head |
-| `/barry confer` | Per `[confer] allowed` | Summons the next unposted reviewer (OB, then OOB) for an independent opinion |
+| `/barry confer` | Per `[confer] allowed` | Summons the next unposted reviewer (OB, then OOB) for an independent opinion. A tie-break counts as OOB having posted on that head, so a confer after one is refused |
 | `@barry-dylan` | Any commander | Same as `/barry review`. In a repository not in `repos`, this is how to get one reviewed |
 
 ## Security
@@ -235,7 +236,7 @@ column is the further check each command makes after that.
 - **Replayed deliveries refused** — A delivery whose body barry has already accepted is answered `200` and not acted on for 7 days, whatever its `X-GitHub-Delivery` id, so redelivering it from the App's delivery log does nothing; use `/barry review` to re-run a review. A pull request event whose `updated_at`, or a comment whose `created_at`, is more than 6 days old is refused the same way, so a delivery cannot be accepted again once barry has forgotten it. Counted as `barry_webhook_rejected_total{reason="replay"}` and `{reason="stale"}`; `{reason="storage"}` counts deliveries answered `500` because barry could not record them.
 - **Key file permissions** — Private key `.pem` files must be mode `0600` or stricter; Barry refuses to start otherwise
 - **Trust gate** — Authors with read permission require `/barry approve` from a maintainer before review runs. Approval is sticky for the PR lifetime.
-- **Reviews survive a restart** — A rack review's experiment id is written to the job the moment it exists. Stopping barry hands the job back (no waiting out a twenty-minute review, no ninety-second SIGKILL with the lease held for `job_timeout_secs`) and leaves the experiment running; the next process leases the job within seconds and resumes it. Counted as `barry_job_completed_total{outcome="handed_back"}` and `barry_rack_resumed_total`.
+- **Reviews survive a restart** — A rack review's experiment id is written to the job the moment it exists. Stopping barry hands the job back (no waiting out a twenty-minute review, no ninety-second SIGKILL with the lease held for `job_timeout_secs`) and leaves the experiment running; the next process leases the job within seconds and resumes it. A multi-review job also records its verdict and which reviews it has posted, so a resumed job does not post Barry's or Other Barry's review again, and runs or reuses the tie-break. Counted as `barry_job_completed_total{outcome="handed_back"}` and `barry_rack_resumed_total`.
 - **No stale reviews** — A push cancels the review in flight for the head it replaced, on the rack included, and the new head is reviewed after the debounce. A close cancels it outright. And whatever the webhooks said, nothing is posted without re-checking that the PR is still open and its head is still the commit that was reviewed.
 - **Endpoint validation** — `provider = "anthropic"` is rejected with non-anthropic endpoint hosts, preventing misconfiguration from leaking diffs to wrong LLM endpoints
 - **Diff exposure** — Code diffs are sent to configured LLM endpoints. Do not run on repos containing secrets or PII that should not leave your environment
@@ -251,6 +252,7 @@ The `/metrics` endpoint exposes Prometheus metrics:
 - `barry_relay_connected` — 1 while the relay holds the channel open
 - `barry_relay_events_total{event}`, `barry_relay_rejected_total{reason}`
 - `barry_rack_judge_total{outcome="verdict"|"missing"|"invalid"}`
+- `barry_multi_review_tie_break_total{outcome="approve"|"comment"|"request_changes"|"failed"}` — Other Other Barry's outcome on a disagreement, or `failed` when its review could not be produced or posted
 - `barry_confer_total{outcome="ob"|"oob"|"rejected_unauthorized"|"rejected_max_reached"|"rejected_no_run"|"rejected_all_posted"}`
 - `barry_review_superseded_total{by="push"}` — a push cancelled the review in flight for the old head
 - `barry_review_skipped_total{reason="in_flight"}` — a job did not start a review because a review of the same head was already in flight
@@ -279,8 +281,8 @@ cargo test --test integration
 
 On a sandbox repo with all three Apps installed:
 
-1. Open a PR. Confirm the four `barry/hygiene.*` Check Runs appear, plus `barry/llm-review`, and a review comment posted by **Barry** (or two reviews — one each from Barry and Other Barry — if the judge says they disagree).
+1. Open a PR. Confirm the four `barry/hygiene.*` Check Runs appear, plus `barry/llm-review`, and a review comment posted by **Barry** (or three reviews — Barry, Other Barry, and Other Other Barry's tie-break — if the judge says they disagree).
 2. Push more commits within 30s. Confirm only one extra run fires (debounce).
 3. From a non-maintainer account, open a PR. Confirm only the "needs approval" comment appears. Comment `/barry approve` as a maintainer who is in `commands_from`. Confirm the normal Check Runs and review now appear.
-4. After a review has posted, comment `/barry confer`. Confirm Other Barry posts an independent review on the same head SHA. Comment `/barry confer` again — Other Other Barry posts. A third `/barry confer` is rejected with "Maximum confers reached" (default `max_per_pr = 2`).
+4. On a PR where only Barry posted (the judge agreed), comment `/barry confer`. Confirm Other Barry posts an independent review on the same head SHA. Comment `/barry confer` again — Other Other Barry posts. A third `/barry confer` is rejected with "Maximum confers reached" (default `max_per_pr = 2`).
 5. Break `.barry.toml` (e.g. invalid TOML). Confirm a `barry/config` Check Run with `failure` appears, and other checkers do not run.

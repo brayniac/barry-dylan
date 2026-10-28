@@ -35,6 +35,8 @@ pub struct LeasedJob {
 impl Store {
     /// Enqueue a job, coalescing with any existing pending job for the same
     /// (repo, pr, event_kind). `now_ts` and `run_after_ts` are unix seconds.
+    /// Coalescing clears the pending job's `review_progress`, so a merged
+    /// event, on the same head included, starts the review over.
     pub async fn enqueue(
         &self,
         job: &NewJob,
@@ -79,6 +81,34 @@ impl Store {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ActorCommand::GetRackExperiment {
+                job_id,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let res: Option<String> = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(res)
+    }
+
+    /// Remember how far `job_id`'s multi-review got, as the checker's JSON.
+    pub async fn set_review_progress(&self, job_id: i64, progress: &str) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::SetReviewProgress {
+                job_id,
+                progress: progress.to_string(),
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(())
+    }
+
+    /// How far `job_id`'s multi-review got, if a previous attempt left a
+    /// record.
+    pub async fn review_progress(&self, job_id: i64) -> anyhow::Result<Option<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::GetReviewProgress {
                 job_id,
                 reply: Reply { tx },
             })
@@ -336,6 +366,34 @@ mod tests {
 
         store.set_rack_experiment(first.id, None).await.unwrap();
         assert_eq!(store.rack_experiment(first.id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_new_event_merged_into_a_waiting_job_clears_its_review_progress() {
+        // `/barry review` is queued as `pull_request.opened`. Folded into a
+        // job that was handed back with its review half done, it must get a
+        // new review, not a resumed one that posts nothing new.
+        let store = Store::in_memory().await.unwrap();
+        let opened = job(1, "pull_request.opened", "d1");
+        store.enqueue(&opened, 0, 0).await.unwrap();
+        let first = store.lease_next(1, 300).await.unwrap().unwrap();
+        store
+            .set_review_progress(first.id, r#"{"head_sha":"sha1"}"#)
+            .await
+            .unwrap();
+        store
+            .reschedule_at(first.id, 1000, "rate limited")
+            .await
+            .unwrap();
+        assert!(store.review_progress(first.id).await.unwrap().is_some());
+
+        store
+            .enqueue(&job(1, "pull_request.opened", "d2"), 2, 2)
+            .await
+            .unwrap();
+        let again = store.lease_next(1000, 300).await.unwrap().unwrap();
+        assert_eq!(again.id, first.id, "merged into the waiting job");
+        assert_eq!(store.review_progress(again.id).await.unwrap(), None);
     }
 
     fn job(pr: i64, kind: &str, delivery: &str) -> NewJob {

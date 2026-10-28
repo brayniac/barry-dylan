@@ -58,7 +58,8 @@
 //! 2. Run each LLM provider's review in parallel
 //! 3. Send diffs to judge LLM
 //! 4. If judge says "agree" → Barry posts unified review
-//! 5. If judge says "disagree" → Both providers post
+//! 5. If judge says "disagree" → Both providers post, then Other Other Barry
+//!    reviews as a tie-break and its outcome sets the check-run
 //!
 //! ## LLM Client Abstraction
 //!

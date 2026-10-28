@@ -1,0 +1,16 @@
+{
+  "head_sha": "sha1",
+  "verdict": {
+    "Disagree": {
+      "barry": {
+        "outcome": "request_changes",
+        "summary": "please fix",
+        "findings": [{ "file": "src/lib.rs", "line": 1, "message": "unchecked unwrap" }]
+      },
+      "other_barry": { "outcome": "comment", "summary": "a nit", "findings": [] },
+      "reason": "they weigh the unwrap differently"
+    }
+  },
+  "posted": ["barry", "other_barry"],
+  "tie_break": { "outcome": "approve", "summary": "oob weighs in.", "findings": [] }
+}

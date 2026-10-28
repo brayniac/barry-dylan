@@ -40,6 +40,97 @@ pub struct MultiReviewChecker {
     /// leaves its experiment running for the next process to resume (#39),
     /// where one dropped for any other reason cancels it.
     pub shutdown: tokio_util::sync::CancellationToken,
+    /// Whether Other Other Barry breaks a disagreement. From
+    /// [`crate::config::Config::tie_break_configured`].
+    pub tie_break: bool,
+    /// `[dispatcher] checker_timeout_secs`, which bounds [`Checker::run`].
+    /// The tie-break stops short of it so that a slow Other Other Barry
+    /// fails the tie-break, not the whole check.
+    pub checker_timeout: std::time::Duration,
+    /// Time kept back from the checker timeout for posting the tie-break
+    /// review. [`post_reserve`] in production.
+    pub post_reserve: std::time::Duration,
+}
+
+/// What came of handing a disagreement to Other Other Barry.
+enum TieBreak {
+    /// Other Other Barry reviewed and posted; its outcome decides the check.
+    Decided(review::UnifiedReview),
+    /// It was attempted and produced nothing that was posted. A fixed
+    /// category, because it is published in the check-run summary; the
+    /// error behind it is logged.
+    Failed(&'static str),
+}
+
+/// How far a job's review got, kept on the job row so that a job handed
+/// back by a stopping process resumes instead of starting again.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Progress {
+    /// The head the verdict is for. A record for any other head is ignored.
+    head_sha: String,
+    verdict: Verdict,
+    /// Identities whose review of this verdict is posted.
+    posted: Vec<Identity>,
+    /// Other Other Barry's review, once posted as the tie-break.
+    tie_break: Option<review::UnifiedReview>,
+}
+
+/// How long posting the tie-break review can take, from the end of the
+/// review. GitHub's client gives each request up to 30 s. After the review
+/// the tie-break makes, in turn:
+///
+/// - Barry's client, for the head re-check: an installation lookup and a
+///   token mint when the token cache is cold (two requests);
+/// - the PR lookup for the head re-check (one);
+/// - Other Other Barry's client, for the post: an installation lookup and a
+///   token mint (two);
+/// - the review's creation, which retries for up to
+///   [`crate::github::client::WriteRetry`]'s deadline, and after the last
+///   wait may still look for a copy that landed and make one more attempt
+///   (two).
+pub fn post_reserve() -> std::time::Duration {
+    const REQUEST: std::time::Duration = std::time::Duration::from_secs(30);
+    crate::github::client::WriteRetry::default().deadline + 7 * REQUEST
+}
+
+/// When the tie-break must stop, from when the checker started.
+#[derive(Debug, Clone, Copy)]
+struct TieBreakDeadlines {
+    /// Other Other Barry's review, with the installation lookup and head
+    /// check before it, must be done by this: the post reserve or a tenth of
+    /// the checker timeout, whichever is longer, before the dispatcher's own
+    /// timeout, so the review can still be posted and the check still says
+    /// why there was no consensus.
+    review: tokio::time::Instant,
+    /// The dispatcher's timeout. The review is posted only if the post
+    /// reserve is left before it.
+    checker: tokio::time::Instant,
+    post_reserve: std::time::Duration,
+}
+
+impl TieBreakDeadlines {
+    fn new(
+        start: std::time::Instant,
+        checker_timeout: std::time::Duration,
+        post_reserve: std::time::Duration,
+    ) -> Self {
+        let start = tokio::time::Instant::from_std(start);
+        // A timeout past what the clock can represent is, for this purpose,
+        // no timeout: thirty years from now.
+        let checker = start
+            .checked_add(checker_timeout)
+            .unwrap_or_else(|| start + std::time::Duration::from_secs(30 * 365 * 86_400));
+        let kept_back = post_reserve.max((checker - start) / 10);
+        Self {
+            review: checker.checked_sub(kept_back).unwrap_or(start).max(start),
+            checker,
+            post_reserve,
+        }
+    }
+
+    fn time_to_post(&self, now: tokio::time::Instant) -> bool {
+        now + self.post_reserve <= self.checker
+    }
 }
 
 impl MultiReviewChecker {
@@ -110,6 +201,239 @@ impl MultiReviewChecker {
             }),
         }
     }
+
+    /// Have Other Other Barry review the head Barry and Other Barry disagreed
+    /// on, post that review, and record it against the head and in the job's
+    /// progress.
+    ///
+    /// The review is the one `/barry confer` runs: OOB reads the diff, not the
+    /// two posted reviews. Recording the post means a later confer on this
+    /// head finds every Barry posted and does not run OOB again; it is not
+    /// counted against `[confer] max_per_pr`.
+    ///
+    /// Fails with "timed out" when the review is not done by
+    /// `deadlines.review`, or when less than the post reserve is left to post
+    /// it before the checker times out.
+    ///
+    /// `None` when OOB is not installed on the repo, which leaves the
+    /// disagreement as it was without spending tokens on a review that cannot
+    /// be posted, and when the PR's head moved or it closed, before the
+    /// review or before its post: a push whose delivery was late or lost does
+    /// not cancel the review, and a tie-break on an outdated commit is not
+    /// worth its tokens or its post.
+    async fn break_tie(
+        &self,
+        ctx: &CheckerCtx,
+        key: crate::storage::multi_review::RunKey,
+        reason: &str,
+        deadlines: TieBreakDeadlines,
+        progress: &mut Progress,
+    ) -> Option<TieBreak> {
+        let oob = Identity::OtherOtherBarry;
+        let timed_out = || {
+            tracing::warn!("tie-break: timed out");
+            Some(TieBreak::Failed("timed out"))
+        };
+        // `timeout_at` polls the review once before it looks at the clock, so
+        // a deadline already past is checked here, before any request.
+        if tokio::time::Instant::now() >= deadlines.review {
+            return timed_out();
+        }
+        let review = tokio::time::timeout_at(deadlines.review, async {
+            match self
+                .gh_factory
+                .preflight_identity(oob, &ctx.owner, &ctx.repo)
+                .await
+            {
+                Ok(()) => {}
+                Err(GhFactoryError::NotInstalled { .. }) => {
+                    tracing::info!("Other Other Barry not installed; the disagreement stands");
+                    return None;
+                }
+                Err(GhFactoryError::Other(e)) => {
+                    tracing::warn!(error = ?e, "tie-break: installation lookup failed");
+                    return Some(Err("installation lookup failed"));
+                }
+            }
+            if !self.head_is_current(ctx).await {
+                return None;
+            }
+            tracing::info!("Barry and Other Barry disagree; Other Other Barry breaks the tie");
+            self.status_tracker.set_phase(ctx.job_id, "tie-break");
+            let diff = synthesis::render_diff_block(&ctx.files);
+            match confer::run_unified(&self.clients, oob, &self.personas, &diff).await {
+                Ok(r) => Some(Ok(r)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "tie-break: Other Other Barry's review failed");
+                    Some(Err(e.category()))
+                }
+            }
+        });
+        let (review, tokens) = match review.await {
+            Ok(None) => return None,
+            Ok(Some(Ok(r))) => r,
+            Ok(Some(Err(category))) => return Some(TieBreak::Failed(category)),
+            Err(_) => return timed_out(),
+        };
+        self.status_tracker
+            .add_tokens(ctx.job_id, tokens.input, tokens.output);
+        if !deadlines.time_to_post(tokio::time::Instant::now()) {
+            return timed_out();
+        }
+        if !self.head_is_current(ctx).await {
+            return None;
+        }
+
+        let split = format!("Barry and Other Barry disagreed: {reason}");
+        if let Err(e) = post_review(
+            &self.gh_factory,
+            &ctx.owner,
+            &ctx.repo,
+            oob,
+            ctx.pr.number,
+            &ctx.pr.head.sha,
+            &ctx.files,
+            &review,
+            Some(&split),
+            true,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "tie-break: could not post Other Other Barry's review");
+            return Some(TieBreak::Failed("could not post"));
+        }
+        progress.tie_break = Some(review.clone());
+        self.save_progress(ctx, progress).await;
+        let _ = ctx
+            .store
+            .record_post(key, oob, outcome_str(review.outcome), now_ts())
+            .await;
+        Some(TieBreak::Decided(review))
+    }
+
+    /// Barry and Other Barry's verdict on the head, from the rack or the
+    /// configured endpoints.
+    async fn verdict(
+        &self,
+        orchestrator: &Orchestrator<'_>,
+        ctx: &CheckerCtx,
+    ) -> anyhow::Result<Verdict> {
+        // Pre-check: if OB isn't installed on this repo, skip OB's LLM phases
+        // entirely and run Barry alone. This avoids paying OB's token cost
+        // when we already know we can't post under that identity.
+        let ob_available = match self
+            .gh_factory
+            .preflight_identity(Identity::OtherBarry, &ctx.owner, &ctx.repo)
+            .await
+        {
+            Ok(()) => true,
+            Err(GhFactoryError::NotInstalled { .. }) => false,
+            Err(GhFactoryError::Other(e)) => return Err(e),
+        };
+        match &self.rack {
+            Some(rack) => {
+                self.run_on_rack(rack, orchestrator, ctx, ob_available)
+                    .await
+            }
+            None if ob_available => orchestrator.run(&ctx.files).await,
+            None => {
+                orchestrator
+                    .run_barry_only(&ctx.files, "Other Barry not installed".into())
+                    .await
+            }
+        }
+    }
+
+    /// The progress this job recorded for the head under review, if any.
+    async fn load_progress(&self, ctx: &CheckerCtx) -> Option<Progress> {
+        let text = match ctx.store.review_progress(ctx.job_id).await {
+            Ok(t) => t?,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the job's review progress; starting over");
+                return None;
+            }
+        };
+        match serde_json::from_str::<Progress>(&text) {
+            Ok(p) if p.head_sha == ctx.pr.head.sha => Some(p),
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "unreadable review progress; starting over");
+                None
+            }
+        }
+    }
+
+    /// Record `progress` on the job. A failure is logged and the review
+    /// carries on: losing the record costs a repeat post after a restart,
+    /// where failing here would cost the review.
+    async fn save_progress(&self, ctx: &CheckerCtx, progress: &Progress) {
+        let text = match serde_json::to_string(progress) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not encode the review progress");
+                return;
+            }
+        };
+        if let Err(e) = ctx.store.set_review_progress(ctx.job_id, &text).await {
+            tracing::warn!(error = %e, "could not record the review progress");
+        }
+    }
+
+    /// Post `review` as `identity` unless this job already has, and record
+    /// that it has.
+    async fn post_once(
+        &self,
+        ctx: &CheckerCtx,
+        progress: &mut Progress,
+        identity: Identity,
+        review: &review::UnifiedReview,
+        peer_disagreement: Option<&str>,
+    ) -> Result<(), GhFactoryError> {
+        if progress.posted.contains(&identity) {
+            tracing::info!(?identity, "already posted by this job; not posting again");
+            return Ok(());
+        }
+        post_review(
+            &self.gh_factory,
+            &ctx.owner,
+            &ctx.repo,
+            identity,
+            ctx.pr.number,
+            &ctx.pr.head.sha,
+            &ctx.files,
+            review,
+            peer_disagreement,
+            false,
+        )
+        .await?;
+        progress.posted.push(identity);
+        self.save_progress(ctx, progress).await;
+        Ok(())
+    }
+
+    /// Whether the head under review is still the PR's head, asked as Barry.
+    /// A lookup that fails counts as current, as it does before any post.
+    async fn head_is_current(&self, ctx: &CheckerCtx) -> bool {
+        let gh = match self
+            .gh_factory
+            .for_identity(Identity::Barry, &ctx.owner, &ctx.repo)
+            .await
+        {
+            Ok(gh) => gh,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not re-check the head; continuing");
+                return true;
+            }
+        };
+        crate::dispatcher::run::head_is_current(
+            &gh,
+            &ctx.owner,
+            &ctx.repo,
+            ctx.pr.number,
+            &ctx.pr.head.sha,
+        )
+        .await
+    }
 }
 
 #[async_trait]
@@ -141,59 +465,47 @@ impl Checker for MultiReviewChecker {
             job_id: ctx.job_id,
         };
 
-        // Pre-check: if OB isn't installed on this repo, skip OB's LLM phases
-        // entirely and run Barry alone. This avoids paying OB's token cost
-        // when we already know we can't post under that identity.
-        let ob_available = match self
-            .gh_factory
-            .preflight_identity(Identity::OtherBarry, &ctx.owner, &ctx.repo)
-            .await
-        {
-            Ok(()) => true,
-            Err(GhFactoryError::NotInstalled { .. }) => false,
-            Err(GhFactoryError::Other(e)) => return Err(e),
-        };
-        let mut verdict = match &self.rack {
-            Some(rack) => {
-                self.run_on_rack(rack, &orchestrator, ctx, ob_available)
-                    .await?
-            }
-            None if ob_available => orchestrator.run(&ctx.files).await?,
-            None => {
-                orchestrator
-                    .run_barry_only(&ctx.files, "Other Barry not installed".into())
-                    .await?
-            }
-        };
-        let orchestrator_duration = start.elapsed();
-
-        let verdict_kind = match &verdict {
+        // A job handed back by a stopping process resumes from what it had
+        // done: its verdict, and which reviews it had posted. Without this a
+        // restart during the tie-break would post Barry and Other Barry again.
+        let verdict_kind = |v: &Verdict| match v {
             Verdict::Agree { .. } => "agree",
             Verdict::Disagree { .. } => "disagree",
             Verdict::BarryAlone { .. } => "barry_alone",
         };
-        tracing::info!(
-            verdict = verdict_kind,
-            orchestrator_duration_ms = orchestrator_duration.as_millis() as u64,
-            "orchestrator verdict received"
-        );
+        let mut progress = match self.load_progress(ctx).await {
+            Some(p) => {
+                tracing::info!(
+                    verdict = verdict_kind(&p.verdict),
+                    posted = ?p.posted,
+                    "resuming the review this job had begun"
+                );
+                p
+            }
+            None => {
+                let verdict = self.verdict(&orchestrator, ctx).await?;
+                tracing::info!(
+                    verdict = verdict_kind(&verdict),
+                    orchestrator_duration_ms = start.elapsed().as_millis() as u64,
+                    "orchestrator verdict received"
+                );
+                let p = Progress {
+                    head_sha: ctx.pr.head.sha.clone(),
+                    verdict,
+                    posted: vec![],
+                    tie_break: None,
+                };
+                self.save_progress(ctx, &p).await;
+                p
+            }
+        };
 
         // Post under each Barry that has something to say.
-        match &verdict {
+        match progress.verdict.clone() {
             Verdict::Agree { barry } | Verdict::BarryAlone { barry, .. } => {
-                post_review(
-                    &self.gh_factory,
-                    &ctx.owner,
-                    &ctx.repo,
-                    Identity::Barry,
-                    ctx.pr.number,
-                    &ctx.pr.head.sha,
-                    &ctx.files,
-                    barry,
-                    None,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
+                self.post_once(ctx, &mut progress, Identity::Barry, &barry, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
             }
             Verdict::Disagree {
                 barry,
@@ -201,53 +513,40 @@ impl Checker for MultiReviewChecker {
                 reason,
             } => {
                 let disagreement_msg = format!("I disagree with Barry: {reason}");
-                post_review(
-                    &self.gh_factory,
-                    &ctx.owner,
-                    &ctx.repo,
-                    Identity::Barry,
-                    ctx.pr.number,
-                    &ctx.pr.head.sha,
-                    &ctx.files,
-                    barry,
-                    None,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
+                self.post_once(ctx, &mut progress, Identity::Barry, &barry, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
                 // OB post: NotInstalled here means OB was uninstalled between
                 // our pre-check and now. Downgrade to BarryAlone bookkeeping.
-                let downgrade = match post_review(
-                    &self.gh_factory,
-                    &ctx.owner,
-                    &ctx.repo,
-                    Identity::OtherBarry,
-                    ctx.pr.number,
-                    &ctx.pr.head.sha,
-                    &ctx.files,
-                    other_barry,
-                    Some(&disagreement_msg),
-                )
-                .await
+                match self
+                    .post_once(
+                        ctx,
+                        &mut progress,
+                        Identity::OtherBarry,
+                        &other_barry,
+                        Some(&disagreement_msg),
+                    )
+                    .await
                 {
-                    Ok(()) => false,
+                    Ok(()) => {}
                     Err(GhFactoryError::NotInstalled { .. }) => {
                         tracing::warn!("OB uninstalled mid-run; downgrading to BarryAlone");
                         metrics::counter!("barry_multi_review_barry_alone_total").increment(1);
-                        true
+                        progress.verdict = Verdict::BarryAlone {
+                            barry,
+                            reason: "Other Barry uninstalled mid-run".into(),
+                        };
+                        self.save_progress(ctx, &progress).await;
                     }
                     Err(GhFactoryError::Other(e)) => return Err(e),
-                };
-                if downgrade {
-                    let barry_clone = barry.clone();
-                    verdict = Verdict::BarryAlone {
-                        barry: barry_clone,
-                        reason: "Other Barry uninstalled mid-run".into(),
-                    };
                 }
             }
         }
+        let verdict = progress.verdict.clone();
 
-        // Persist run state. Recorded under Barry's installation.
+        // Persist run state. Recorded under Barry's installation, and before
+        // any tie-break: a cancel during the tie-break drops this future, and
+        // the reviews already posted must still be on record.
         let now = now_ts();
         let key = crate::storage::multi_review::RunKey {
             owner: ctx.owner.clone(),
@@ -259,7 +558,12 @@ impl Checker for MultiReviewChecker {
             Verdict::Agree { barry } | Verdict::BarryAlone { barry, .. } => {
                 let _ = ctx
                     .store
-                    .record_post(key, Identity::Barry, outcome_str(barry.outcome), now)
+                    .record_post(
+                        key.clone(),
+                        Identity::Barry,
+                        outcome_str(barry.outcome),
+                        now,
+                    )
                     .await;
             }
             Verdict::Disagree {
@@ -277,7 +581,7 @@ impl Checker for MultiReviewChecker {
                 let _ = ctx
                     .store
                     .record_post(
-                        key,
+                        key.clone(),
                         Identity::OtherBarry,
                         outcome_str(other_barry.outcome),
                         now,
@@ -286,18 +590,81 @@ impl Checker for MultiReviewChecker {
             }
         }
 
+        // A disagreement goes to Other Other Barry, whose outcome then decides
+        // the check. Runs inside this future, so the checker timeout and a
+        // cancel stop it as they stop the rest of the review.
+        let tie_break = match (&verdict, progress.tie_break.clone()) {
+            (Verdict::Disagree { .. }, Some(posted)) => {
+                // The job may have stopped between saving this and recording
+                // it against the head; unrecorded, a later confer would run
+                // OOB again. record_post is an upsert.
+                let _ = ctx
+                    .store
+                    .record_post(
+                        key,
+                        Identity::OtherOtherBarry,
+                        outcome_str(posted.outcome),
+                        now_ts(),
+                    )
+                    .await;
+                Some(TieBreak::Decided(posted))
+            }
+            (Verdict::Disagree { reason, .. }, None) if self.tie_break => {
+                let deadlines =
+                    TieBreakDeadlines::new(start, self.checker_timeout, self.post_reserve);
+                let t = self
+                    .break_tie(ctx, key, reason, deadlines, &mut progress)
+                    .await;
+                match &t {
+                    Some(TieBreak::Decided(oob)) => {
+                        tracing::info!(outcome = ?oob.outcome, "tie-break decided");
+                        metrics::counter!("barry_multi_review_tie_break_total", "outcome" => outcome_str(oob.outcome)).increment(1);
+                    }
+                    Some(TieBreak::Failed(e)) => {
+                        tracing::warn!(category = e, "tie-break failed; the disagreement stands");
+                        metrics::counter!("barry_multi_review_tie_break_total", "outcome" => "failed")
+                            .increment(1);
+                    }
+                    None => {}
+                }
+                t
+            }
+            _ => None,
+        };
+
         // Return the dispatcher-style outcome that drives the check-run.
-        let status = match verdict.check_outcome() {
+        let check_outcome = match &tie_break {
+            Some(TieBreak::Decided(oob)) => oob.outcome,
+            _ => verdict.check_outcome(),
+        };
+        let status = match check_outcome {
             review::Outcome::Approve => OutcomeStatus::Success,
             review::Outcome::Comment => OutcomeStatus::Neutral,
             review::Outcome::RequestChanges => OutcomeStatus::Failure,
         };
-        let summary = match &verdict {
-            Verdict::Agree { barry } => format!("Barry — {}", first_line(&barry.summary)),
-            Verdict::BarryAlone { barry, .. } => {
+        let summary = match (&verdict, &tie_break) {
+            (Verdict::Agree { barry }, _) => format!("Barry — {}", first_line(&barry.summary)),
+            (Verdict::BarryAlone { barry, .. }, _) => {
                 format!("Barry (alone) — {}", first_line(&barry.summary))
             }
-            Verdict::Disagree { reason, .. } => format!("No consensus: {reason}"),
+            (
+                Verdict::Disagree {
+                    barry,
+                    other_barry,
+                    reason,
+                },
+                Some(TieBreak::Decided(oob)),
+            ) => format!(
+                "Tie-break by Other Other Barry ({:?}) — {}. The split: Barry {:?}, Other Barry {:?}: {reason}",
+                oob.outcome,
+                first_line(&oob.summary).trim_end_matches('.'),
+                barry.outcome,
+                other_barry.outcome,
+            ),
+            (Verdict::Disagree { reason, .. }, Some(TieBreak::Failed(e))) => {
+                format!("No consensus: {reason} (tie-break failed: {e})")
+            }
+            (Verdict::Disagree { reason, .. }, None) => format!("No consensus: {reason}"),
         };
         tracing::info!(?status, "multi-review checker done");
         Ok(CheckerOutcome {
@@ -383,6 +750,73 @@ mod checker_tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn the_tie_break_review_keeps_back_the_post_reserve_or_a_tenth_of_the_timeout() {
+        use std::time::Duration;
+        let start = std::time::Instant::now();
+        let at = |secs| tokio::time::Instant::from_std(start) + Duration::from_secs(secs);
+
+        // The default reserve is longer than a tenth of the default timeout,
+        // and leaves the review 690 s of it.
+        assert_eq!(post_reserve(), Duration::from_secs(510));
+        let d = TieBreakDeadlines::new(start, Duration::from_secs(1200), post_reserve());
+        assert_eq!(d.review, at(690));
+        assert_eq!(d.checker, at(1200));
+        assert!(d.time_to_post(at(690)));
+        assert!(!d.time_to_post(at(691)));
+
+        // A short reserve: a tenth of the timeout is kept back instead.
+        let d = TieBreakDeadlines::new(start, Duration::from_secs(600), Duration::from_secs(30));
+        assert_eq!(d.review, at(540));
+        assert!(d.time_to_post(at(570)));
+
+        // A reserve longer than the timeout leaves no time to review.
+        let d = TieBreakDeadlines::new(start, Duration::from_secs(60), post_reserve());
+        assert_eq!(d.review, at(0));
+    }
+
+    #[test]
+    fn a_checker_timeout_too_large_for_the_clock_does_not_panic() {
+        use std::time::Duration;
+        let start = std::time::Instant::now();
+        let d = TieBreakDeadlines::new(start, Duration::from_secs(u64::MAX), post_reserve());
+        let now = tokio::time::Instant::from_std(start);
+        assert!(d.review > now + Duration::from_secs(86_400 * 365));
+        assert!(d.time_to_post(now));
+    }
+
+    /// A record in the shape this version writes must still decode after a
+    /// later change: one that does not is ignored, and a resumed job then
+    /// reviews and posts again. A change to `Verdict`, `UnifiedReview` or
+    /// `Identity` that breaks this needs a migration, not an edit to the
+    /// fixture. Re-encoding must give the fixture back, so the fixture is the
+    /// shape the encoder writes.
+    #[test]
+    fn a_recorded_review_progress_still_decodes() {
+        let text = include_str!("../../../tests/fixtures/review_progress.json");
+        let p: Progress = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            serde_json::from_str::<serde_json::Value>(text).unwrap()
+        );
+        assert_eq!(p.head_sha, "sha1");
+        assert_eq!(p.posted, vec![Identity::Barry, Identity::OtherBarry]);
+        match p.verdict {
+            Verdict::Disagree {
+                barry,
+                other_barry,
+                reason,
+            } => {
+                assert_eq!(barry.outcome, review::Outcome::RequestChanges);
+                assert_eq!(barry.findings[0].line, 1);
+                assert_eq!(other_barry.outcome, review::Outcome::Comment);
+                assert_eq!(reason, "they weigh the unwrap differently");
+            }
+            other => panic!("wanted Disagree, got {other:?}"),
+        }
+        assert_eq!(p.tie_break.unwrap().outcome, review::Outcome::Approve);
     }
 
     #[tokio::test]

@@ -619,26 +619,42 @@ async fn watch_head(
 /// A lookup that fails does not block the post: losing a good review to a
 /// transient GitHub error is the worse trade.
 async fn still_current(gh: &Arc<GitHub>, job: &LeasedJob, pr: &PullRequest) -> bool {
-    let now = match gh
-        .get_pr(&job.repo_owner, &job.repo_name, job.pr_number)
-        .await
-    {
+    head_is_current(
+        gh,
+        &job.repo_owner,
+        &job.repo_name,
+        job.pr_number,
+        &pr.head.sha,
+    )
+    .await
+}
+
+/// Whether PR `number` is open and its head is still `reviewed`, by asking
+/// GitHub. A lookup that fails counts as current; see [`still_current`].
+pub(crate) async fn head_is_current(
+    gh: &GitHub,
+    owner: &str,
+    repo: &str,
+    number: i64,
+    reviewed: &str,
+) -> bool {
+    let now = match gh.get_pr(owner, repo, number).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(
                 ?e,
-                pr = job.pr_number,
-                "could not re-check the head before posting; posting anyway"
+                pr = number,
+                "could not re-check the head; treating it as current"
             );
             return true;
         }
     };
-    if now.head.sha != pr.head.sha {
+    if now.head.sha != reviewed {
         tracing::info!(
-            pr = job.pr_number,
-            owner = %job.repo_owner,
-            repo = %job.repo_name,
-            reviewed = %pr.head.sha,
+            pr = number,
+            owner = %owner,
+            repo = %repo,
+            reviewed = %reviewed,
             head = %now.head.sha,
             "head moved during the review; not posting a stale outcome"
         );
@@ -647,9 +663,9 @@ async fn still_current(gh: &Arc<GitHub>, job: &LeasedJob, pr: &PullRequest) -> b
     }
     if now.state != "open" {
         tracing::info!(
-            pr = job.pr_number,
-            owner = %job.repo_owner,
-            repo = %job.repo_name,
+            pr = number,
+            owner = %owner,
+            repo = %repo,
             state = %now.state,
             "PR is no longer open; not posting"
         );

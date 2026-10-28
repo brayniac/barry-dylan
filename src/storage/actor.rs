@@ -81,6 +81,15 @@ pub enum ActorCommand {
         job_id: i64,
         reply: Reply<Option<String>>,
     },
+    SetReviewProgress {
+        job_id: i64,
+        progress: String,
+        reply: Reply<()>,
+    },
+    GetReviewProgress {
+        job_id: i64,
+        reply: Reply<Option<String>>,
+    },
     Enqueue {
         job: NewJob,
         now_ts: i64,
@@ -412,7 +421,8 @@ pub(crate) fn run(
                                 r#"UPDATE jobs
                                    SET run_after = MAX(run_after, ?1),
                                        delivery_id = ?2,
-                                       actor = ?7
+                                       actor = ?7,
+                                       review_progress = NULL
                                    WHERE repo_owner = ?3 AND repo_name = ?4 AND pr_number = ?5
                                      AND event_kind = ?6 AND leased_until IS NULL"#,
                             )
@@ -487,6 +497,40 @@ pub(crate) fn run(
                     });
                     let duration_ms = start.elapsed().as_millis() as u64;
                     record_db_timing("get_rack_experiment", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::SetReviewProgress {
+                    job_id,
+                    progress,
+                    reply,
+                } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || {
+                        let progress = progress.clone();
+                        async move {
+                            sqlx::query("UPDATE jobs SET review_progress = ?1 WHERE id = ?2")
+                                .bind(&progress)
+                                .bind(job_id)
+                                .execute(unsafe { &mut *raw })
+                                .await
+                                .map(|_| ())
+                        }
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("set_review_progress", duration_ms);
+                    reply.send(result)
+                }
+                ActorCommand::GetReviewProgress { job_id, reply } => {
+                    let start = std::time::Instant::now();
+                    let result = retry_busy(&rt, || async move {
+                        let row = sqlx::query("SELECT review_progress FROM jobs WHERE id = ?1")
+                            .bind(job_id)
+                            .fetch_optional(unsafe { &mut *raw })
+                            .await?;
+                        Ok(row.and_then(|r| r.get::<Option<String>, _>("review_progress")))
+                    });
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    record_db_timing("get_review_progress", duration_ms);
                     reply.send(result)
                 }
                 ActorCommand::PendingRunAfter {

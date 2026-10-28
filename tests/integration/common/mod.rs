@@ -164,12 +164,36 @@ pub async fn mock_openai_chat(server: &MockServer, response_text: &str) {
 }
 
 pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
+    let gh = Arc::new(GitHub::new(reqwest::Client::new(), "tok".into()).with_base(server.uri()));
+    fixture_with_llm_using(default_config_with_llm(server), Arc::new(StaticGh { gh })).await
+}
+
+/// [`fixture_with_llm`] with the config and the per-identity GitHub factory
+/// chosen by the caller.
+pub async fn fixture_with_llm_using(
+    cfg: barry_dylan::config::Config,
+    factory: Arc<dyn MultiGhFactory>,
+) -> (Store, Arc<JobDeps>) {
+    fixture_with_llm_reserving(
+        cfg,
+        factory,
+        barry_dylan::checker::multi_review::post_reserve(),
+    )
+    .await
+}
+
+/// [`fixture_with_llm_using`] with the tie-break's post reserve chosen by
+/// the caller, for a test whose checker timeout is seconds long.
+pub async fn fixture_with_llm_reserving(
+    cfg: barry_dylan::config::Config,
+    factory: Arc<dyn MultiGhFactory>,
+    post_reserve: std::time::Duration,
+) -> (Store, Arc<JobDeps>) {
     use barry_dylan::checker::multi_review::clients::IdentityClients;
     use barry_dylan::checker::multi_review::{MultiReviewChecker, persona};
 
     let store = Store::in_memory().await.unwrap();
-    let gh = Arc::new(GitHub::new(reqwest::Client::new(), "tok".into()).with_base(server.uri()));
-    let cfg = Arc::new(default_config_with_llm(server));
+    let cfg = Arc::new(cfg);
 
     let clients = Arc::new(IdentityClients {
         barry: barry_dylan::llm::factory::build(&cfg.llm["barry"], reqwest::Client::new()).unwrap(),
@@ -193,7 +217,6 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
         other_other_barry_context_size: None,
     });
     let personas = Arc::new(persona::resolve(&persona::PersonaOverrides::default()).unwrap());
-    let factory: Arc<dyn MultiGhFactory> = Arc::new(StaticGh { gh: gh.clone() });
 
     let mut pipeline = Pipeline::hygiene_only();
     let status_tracker = Arc::new(barry_dylan::telemetry::status::StatusTracker::new());
@@ -207,6 +230,9 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
         // against the real control plane, not a mock of it.
         rack: None,
         http: reqwest::Client::new(),
+        tie_break: cfg.tie_break_configured(),
+        checker_timeout: std::time::Duration::from_secs(cfg.dispatcher.checker_timeout_secs),
+        post_reserve,
     }));
 
     let deps = Arc::new(JobDeps {
@@ -223,7 +249,13 @@ pub async fn fixture_with_llm(server: &MockServer) -> (Store, Arc<JobDeps>) {
 }
 
 pub fn default_config_with_llm(server: &MockServer) -> barry_dylan::config::Config {
-    let toml = format!(
+    toml::from_str(&default_config_with_llm_toml(server)).unwrap()
+}
+
+/// The text of [`default_config_with_llm`], for a test that edits it before
+/// parsing. Ends inside `[confer]`.
+pub fn default_config_with_llm_toml(server: &MockServer) -> String {
+    format!(
         r#"
         [server]
         listen = "0.0.0.0:0"
@@ -261,8 +293,7 @@ pub fn default_config_with_llm(server: &MockServer) -> barry_dylan::config::Conf
         max_per_pr = 2
     "#,
         base = server.uri()
-    );
-    toml::from_str(&toml).unwrap()
+    )
 }
 
 pub fn enqueue_opened<'a>(

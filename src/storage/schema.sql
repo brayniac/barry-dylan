@@ -20,7 +20,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- is in flight. Set on submit, cleared when the experiment reaches a
     -- terminal state. A job leased with this set is resumed, not resubmitted:
     -- the process that submitted it may have restarted underneath it.
-    rack_experiment TEXT
+    rack_experiment TEXT,
+    -- How far this job's multi-review got: the verdict, which reviews it has
+    -- posted, and the tie-break review if posted (JSON, owned by the
+    -- multi-review checker). A job leased with this set resumes from it
+    -- rather than reviewing and posting again.
+    review_progress TEXT
 );
 
 -- Partial unique index: at most one pending job per (repo, pr, event_kind).

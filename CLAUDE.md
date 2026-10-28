@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Barry Dylan is a GitHub App that runs automated PR review across one or a few organizations. It uses a single Rust binary with embedded SQLite and is webhook-driven.
 
-The "Barry & Other Barry" multi-reviewer feature gives each PR two independent LLM reviewers (different model providers, different personas — security, correctness, style — merged internally), a peer round in which each reads the other's review and revises, and a hidden judge that decides whether the revised reviews materially agree. Disjoint findings are complementary, not a disagreement; only a different outcome or a contradiction is. When they agree, only Barry posts. When they disagree, both post and the check-run goes neutral. A maintainer can summon a third reviewer ("Other Other Barry") with `/barry confer`.
+The "Barry & Other Barry" multi-reviewer feature gives each PR two independent LLM reviewers (different model providers, different personas — security, correctness, style — merged internally), a peer round in which each reads the other's review and revises, and a hidden judge that decides whether the revised reviews materially agree. Disjoint findings are complementary, not a disagreement; only a different outcome or a contradiction is. When they agree, only Barry posts and his outcome sets the check-run. When they disagree, both post, then a third reviewer ("Other Other Barry") reviews the same head as a tie-break (`src/checker/multi_review/mod.rs::break_tie`, reusing confer's review path, so it reads the diff and not the two reviews), posts, and his outcome sets the check-run (Approve → success, Comment → neutral, RequestChanges → failure). A failed tie-break, an uninstalled OOB App, no `[llm.other_other_barry]` profile, or `[confer] tie_break = false` leaves the check neutral with "No consensus"; a tie-break whose review is not done 510 s (`multi_review::post_reserve`: GitHub's 300 s write retry plus seven 30 s requests; the default `checker_timeout_secs` of 1200 leaves 690 s to review) or a tenth of `checker_timeout_secs`, whichever is longer, before the checker times out fails as "timed out", and one whose head moved or PR closed is not posted. Persona drafts for every identity reviewed locally (not the rack), confer and the tie-break included, go through `orchestrator::run_personas_gated`, which fits them to the endpoint's `context_size`. A maintainer can also summon Other Other Barry with `/barry confer`.
 
 ## Build and Run Commands
 
@@ -82,7 +82,7 @@ src/
 
 7. **No stale reviews** (`src/dispatcher/cancel.rs`, `src/dispatcher/run.rs`): a `synchronize` webhook fires the PR's cancel token immediately, dropping the in-flight review of the old head (and cancelling its rack experiment); a `closed` webhook does the same via the queue. `post_outcome` re-fetches the PR before writing anything and skips the post if the head moved or the PR is no longer open.
 
-8. **Reviews survive a restart** (`src/rack/mod.rs::review_for_job`, `src/dispatcher/worker.rs`): the rack experiment id is persisted on the `jobs` row (`rack_experiment`) on submit and cleared when it ends. On SIGTERM the worker drops the job in hand and releases its lease (`reschedule_at`, no attempt spent); the abandon guard sees the shutdown token and does not cancel the experiment; the next process leases the job and resumes the experiment instead of resubmitting. A resumed experiment that ended badly is resubmitted once.
+8. **Reviews survive a restart** (`src/rack/mod.rs::review_for_job`, `src/dispatcher/worker.rs`): the rack experiment id is persisted on the `jobs` row (`rack_experiment`) on submit and cleared when it ends. On SIGTERM the worker drops the job in hand and releases its lease (`reschedule_at`, no attempt spent); the abandon guard sees the shutdown token and does not cancel the experiment; the next process leases the job and resumes the experiment instead of resubmitting. A resumed experiment that ended badly is resubmitted once. The multi-review checker also records on the job row (`review_progress`) its verdict, which reviews it has posted, and the tie-break review; a resumed job reuses the verdict and posts only what it had not.
 
 ### Slash Commands
 
@@ -90,12 +90,12 @@ Every comment command is gated at the webhook on `commands_from` (GitHub logins,
 
 - `/barry approve` — maintainer-only; trusts the PR author for this PR so reviews start running. Sticky for the lifetime of the PR.
 - `/barry review` — re-runs the full review pipeline on the current head.
-- `/barry confer` — summons the next un-posted Barry (OB then OOB) to post an independent review on the current head SHA.
+- `/barry confer` — summons the next un-posted Barry (OB then OOB) to post an independent review on the current head SHA. A tie-break records OOB as posted on that head, so a confer after one is refused ("All Barrys have already conferred"); the tie-break does not count against `max_per_pr`.
 - `@barry-dylan` — same as `/barry review`. A commander's comment also gets through the `repos` allowlist, so this is how to get one review of a PR in a repository Barry does not otherwise act on.
 
 ### Configuration
 
-- `barry.toml`: Global config with server listen address, GitHub App credentials (3 apps), storage SQLite path, LLM profiles (barry, other_barry, other_other_barry, judge), dispatcher settings (workers, timeouts), and confer rules.
+- `barry.toml`: Global config with server listen address, GitHub App credentials (3 apps), storage SQLite path, LLM profiles (barry, other_barry, other_other_barry, judge), dispatcher settings (workers, timeouts), and confer rules (`[confer] allowed`, `max_per_pr`, `tie_break`).
 - `.barry.toml`: Per-repo config for disabling checkers or overriding defaults.
 
 ### Metrics
@@ -105,6 +105,7 @@ Every comment command is gated at the webhook on `commands_from` (GitHub logins,
 - `barry_multi_review_barry_alone_total` — Other Barry was unreachable
 - `barry_multi_review_synthesis_fallback_total{reason="truncated"|"invalid_json"}` — synthesis could not produce a review and the persona drafts stood in
 - `barry_multi_review_peer_round_total{outcome="revised"|"kept_first"}` — the peer round produced a revised review, or that reviewer kept its first
+- `barry_multi_review_tie_break_total{outcome="approve"|"comment"|"request_changes"|"failed"}` — Other Other Barry's outcome on a disagreement
 - `barry_confer_total{outcome="ob"|"oob"|"rejected_unauthorized"|"rejected_max_reached"|"rejected_no_run"|"rejected_all_posted"}`
 - `barry_webhook_command_total{outcome="accepted"|"on_demand"|"rejected"}` — comment commands, `on_demand` being one in a repository outside `repos`
 - `barry_review_superseded_total{by="push"}` — a push cancelled the review in flight for the old head
