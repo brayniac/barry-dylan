@@ -172,6 +172,10 @@ request_timeout_secs = 60
 [confer]
 allowed = ["author", "write", "maintain", "admin"]
 max_per_pr = 2
+# When the judge says Barry and Other Barry disagree, Other Other Barry reviews
+# the same head and his outcome sets the barry/llm-review check-run. Needs an
+# [llm.other_other_barry] profile. false leaves a disagreement neutral.
+tie_break = true
 
 # Persona overrides — custom prompts for each reviewer identity.
 # Each persona has a `prompt_path` field to override the default prompt.

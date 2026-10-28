@@ -87,6 +87,34 @@ impl Store {
         Ok(res)
     }
 
+    /// Remember how far `job_id`'s multi-review got, as the checker's JSON.
+    pub async fn set_review_progress(&self, job_id: i64, progress: &str) -> anyhow::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::SetReviewProgress {
+                job_id,
+                progress: progress.to_string(),
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        rx.await.map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(())
+    }
+
+    /// How far `job_id`'s multi-review got, if a previous attempt left a
+    /// record.
+    pub async fn review_progress(&self, job_id: i64) -> anyhow::Result<Option<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(ActorCommand::GetReviewProgress {
+                job_id,
+                reply: Reply { tx },
+            })
+            .map_err(|_| crate::storage::DbError::Closed)?;
+        let res: Option<String> = rx.await.map_err(|_| crate::storage::DbError::Closed)??;
+        Ok(res)
+    }
+
     /// Return the run_after timestamp of the pending job, if any.
     pub async fn pending_run_after(
         &self,

@@ -7,16 +7,20 @@ use std::sync::Arc;
 
 pub const REVIEW_MARKER_PREFIX: &str = "<!-- barry-dylan:multi-review:";
 
+/// The review body. `tie_break` marks a review whose outcome decided the
+/// check-run because Barry and Other Barry disagreed.
 pub fn body_for(
     identity: Identity,
     review: &UnifiedReview,
     peer_disagreement: Option<&str>,
+    tie_break: bool,
 ) -> String {
     let header = format!(
-        "{REVIEW_MARKER_PREFIX}{slug}:v1 -->\n**{label}** — {outcome:?}\n",
+        "{REVIEW_MARKER_PREFIX}{slug}:v1 -->\n**{label}** — {outcome:?}{note}\n",
         slug = identity.slug(),
         label = identity.label(),
         outcome = review.outcome,
+        note = if tie_break { " (tie-break)" } else { "" },
     );
     let mut body = header;
     if let Some(disagreement) = peer_disagreement {
@@ -39,6 +43,7 @@ pub async fn post_review(
     files: &[ChangedFile],
     review: &UnifiedReview,
     peer_disagreement: Option<&str>,
+    tie_break: bool,
 ) -> Result<(), GhFactoryError> {
     let gh = factory.for_identity(identity, owner, repo).await?;
     let inline = to_inline_comments(files, &review.findings);
@@ -49,7 +54,7 @@ pub async fn post_review(
         inline_comments = inline.len(),
         "posting review"
     );
-    let body = body_for(identity, review, peer_disagreement);
+    let body = body_for(identity, review, peer_disagreement, tie_break);
     let input = ReviewInput {
         body: &body,
         event: review_event(review.outcome),
@@ -136,7 +141,7 @@ mod tests {
 
     #[test]
     fn body_includes_identity_marker_and_label() {
-        let b = body_for(Identity::OtherBarry, &rev(Outcome::Comment), None);
+        let b = body_for(Identity::OtherBarry, &rev(Outcome::Comment), None, false);
         assert!(b.contains("multi-review:other_barry"));
         assert!(b.contains("Other Barry"));
         assert!(b.contains("looks fine"));
@@ -148,6 +153,7 @@ mod tests {
             Identity::OtherBarry,
             &rev(Outcome::Comment),
             Some("I disagree with Barry on X"),
+            false,
         );
         let disagree_idx = b.find("disagree").unwrap();
         let summary_idx = b.find("looks fine").unwrap();
@@ -216,6 +222,7 @@ mod tests {
             &[],
             &rev(outcome),
             None,
+            false,
         )
         .await
         .unwrap();

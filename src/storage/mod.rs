@@ -152,6 +152,7 @@ impl Store {
         Self::migrate_schema(&pool).await;
         Self::migrate_jobs_add_actor(&pool).await;
         Self::migrate_jobs_add_rack_experiment(&pool).await;
+        Self::migrate_jobs_add_review_progress(&pool).await;
 
         // Create a single connection to hand to the actor.
         let conn = pool.acquire().await?.detach();
@@ -178,6 +179,7 @@ impl Store {
         Self::migrate_schema(&pool).await;
         Self::migrate_jobs_add_actor(&pool).await;
         Self::migrate_jobs_add_rack_experiment(&pool).await;
+        Self::migrate_jobs_add_review_progress(&pool).await;
 
         let conn = pool.acquire().await?.detach();
 
@@ -243,6 +245,24 @@ impl Store {
             .execute(pool)
             .await
             .map_err(|e| tracing::error!("migrate_jobs_add_rack_experiment failed: {e}"));
+    }
+
+    /// Add `review_progress` to `jobs` if missing. New deployments get it
+    /// from CREATE TABLE; older ones need this ALTER.
+    async fn migrate_jobs_add_review_progress(pool: &sqlx::Pool<sqlx::Sqlite>) {
+        use sqlx::Row;
+        let rows = sqlx::query("SELECT name FROM pragma_table_info('jobs')")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        let cols: Vec<String> = rows.iter().map(|r| r.get::<String, _>("name")).collect();
+        if cols.iter().any(|c| c == "review_progress") {
+            return;
+        }
+        let _ = sqlx::query("ALTER TABLE jobs ADD COLUMN review_progress TEXT")
+            .execute(pool)
+            .await
+            .map_err(|e| tracing::error!("migrate_jobs_add_review_progress failed: {e}"));
     }
 
     /// Run schema statements from SCHEMA.

@@ -190,6 +190,12 @@ pub struct ConferConfig {
     pub allowed: Vec<String>,
     #[serde(default = "default_max_confers")]
     pub max_per_pr: u32,
+    /// When the judge says Barry and Other Barry disagree, Other Other Barry
+    /// reviews the same head and its outcome decides the check-run. Takes
+    /// effect only when an `[llm.other_other_barry]` profile exists; see
+    /// [`Config::tie_break_configured`].
+    #[serde(default = "default_tie_break")]
+    pub tie_break: bool,
 }
 
 impl Default for ConferConfig {
@@ -197,8 +203,13 @@ impl Default for ConferConfig {
         Self {
             allowed: default_allowed_roles(),
             max_per_pr: default_max_confers(),
+            tie_break: default_tie_break(),
         }
     }
+}
+
+fn default_tie_break() -> bool {
+    true
 }
 
 fn default_allowed_roles() -> Vec<String> {
@@ -252,6 +263,17 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Whether a disagreement is handed to Other Other Barry to break.
+    ///
+    /// Needs the switch on and an `[llm.other_other_barry]` profile. A rack
+    /// deployment may have no such profile: the rack produces Barry's and
+    /// Other Barry's reviews, not Other Other Barry's, so without the profile
+    /// there is nothing to run the tie-break against and a disagreement stays
+    /// neutral.
+    pub fn tie_break_configured(&self) -> bool {
+        self.confer.tie_break && self.llm.contains_key("other_other_barry")
+    }
+
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
             path: path.into(),
@@ -423,6 +445,22 @@ model_name = "qwen3.5-9b"
         let f = write_tmp(&RACK_ONLY[..RACK_ONLY.find("[rack]").unwrap()]);
         let err = Config::load(f.path()).unwrap_err().to_string();
         assert!(err.contains("[llm.barry]"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_rack_without_an_other_other_barry_profile_has_no_tie_break() {
+        let cfg = Config::load(write_tmp(RACK_ONLY).path()).unwrap();
+        assert!(cfg.confer.tie_break, "on by default");
+        assert!(!cfg.tie_break_configured());
+    }
+
+    #[test]
+    fn the_tie_break_is_on_by_default_and_can_be_switched_off() {
+        let on = minimal_with("");
+        assert!(Config::load(on.path()).unwrap().tie_break_configured());
+        let text = std::fs::read_to_string(on.path()).unwrap() + "\n[confer]\ntie_break = false\n";
+        let cfg = Config::load(write_tmp(&text).path()).unwrap();
+        assert!(!cfg.tie_break_configured());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! Confer command handler. Summons OB or OOB to weigh in on a posted review.
 
+use crate::checker::multi_review::clients::IdentityClients;
 use crate::checker::multi_review::identity::Identity;
+use crate::checker::multi_review::orchestrator::run_personas_gated;
 use crate::checker::multi_review::persona::Persona;
 use crate::checker::multi_review::posting::post_review;
 use crate::checker::multi_review::review::UnifiedReview;
@@ -127,13 +129,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
 
     let files = barry_gh.list_pr_files(&owner, &repo, job.pr_number).await?;
     let diff = synthesis::render_diff_block(&files);
-    let (review, tokens) = run_unified(
-        clients.for_identity(summon).as_ref(),
-        clients.max_tokens_for(summon),
-        personas,
-        &diff,
-    )
-    .await?;
+    let (review, tokens) = run_unified(clients, summon, personas, &diff).await?;
     deps.status_tracker
         .add_tokens(job.id, tokens.input, tokens.output);
 
@@ -147,6 +143,7 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
         &files,
         &review,
         None,
+        false,
     )
     .await
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -176,30 +173,64 @@ fn role_matches(perm: &str, author: &str, pr_author: &str, allowed: &[String]) -
     false
 }
 
-async fn run_unified(
-    client: &dyn crate::llm::LlmClient,
-    max_tokens: u32,
+/// Why [`run_unified`] produced no review.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReviewError {
+    #[error("persona call failed: {0}")]
+    Persona(crate::llm::LlmError),
+    #[error("synthesis failed: {0}")]
+    Synthesis(synthesis::SynthesisError),
+}
+
+impl ReviewError {
+    /// A fixed description for text that is published, such as a check-run
+    /// summary. The error itself can carry an endpoint URL or a response body
+    /// of any size; it belongs in the log.
+    pub(crate) fn category(&self) -> &'static str {
+        match self {
+            ReviewError::Persona(_) | ReviewError::Synthesis(synthesis::SynthesisError::Llm(_)) => {
+                "model request failed"
+            }
+            ReviewError::Synthesis(_) => "synthesis failed",
+        }
+    }
+}
+
+/// One reviewer's independent review of `diff`: every persona drafts, gated
+/// to fit the identity's context window, then one synthesis with no peer
+/// review in view. Used by `/barry confer` and by the tie-break that follows
+/// a disagreement, so a summoned reviewer and a tie-breaking one read the
+/// same thing: the diff, and not the reviews already posted.
+pub(crate) async fn run_unified(
+    clients: &IdentityClients,
+    identity: Identity,
     personas: &[Persona],
     diff: &str,
-) -> anyhow::Result<(UnifiedReview, synthesis::TokenCount)> {
-    let mut futures = Vec::with_capacity(personas.len());
-    for p in personas {
-        let p = p.clone();
-        let diff = diff.to_string();
-        futures.push(async move { synthesis::run_persona(client, &p, &diff, max_tokens).await });
-    }
-    let results = futures::future::join_all(futures).await;
+) -> Result<(UnifiedReview, synthesis::TokenCount), ReviewError> {
+    let client = clients.for_identity(identity).as_ref();
+    let max_tokens = clients.max_tokens_for(identity);
+    let prepared = personas
+        .iter()
+        .map(|p| (p.clone(), diff.to_string()))
+        .collect();
+    let results = run_personas_gated(
+        client,
+        max_tokens,
+        clients.context_size_for(identity),
+        prepared,
+    )
+    .await;
     let mut drafts = Vec::with_capacity(results.len());
     let mut total = synthesis::TokenCount::default();
     for r in results {
-        let draft = r.map_err(|e| anyhow::anyhow!("persona call failed: {e}"))?;
+        let draft = r.map_err(ReviewError::Persona)?;
         total.input += draft.tokens.input;
         total.output += draft.tokens.output;
         drafts.push(draft);
     }
     let (r, synth_tokens) = synthesis::synthesize(client, &drafts, diff, None, max_tokens)
         .await
-        .map_err(|e| anyhow::anyhow!("synthesis failed: {e}"))?;
+        .map_err(ReviewError::Synthesis)?;
     total.input += synth_tokens.input;
     total.output += synth_tokens.output;
     Ok((r, total))
@@ -217,6 +248,68 @@ fn outcome_str(o: crate::checker::multi_review::review::Outcome) -> &'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records the most requests it has had in flight at once.
+    struct PeakClient {
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmClient for PeakClient {
+        async fn complete(
+            &self,
+            _req: &crate::llm::LlmRequest,
+        ) -> Result<crate::llm::LlmResponse, crate::llm::LlmError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            self.in_flight.fetch_sub(1, SeqCst);
+            Ok(crate::llm::LlmResponse {
+                text: r#"{"outcome":"approve","summary":"ok","findings":[]}"#.into(),
+                input_tokens: None,
+                output_tokens: None,
+                finish_reason: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_confer_review_runs_personas_in_turns_when_the_window_is_small() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let peak = Arc::new(PeakClient {
+            in_flight: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        });
+        let client: Arc<dyn crate::llm::LlmClient> = peak.clone();
+        // Four personas at ~1000 tokens each into a 2500-token window: two at
+        // a time, as the primary reviewers would run them.
+        let clients = IdentityClients {
+            barry: client.clone(),
+            other_barry: client.clone(),
+            other_other_barry: client.clone(),
+            judge: client,
+            barry_max_tokens: 1000,
+            other_barry_max_tokens: 1000,
+            other_other_barry_max_tokens: 1000,
+            judge_max_tokens: 1000,
+            barry_context_size: None,
+            other_barry_context_size: None,
+            other_other_barry_context_size: Some(2500),
+        };
+        let personas: Vec<Persona> = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|n| Persona {
+                name: n,
+                prompt: Arc::new(format!("you are {n}")),
+            })
+            .collect();
+        run_unified(&clients, Identity::OtherOtherBarry, &personas, "+x")
+            .await
+            .unwrap();
+        assert_eq!(peak.peak.load(SeqCst), 2);
+    }
 
     #[test]
     fn role_matches_pr_author() {

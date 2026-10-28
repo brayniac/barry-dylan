@@ -275,6 +275,7 @@ pub async fn run(config_path: &Path) -> anyhow::Result<()> {
         status_tracker.clone(),
         rack,
         shutdown.clone(),
+        &cfg,
     ));
     // One registry for the dispatcher, which registers each job's token, and
     // the webhook handler, which fires it when the PR's head moves.
@@ -422,6 +423,7 @@ fn build_pipeline_with(
     status_tracker: Arc<StatusTracker>,
     rack: Option<Arc<crate::rack::RackConfig>>,
     shutdown: CancellationToken,
+    cfg: &crate::config::Config,
 ) -> Pipeline {
     let mut p = Pipeline::hygiene_only();
     p.checkers
@@ -433,6 +435,8 @@ fn build_pipeline_with(
             rack,
             http: reqwest::Client::new(),
             shutdown,
+            tie_break: cfg.tie_break_configured(),
+            checker_timeout: std::time::Duration::from_secs(cfg.dispatcher.checker_timeout_secs),
         }));
     p
 }

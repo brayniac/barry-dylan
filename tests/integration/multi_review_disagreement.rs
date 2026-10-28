@@ -19,8 +19,10 @@ fn chat_resp(content: &str) -> serde_json::Value {
     })
 }
 
+/// With `[confer] tie_break = false`, a disagreement is left standing: see
+/// `multi_review_tie_break` for what happens otherwise.
 #[tokio::test]
-async fn disagreement_posts_two_reviews_and_neutral_check() {
+async fn disagreement_without_a_tie_break_posts_two_reviews_and_neutral_check() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -97,7 +99,20 @@ async fn disagreement_posts_two_reviews_and_neutral_check() {
         .mount(&server)
         .await;
 
-    let (store, deps) = crate::common::fixture_with_llm(&server).await;
+    let cfg = toml::from_str(
+        &crate::common::default_config_with_llm_toml(&server)
+            .replace("max_per_pr = 2", "max_per_pr = 2\ntie_break = false"),
+    )
+    .unwrap();
+    let gh = std::sync::Arc::new(
+        barry_dylan::github::client::GitHub::new(reqwest::Client::new(), "tok".into())
+            .with_base(server.uri()),
+    );
+    let (store, deps) = crate::common::fixture_with_llm_using(
+        cfg,
+        std::sync::Arc::new(crate::common::StaticGh { gh }),
+    )
+    .await;
     crate::common::enqueue_opened(&store, "o", "r", 1).await;
     let job = store.lease_next(0, 300).await.unwrap().unwrap();
     run_job(&deps, &job).await.unwrap();
