@@ -45,15 +45,28 @@ pub struct CheckRunResp {
 }
 
 impl GitHub {
-    /// Create a Check Run. Re-using the same `name` for the same head_sha replaces the previous one.
+    /// Create a Check Run. GitHub shows only the latest check run of each
+    /// name on a head, so re-using `name` for the same head_sha supersedes
+    /// the previous one in the PR's checks.
+    ///
+    /// Retried on transient failures without checking whether an earlier
+    /// attempt landed. A retry of an attempt GitHub had applied creates a
+    /// second run of the same name with the same result, and only the latest
+    /// is shown. Returns `None` when GitHub accepted the run but its response
+    /// could not be read.
     pub async fn create_check_run(
         &self,
         owner: &str,
         repo: &str,
         input: &CheckRunInput,
-    ) -> Result<CheckRunResp, GhError> {
+    ) -> Result<Option<CheckRunResp>, GhError> {
         let path = format!("/repos/{owner}/{repo}/check-runs");
-        self.post_json(&path, serde_json::to_value(input).unwrap())
-            .await
+        self.write_json(
+            "check_run",
+            reqwest::Method::POST,
+            &path,
+            serde_json::to_value(input).unwrap(),
+        )
+        .await
     }
 }

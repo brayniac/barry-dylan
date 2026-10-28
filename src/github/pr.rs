@@ -440,7 +440,21 @@ pub struct ReviewInput<'a> {
     pub commit_id: &'a str,
 }
 
+/// How far before a write's first attempt a copy of it found by
+/// [`GitHub::find_recent_review`] or [`GitHub::find_recent_comment`] may have
+/// been created, to allow for this host's clock running ahead of GitHub's.
+/// A copy older than that is an earlier post of the same text, not this one.
+const LANDED_CLOCK_SLACK: time::Duration = time::Duration::minutes(2);
+
 impl GitHub {
+    /// Post a review.
+    ///
+    /// A review sent twice is posted twice, and GitHub has been seen to
+    /// record a review and still answer 502. So after a 5xx or a transport
+    /// error that may have reached GitHub, the review is resent only if
+    /// [`GitHub::find_recent_review`] finds no review with the same body on
+    /// the same commit created since this call began; one it finds is taken
+    /// as this post. A refused connection or a rate limit is resent directly.
     pub async fn create_review(
         &self,
         owner: &str,
@@ -448,17 +462,19 @@ impl GitHub {
         number: i64,
         input: &ReviewInput<'_>,
     ) -> Result<i64, GhError> {
-        #[derive(Deserialize)]
-        struct R {
-            id: i64,
-        }
         let path = format!("/repos/{owner}/{repo}/pulls/{number}/reviews");
-        let r: R = self
-            .post_json(&path, serde_json::to_value(input).unwrap())
-            .await?;
-        Ok(r.id)
+        let since = time::OffsetDateTime::now_utc() - LANDED_CLOCK_SLACK;
+        self.post_unique(
+            "review",
+            &path,
+            serde_json::to_value(input).unwrap(),
+            || self.find_recent_review(owner, repo, number, input.body, input.commit_id, since),
+        )
+        .await
     }
 
+    /// Post an issue comment, guarded against a duplicate the way
+    /// [`GitHub::create_review`] is, matching on body alone.
     pub async fn create_issue_comment(
         &self,
         owner: &str,
@@ -466,17 +482,90 @@ impl GitHub {
         number: i64,
         body: &str,
     ) -> Result<i64, GhError> {
-        #[derive(Deserialize)]
-        struct R {
-            id: i64,
-        }
         let path = format!("/repos/{owner}/{repo}/issues/{number}/comments");
-        let r: R = self
-            .post_json(&path, serde_json::json!({ "body": body }))
-            .await?;
-        Ok(r.id)
+        let since = time::OffsetDateTime::now_utc() - LANDED_CLOCK_SLACK;
+        self.post_unique(
+            "issue_comment",
+            &path,
+            serde_json::json!({ "body": body }),
+            || self.find_recent_comment(owner, repo, number, body, since),
+        )
+        .await
     }
 
+    /// The id of a review among the PR's last 50 with this body, on this
+    /// commit, created at or after `since`.
+    pub async fn find_recent_review(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+        body: &str,
+        commit: &str,
+        since: time::OffsetDateTime,
+    ) -> Result<Option<i64>, GhError> {
+        let q = r#"
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  reviews(last: 50) {
+                    nodes { databaseId body createdAt commit { oid } }
+                  }
+                }
+              }
+            }
+        "#;
+        let r: RecentResponse = self
+            .graphql(
+                q,
+                serde_json::json!({ "owner": owner, "name": repo, "number": number }),
+            )
+            .await?;
+        let nodes = r.data.repository.pull_request.reviews.unwrap_or_default();
+        Ok(nodes
+            .nodes
+            .into_iter()
+            .find(|n| n.matches(body, since) && n.commit.as_ref().is_some_and(|c| c.oid == commit))
+            .map(|n| n.database_id))
+    }
+
+    /// The id of an issue comment among the PR's last 50 with this body,
+    /// created at or after `since`.
+    pub async fn find_recent_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: i64,
+        body: &str,
+        since: time::OffsetDateTime,
+    ) -> Result<Option<i64>, GhError> {
+        let q = r#"
+            query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  comments(last: 50) {
+                    nodes { databaseId body createdAt }
+                  }
+                }
+              }
+            }
+        "#;
+        let r: RecentResponse = self
+            .graphql(
+                q,
+                serde_json::json!({ "owner": owner, "name": repo, "number": number }),
+            )
+            .await?;
+        let nodes = r.data.repository.pull_request.comments.unwrap_or_default();
+        Ok(nodes
+            .nodes
+            .into_iter()
+            .find(|n| n.matches(body, since))
+            .map(|n| n.database_id))
+    }
+
+    /// GitHub keeps one reaction of each content per user on a comment, so
+    /// this is retried on any transient failure.
     pub async fn react(
         &self,
         owner: &str,
@@ -485,12 +574,19 @@ impl GitHub {
         content: &str,
     ) -> Result<(), GhError> {
         let path = format!("/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions");
-        let _: serde_json::Value = self
-            .post_json(&path, serde_json::json!({ "content": content }))
+        let _: Option<serde_json::Value> = self
+            .write_json(
+                "reaction",
+                reqwest::Method::POST,
+                &path,
+                serde_json::json!({ "content": content }),
+            )
             .await?;
         Ok(())
     }
 
+    /// Adding a label the PR already has changes nothing, so this is retried
+    /// on any transient failure.
     pub async fn add_labels(
         &self,
         owner: &str,
@@ -499,13 +595,20 @@ impl GitHub {
         labels: &[String],
     ) -> Result<(), GhError> {
         let path = format!("/repos/{owner}/{repo}/issues/{number}/labels");
-        let _: serde_json::Value = self
-            .post_json(&path, serde_json::json!({ "labels": labels }))
+        let _: Option<serde_json::Value> = self
+            .write_json(
+                "labels",
+                reqwest::Method::POST,
+                &path,
+                serde_json::json!({ "labels": labels }),
+            )
             .await?;
         Ok(())
     }
 
     /// Minimize a comment/review via GraphQL `minimizeComment` mutation.
+    /// Minimizing twice leaves it minimized, so this is retried on any
+    /// transient failure.
     pub async fn minimize_comment(&self, node_id: &str) -> Result<(), GhError> {
         let q = r#"
             mutation($id: ID!) {
@@ -514,16 +617,363 @@ impl GitHub {
               }
             }
         "#;
-        let _: serde_json::Value = self
-            .graphql(q, serde_json::json!({ "id": node_id }))
+        let _: Option<serde_json::Value> = self
+            .write_json(
+                "minimize",
+                reqwest::Method::POST,
+                "/graphql",
+                serde_json::json!({ "query": q, "variables": { "id": node_id } }),
+            )
             .await?;
         Ok(())
+    }
+}
+
+// --- find_recent_review / find_recent_comment types ---
+
+#[derive(Deserialize)]
+struct RecentResponse {
+    data: RecentData,
+}
+
+#[derive(Deserialize)]
+struct RecentData {
+    repository: RecentRepository,
+}
+
+#[derive(Deserialize)]
+struct RecentRepository {
+    #[serde(rename = "pullRequest")]
+    pull_request: RecentPullRequest,
+}
+
+#[derive(Deserialize)]
+struct RecentPullRequest {
+    #[serde(default)]
+    reviews: Option<RecentConnection>,
+    #[serde(default)]
+    comments: Option<RecentConnection>,
+}
+
+#[derive(Deserialize, Default)]
+struct RecentConnection {
+    nodes: Vec<RecentNode>,
+}
+
+#[derive(Deserialize)]
+struct RecentNode {
+    #[serde(rename = "databaseId")]
+    database_id: i64,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(rename = "createdAt", with = "time::serde::rfc3339")]
+    created_at: time::OffsetDateTime,
+    #[serde(default)]
+    commit: Option<RecentCommit>,
+}
+
+#[derive(Deserialize)]
+struct RecentCommit {
+    oid: String,
+}
+
+impl RecentNode {
+    fn matches(&self, body: &str, since: time::OffsetDateTime) -> bool {
+        self.created_at >= since && self.body.as_deref().map(str::trim) == Some(body.trim())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::client::WriteRetry;
+    use std::time::Duration;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn fast_retry() -> WriteRetry {
+        WriteRetry {
+            deadline: Duration::from_secs(2),
+            base_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(50),
+            lookup_settle: Duration::from_millis(50),
+        }
+    }
+
+    fn gh(base: String) -> GitHub {
+        GitHub::new(reqwest::Client::new(), "t".into())
+            .with_base(base)
+            .with_write_retry(fast_retry())
+    }
+
+    const REVIEW_BODY: &str = "<!-- barry-dylan:multi-review:barry:v1 -->\n**Barry** - Comment\nok";
+
+    fn review() -> ReviewInput<'static> {
+        ReviewInput {
+            body: REVIEW_BODY,
+            event: "COMMENT",
+            comments: &[],
+            commit_id: "h1",
+        }
+    }
+
+    fn now_rfc3339() -> String {
+        time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    }
+
+    /// GraphQL's answer listing `nodes` as the PR's recent reviews.
+    fn reviews_listing(nodes: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "repository": { "pullRequest": { "reviews": { "nodes": nodes } } } }
+        }))
+    }
+
+    /// GraphQL's answer listing `nodes` as the PR's recent comments.
+    fn comments_listing(nodes: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "repository": { "pullRequest": { "comments": { "nodes": nodes } } } }
+        }))
+    }
+
+    async fn posts_to(server: &MockServer, p: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == p)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_review_answered_502_that_github_did_record_is_not_posted_twice() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("reviews(last"))
+            .respond_with(reviews_listing(serde_json::json!([
+                {"databaseId": 77, "body": REVIEW_BODY, "createdAt": now_rfc3339(),
+                 "commit": {"oid": "h1"}}
+            ])))
+            .mount(&server)
+            .await;
+        let id = gh(server.uri())
+            .create_review("o", "r", 1, &review())
+            .await
+            .unwrap();
+        assert_eq!(id, 77);
+        assert_eq!(posts_to(&server, "/repos/o/r/pulls/1/reviews").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_review_github_shows_only_on_the_second_lookup_is_not_posted_twice() {
+        // GitHub answered 502, then took a moment to show the review it had
+        // recorded: the first lookup finds nothing.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 5})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("reviews(last"))
+            .respond_with(reviews_listing(serde_json::json!([])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("reviews(last"))
+            .respond_with(reviews_listing(serde_json::json!([
+                {"databaseId": 77, "body": REVIEW_BODY, "createdAt": now_rfc3339(),
+                 "commit": {"oid": "h1"}}
+            ])))
+            .mount(&server)
+            .await;
+        let id = gh(server.uri())
+            .create_review("o", "r", 1, &review())
+            .await
+            .unwrap();
+        assert_eq!(id, 77);
+        assert_eq!(posts_to(&server, "/repos/o/r/pulls/1/reviews").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_after_a_502_waits_at_least_the_settle_time() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(reviews_listing(serde_json::json!([
+                {"databaseId": 77, "body": REVIEW_BODY, "createdAt": now_rfc3339(),
+                 "commit": {"oid": "h1"}}
+            ])))
+            .mount(&server)
+            .await;
+        let gh = GitHub::new(reqwest::Client::new(), "t".into())
+            .with_base(server.uri())
+            .with_write_retry(WriteRetry {
+                lookup_settle: Duration::from_millis(600),
+                ..fast_retry()
+            });
+        let t = std::time::Instant::now();
+        assert_eq!(gh.create_review("o", "r", 1, &review()).await.unwrap(), 77);
+        assert!(
+            t.elapsed() >= Duration::from_millis(600),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_answered_502_that_github_did_not_record_is_posted_again() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 5})))
+            .mount(&server)
+            .await;
+        // The same body on another commit, and an older one on this commit,
+        // are not this post.
+        let old = (time::OffsetDateTime::now_utc() - time::Duration::hours(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("reviews(last"))
+            .respond_with(reviews_listing(serde_json::json!([
+                {"databaseId": 70, "body": REVIEW_BODY, "createdAt": now_rfc3339(),
+                 "commit": {"oid": "h0"}},
+                {"databaseId": 71, "body": REVIEW_BODY, "createdAt": old,
+                 "commit": {"oid": "h1"}}
+            ])))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let id = gh(server.uri())
+            .create_review("o", "r", 1, &review())
+            .await
+            .unwrap();
+        assert_eq!(id, 5);
+        assert_eq!(posts_to(&server, "/repos/o/r/pulls/1/reviews").await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_review_github_cannot_place_fails_without_a_retry() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/pulls/1/reviews"))
+            .respond_with(ResponseTemplate::new(422).set_body_string(
+                r#"{"message":"Unprocessable Entity","errors":["Position could not be resolved"]}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(reviews_listing(serde_json::json!([])))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let err = gh(server.uri())
+            .create_review("o", "r", 1, &review())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GhError::Api { status: 422, .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_comment_answered_502_that_github_did_record_is_not_posted_twice() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("comments(last"))
+            .respond_with(comments_listing(serde_json::json!([
+                {"databaseId": 88, "body": "Maximum confers reached for this PR.",
+                 "createdAt": now_rfc3339()}
+            ])))
+            .mount(&server)
+            .await;
+        let id = gh(server.uri())
+            .create_issue_comment("o", "r", 1, "Maximum confers reached for this PR.")
+            .await
+            .unwrap();
+        assert_eq!(id, 88);
+        assert_eq!(posts_to(&server, "/repos/o/r/issues/1/comments").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_review_refused_a_connection_is_posted_once_the_server_accepts() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Nothing listens on the port for the first 150 ms, so the first
+        // attempts are refused before any request is sent. After that, every
+        // request is answered 200 with a review id. Any lookup of whether the
+        // review landed would get that same answer, fail to parse, and keep
+        // the write from succeeding.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let served = requests.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                served.fetch_add(1, Ordering::SeqCst);
+                let mut buf = vec![0u8; 64 * 1024];
+                let _ = sock.read(&mut buf).await;
+                let body = r#"{"id":5}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let id = gh(format!("http://127.0.0.1:{port}"))
+            .create_review("o", "r", 1, &review())
+            .await
+            .unwrap();
+        assert_eq!(id, 5);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn pr_context_parses_graphql_response() {
