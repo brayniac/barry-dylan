@@ -275,7 +275,7 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
     // anyone who captured it, and each copy would otherwise be acted on: a
     // second job once the first is leased (the pending-only index no longer
     // coalesces it), a second `/barry approve` or `/barry confer`, a second
-    // cancel of the review in flight. Two checks below stop that, both on
+    // re-check request to the review in flight. Two checks below stop that, both on
     // the body, which the signature covers; the X-GitHub-Delivery header is
     // not signed, can be changed on a copy, and is used here only for logs.
     //
