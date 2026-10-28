@@ -43,7 +43,7 @@ A guest that was asked to judge and could not writes the failure into its artifa
 2. **R1 synthesis** — Each identity synthesizes persona drafts into one unified review. Nothing is posted yet.
 3. **R2 synthesis** — Each identity reads the other's R1 review and may revise.
 4. **Judge** — The judge LLM receives both R2 reviews and decides `agree` or `disagree` with a reason.
-5. **Posting** — Depending on the verdict: only Barry posts (agree), both post (disagree), or Barry posts alone if Other Barry was unreachable.
+5. **Posting** — Depending on the verdict: only Barry posts (agree), both post (disagree), or Barry posts alone if Other Barry was unreachable. Every review is posted with the `COMMENT` or `REQUEST_CHANGES` event, never `APPROVE`, so a review cannot count toward a branch's required approvals. An approve outcome is posted as a `COMMENT` review whose header names the outcome.
 
 ### Key Patterns
 
@@ -55,7 +55,7 @@ A guest that was asked to judge and could not writes the failure into its artifa
 
 ### 1. Register Three GitHub Apps
 
-Create three GitHub Apps, one per reviewer identity. Each needs the following permissions:
+Create three GitHub Apps, one per reviewer identity. Barry's App must have the slug `barry-dylan`: barry recognises its own comments as the bot `barry-dylan[bot]` and answers `@barry-dylan`. Each needs the following permissions:
 
 | Permission | Required For |
 |---|---|
@@ -232,6 +232,7 @@ column is the further check each command makes after that.
 ## Security
 
 - **HMAC-SHA256 verification** — Webhook signatures verified with constant-time compare (`subtle::ConstantTimeEq`) before any payload is parsed
+- **Replayed deliveries refused** — A delivery whose body barry has already accepted is answered `200` and not acted on for 7 days, whatever its `X-GitHub-Delivery` id, so redelivering it from the App's delivery log does nothing; use `/barry review` to re-run a review. A pull request event whose `updated_at`, or a comment whose `created_at`, is more than 6 days old is refused the same way, so a delivery cannot be accepted again once barry has forgotten it. Counted as `barry_webhook_rejected_total{reason="replay"}` and `{reason="stale"}`; `{reason="storage"}` counts deliveries answered `500` because barry could not record them.
 - **Key file permissions** — Private key `.pem` files must be mode `0600` or stricter; Barry refuses to start otherwise
 - **Trust gate** — Authors with read permission require `/barry approve` from a maintainer before review runs. Approval is sticky for the PR lifetime.
 - **Reviews survive a restart** — A rack review's experiment id is written to the job the moment it exists. Stopping barry hands the job back (no waiting out a twenty-minute review, no ninety-second SIGKILL with the lease held for `job_timeout_secs`) and leaves the experiment running; the next process leases the job within seconds and resumes it. Counted as `barry_job_completed_total{outcome="handed_back"}` and `barry_rack_resumed_total`.

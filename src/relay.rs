@@ -301,7 +301,9 @@ async fn deliver(
     secret: &[u8],
 ) {
     let body = body_bytes(ev);
-    let delivery = ev.delivery.clone().unwrap_or_else(|| "relayed".to_string());
+    // Logged as "none" when the frame carried no id, but never sent: barry
+    // should see the delivery as smee received it.
+    let delivery = ev.delivery.as_deref().unwrap_or("none");
 
     let signature = if cfg.require_signature {
         ev.signature.clone()
@@ -312,8 +314,10 @@ async fn deliver(
     let mut req = http
         .post(target)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header("X-GitHub-Event", &ev.event)
-        .header("X-GitHub-Delivery", &delivery);
+        .header("X-GitHub-Event", &ev.event);
+    if let Some(id) = &ev.delivery {
+        req = req.header("X-GitHub-Delivery", id);
+    }
     if let Some(sig) = &signature {
         req = req.header("X-Hub-Signature-256", sig);
     }

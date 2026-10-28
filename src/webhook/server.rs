@@ -264,9 +264,79 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         return (StatusCode::OK, "not a configured repository");
     }
 
-    tracing::info!(event = evt, delivery_id = %delivery, "webhook received");
+    if !acts_on(&parsed) {
+        tracing::debug!(event = evt, delivery_id = %delivery, "event dropped (not actionable)");
+        return (StatusCode::OK, "ok");
+    }
 
     let now = crate::util::now_ts();
+
+    // A signed delivery can be sent again, by GitHub's redelivery or by
+    // anyone who captured it, and each copy would otherwise be acted on: a
+    // second job once the first is leased (the pending-only index no longer
+    // coalesces it), a second `/barry approve` or `/barry confer`, a second
+    // cancel of the review in flight. Two checks below stop that, both on
+    // the body, which the signature covers; the X-GitHub-Delivery header is
+    // not signed, can be changed on a copy, and is used here only for logs.
+    //
+    // First, an event older than STALE_AFTER_SECS by its own timestamp is
+    // refused. That bounds how long a copy stays usable to less than the
+    // time a claimed body is remembered, so pruning a claim can never let a
+    // copy back in. GitHub redelivers only within 3 days, inside the bound.
+    //
+    // Second, the body is claimed by its SHA-256 and a body already claimed
+    // is refused. A GitHub redelivery carries the same body and is refused
+    // too. Two distinct events are not expected to share a body byte for
+    // byte: pull_request payloads carry the head sha, `before`/`after` and
+    // `updated_at`, and issue_comment payloads the comment id. GitHub does
+    // not document this as a guarantee, and if two did, the second would be
+    // dropped here.
+    //
+    // Only a delivery barry acts on reaches these checks: one the gates
+    // above or `acts_on` drop does nothing, so its copies do nothing either,
+    // and it costs no write. The claim comes before anything below acts.
+    // Refusals are a 200: the delivery was received, and an error status
+    // would mark it failed in the App's delivery log and invite a manual
+    // redelivery that would be refused the same way.
+    match event_time(&parsed) {
+        Some(t) if now - t <= crate::storage::deliveries::STALE_AFTER_SECS => {}
+        happened_at => {
+            tracing::info!(
+                event = evt,
+                delivery_id = %delivery,
+                ?happened_at,
+                "event too old, or undated; ignoring"
+            );
+            metrics::counter!("barry_webhook_rejected_total", "reason" => "stale").increment(1);
+            return (StatusCode::OK, "stale delivery");
+        }
+    }
+
+    let body_sha256 = crate::storage::deliveries::body_sha256(&body);
+    match s.store.claim_delivery(&body_sha256, &delivery, now).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                event = evt,
+                delivery_id = %delivery,
+                %body_sha256,
+                "delivery already accepted; ignoring"
+            );
+            metrics::counter!("barry_webhook_rejected_total", "reason" => "replay").increment(1);
+            return (StatusCode::OK, "delivery already accepted");
+        }
+        Err(e) => {
+            tracing::error!(?e, delivery_id = %delivery, "could not record delivery");
+            metrics::counter!("barry_webhook_rejected_total", "reason" => "storage").increment(1);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not record delivery",
+            );
+        }
+    }
+
+    tracing::info!(event = evt, delivery_id = %delivery, "webhook received");
+
     let debounce = s.debounce_secs as i64;
 
     let to_enqueue: Option<(NewJob, i64)> = match parsed {
@@ -423,10 +493,8 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                 now,
             ))
         }
-        _ => {
-            tracing::debug!(event = evt, delivery_id = %delivery, "event dropped (not actionable)");
-            None
-        }
+        // Not reached: `acts_on` returned early for everything else.
+        _ => None,
     };
 
     if let Some((job, run_after)) = to_enqueue {
@@ -444,6 +512,10 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
                 "enqueue failed"
             );
             metrics::counter!("barry_webhook_rejected_total", "reason" => "enqueue").increment(1);
+            // Nothing was queued, so a redelivery of this body must be accepted.
+            if let Err(e) = s.store.release_delivery(&body_sha256).await {
+                tracing::error!(?e, delivery_id = %delivery, "could not release delivery");
+            }
             return (StatusCode::INTERNAL_SERVER_ERROR, "enqueue failed");
         }
         metrics::counter!("barry_job_enqueued_total").increment(1);
@@ -458,6 +530,31 @@ async fn webhook(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         );
     }
     (StatusCode::OK, "ok")
+}
+
+/// Whether barry does anything with this delivery. Matches the arms of the
+/// `match` in [`webhook`] that produce a job.
+fn acts_on(parsed: &InboundEvent) -> bool {
+    match parsed {
+        InboundEvent::PullRequest(e) => {
+            pull_request_action_is_actionable(&e.action) || e.action == "closed"
+        }
+        InboundEvent::IssueComment(e) => asks_barry(e),
+        InboundEvent::Ignored(_) => false,
+    }
+}
+
+/// When the event a delivery describes happened, as a unix timestamp, from
+/// the payload's own signed timestamp. `None` if it is absent or unparseable.
+fn event_time(parsed: &InboundEvent) -> Option<i64> {
+    let stamp = match parsed {
+        InboundEvent::PullRequest(e) => e.pull_request.updated_at.as_deref(),
+        InboundEvent::IssueComment(e) => e.comment.created_at.as_deref(),
+        InboundEvent::Ignored(_) => None,
+    }?;
+    time::OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(|t| t.unix_timestamp())
 }
 
 fn pull_request_action_is_actionable(a: &str) -> bool {
@@ -541,7 +638,10 @@ mod tests {
             "installation": { "id": 9 },
             "repository": { "name": repo, "owner": { "login": owner }, "default_branch": "main" },
             "issue": { "number": 7, "pull_request": { "url": "x" } },
-            "comment": { "id": 1, "node_id": "n", "body": body, "user": { "login": login } },
+            "comment": {
+                "id": 1, "node_id": "n", "body": body, "user": { "login": login },
+                "created_at": ago(0)
+            },
             "sender": { "login": login }
         })
         .to_string();
@@ -747,16 +847,45 @@ mod tests {
 
     /// A signed `pull_request` delivery for `owner/repo` with the given action.
     fn pr_delivery_action(owner: &str, repo: &str, action: &str) -> (String, String) {
-        pr_delivery_action_at(owner, repo, action, "s2")
+        pr_delivery_full(owner, repo, action, "s2", Some(ago(0)))
     }
 
+    /// A signed `pull_request` delivery whose pull request's head is `head_sha`.
     fn pr_delivery_action_at(
         owner: &str,
         repo: &str,
         action: &str,
         head_sha: &str,
     ) -> (String, String) {
-        let body = serde_json::json!({
+        pr_delivery_full(owner, repo, action, head_sha, Some(ago(0)))
+    }
+
+    /// An RFC 3339 timestamp `secs` seconds before now.
+    fn ago(secs: i64) -> String {
+        (time::OffsetDateTime::now_utc() - time::Duration::seconds(secs))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    }
+
+    /// A signed `pull_request` delivery whose pull request was last updated
+    /// at `updated_at`, or carries no `updated_at` if `None`.
+    fn pr_delivery_at(
+        owner: &str,
+        repo: &str,
+        action: &str,
+        updated_at: Option<String>,
+    ) -> (String, String) {
+        pr_delivery_full(owner, repo, action, "s2", updated_at)
+    }
+
+    fn pr_delivery_full(
+        owner: &str,
+        repo: &str,
+        action: &str,
+        head_sha: &str,
+        updated_at: Option<String>,
+    ) -> (String, String) {
+        let mut body = serde_json::json!({
             "action": action, "number": 1,
             "installation": { "id": 9 },
             "repository": { "name": repo, "owner": { "login": owner }, "default_branch": "main" },
@@ -765,8 +894,11 @@ mod tests {
                 "user": { "login": "a" }, "draft": false, "state": "open",
                 "head": { "sha": head_sha, "ref": "x" }, "base": { "sha": "s0", "ref": "main" }
             }
-        })
-        .to_string();
+        });
+        if let Some(t) = updated_at {
+            body["pull_request"]["updated_at"] = t.into();
+        }
+        let body = body.to_string();
         let sig = sign(b"sec", body.as_bytes());
         (body, sig)
     }
@@ -833,6 +965,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_replayed_push_does_not_cancel_the_review_it_started() {
+        // The push is accepted once and its review starts. The same signed
+        // body arriving again must not reach the review.
+        let (app, store, registry) = fresh_with_registry().await;
+        let (body, sig) = pr_delivery_action("o", "r", "synchronize");
+        assert_eq!(
+            post_event(app.clone(), "pull_request", body.clone(), sig.clone()).await,
+            StatusCode::OK
+        );
+        let in_flight = registry.register("o", "r", 1, "s1").await.unwrap();
+        assert_eq!(
+            post_event(app, "pull_request", body, sig).await,
+            StatusCode::OK
+        );
+        assert!(
+            !notified(&in_flight.recheck).await,
+            "a replay must not ask the review in flight to re-check"
+        );
+        assert!(!in_flight.token.is_cancelled());
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
     async fn opening_a_pull_request_cancels_nothing() {
         // Only a moved head invalidates a review. A reopen or ready_for_review
         // has the same head as whatever is in flight, if anything is.
@@ -860,19 +1015,7 @@ mod tests {
 
     /// A signed `pull_request` delivery for `owner/repo`.
     fn pr_delivery(owner: &str, repo: &str) -> (String, String) {
-        let body = serde_json::json!({
-            "action": "opened", "number": 1,
-            "installation": { "id": 9 },
-            "repository": { "name": repo, "owner": { "login": owner }, "default_branch": "main" },
-            "pull_request": {
-                "number": 1, "title": "feat: x", "body": "ok",
-                "user": { "login": "a" }, "draft": false, "state": "open",
-                "head": { "sha": "s1", "ref": "x" }, "base": { "sha": "s0", "ref": "main" }
-            }
-        })
-        .to_string();
-        let sig = sign(b"sec", body.as_bytes());
-        (body, sig)
+        pr_delivery_at(owner, repo, "opened", Some(ago(0)))
     }
 
     async fn post(app: Router, body: String, sig: String) -> StatusCode {
@@ -923,6 +1066,173 @@ mod tests {
         let (body, sig) = pr_delivery("Brayniac", "Slipway");
         assert_eq!(post(app, body, sig).await, StatusCode::OK);
         assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_replayed_delivery_does_not_become_a_second_job() {
+        // The first job is leased, so the pending-only coalescing index does
+        // not cover the replay; the body hash has to.
+        let (app, store) = fresh().await;
+        let (body, sig) = pr_delivery("o", "r");
+        assert_eq!(
+            post(app.clone(), body.clone(), sig.clone()).await,
+            StatusCode::OK
+        );
+        let _leased = only_job(&store).await;
+
+        // 200: received, and deliberately not acted on.
+        assert_eq!(post(app, body, sig).await, StatusCode::OK);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+        assert!(store.lease_next(i64::MAX / 2, 60).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_replayed_command_does_not_act_again() {
+        let (app, store) = fresh_commanded(vec!["brayniac/infra"], vec!["brayniac"]).await;
+        let (body, sig) = comment_delivery("brayniac", "infra", "brayniac", "/barry confer");
+        assert_eq!(
+            post_event(app.clone(), "issue_comment", body.clone(), sig.clone()).await,
+            StatusCode::OK
+        );
+        let _leased = only_job(&store).await;
+
+        assert_eq!(
+            post_event(app, "issue_comment", body, sig).await,
+            StatusCode::OK
+        );
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    /// Post a signed delivery under the given `X-GitHub-Delivery` id.
+    async fn post_with_id(
+        app: Router,
+        event: &str,
+        id: &str,
+        body: String,
+        sig: String,
+    ) -> StatusCode {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhook")
+                .header("X-Hub-Signature-256", sig)
+                .header("X-GitHub-Event", event)
+                .header("X-GitHub-Delivery", id)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    #[tokio::test]
+    async fn a_replay_under_a_new_delivery_id_is_still_refused() {
+        // The signature covers the body, not the delivery id header, so a
+        // copy can carry any id it likes.
+        let (app, store) = fresh().await;
+        let (body, sig) = pr_delivery("o", "r");
+        assert_eq!(
+            post_with_id(app.clone(), "pull_request", "d1", body.clone(), sig.clone()).await,
+            StatusCode::OK
+        );
+        let _leased = only_job(&store).await;
+
+        assert_eq!(
+            post_with_id(app, "pull_request", "d2", body, sig).await,
+            StatusCode::OK
+        );
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_different_comment_on_the_same_pull_request_still_gets_through() {
+        // The control: a new event is accepted, even under a repeated id.
+        let (app, store) = fresh_commanded(vec!["brayniac/infra"], vec!["brayniac"]).await;
+        let (body, sig) = comment_delivery("brayniac", "infra", "brayniac", "/barry review");
+        assert_eq!(
+            post_event(app.clone(), "issue_comment", body, sig).await,
+            StatusCode::OK
+        );
+        let _leased = only_job(&store).await;
+
+        let (body, sig) = comment_delivery("brayniac", "infra", "brayniac", "/barry review again");
+        assert_eq!(
+            post_event(app, "issue_comment", body, sig).await,
+            StatusCode::OK
+        );
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_that_could_not_be_queued_is_accepted_when_redelivered() {
+        // Make enqueue fail by moving the jobs table out of the way.
+        let (app, store) = fresh().await;
+        let (body, sig) = pr_delivery("o", "r");
+        store
+            .query_raw("ALTER TABLE jobs RENAME TO jobs_away")
+            .await
+            .unwrap();
+        assert_eq!(
+            post(app.clone(), body.clone(), sig.clone()).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        store
+            .query_raw("ALTER TABLE jobs_away RENAME TO jobs")
+            .await
+            .unwrap();
+
+        assert_eq!(post(app, body, sig).await, StatusCode::OK);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_older_than_the_window_is_refused() {
+        // Past the window a captured delivery's claim may have been pruned,
+        // so its own timestamp has to stop it.
+        let stale = crate::storage::deliveries::STALE_AFTER_SECS + 60;
+        let (app, store) = fresh().await;
+        let (body, sig) = pr_delivery_at("o", "r", "opened", Some(ago(stale)));
+        assert_eq!(post(app, body, sig).await, StatusCode::OK);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 0);
+        assert_eq!(store.count_rows("seen_deliveries").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_inside_the_window_is_accepted() {
+        let fresh_enough = crate::storage::deliveries::STALE_AFTER_SECS - 60;
+        let (app, store) = fresh().await;
+        let (body, sig) = pr_delivery_at("o", "r", "opened", Some(ago(fresh_enough)));
+        assert_eq!(post(app, body, sig).await, StatusCode::OK);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_undated_delivery_is_refused() {
+        let (app, store) = fresh().await;
+        let (body, sig) = pr_delivery_at("o", "r", "opened", None);
+        assert_eq!(post(app, body, sig).await, StatusCode::OK);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_barry_does_not_act_on_is_not_recorded() {
+        let (app, store) = fresh_commanded(vec!["o/r"], vec!["brayniac"]).await;
+        let status =
+            post_with_id(app.clone(), "ping", "p1", "{}".into(), sign(b"sec", b"{}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (body, sig) = pr_delivery_action("o", "r", "labeled");
+        assert_eq!(
+            post_with_id(app.clone(), "pull_request", "p2", body, sig).await,
+            StatusCode::OK
+        );
+        let (body, sig) = comment_delivery("o", "r", "brayniac", "LGTM");
+        assert_eq!(
+            post_with_id(app, "issue_comment", "p3", body, sig).await,
+            StatusCode::OK
+        );
+        assert_eq!(store.count_rows("seen_deliveries").await.unwrap(), 0);
+        assert_eq!(store.count_rows("jobs").await.unwrap(), 0);
     }
 
     #[test]
@@ -980,7 +1290,8 @@ mod tests {
             "pull_request": {
                 "number": 1, "title": "feat: x", "body": "ok",
                 "user": { "login": "a" }, "draft": false, "state": "open",
-                "head": { "sha": "s1", "ref": "x" }, "base": { "sha": "s0", "ref": "main" }
+                "head": { "sha": "s1", "ref": "x" }, "base": { "sha": "s0", "ref": "main" },
+                "updated_at": ago(0)
             }
         })
         .to_string();

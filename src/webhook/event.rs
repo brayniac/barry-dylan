@@ -53,6 +53,11 @@ pub struct PullRequestRef {
     pub state: String,
     pub head: GitRef,
     pub base: GitRef,
+    /// RFC 3339. Moves on every change to the pull request, so it dates the
+    /// event a delivery describes. Optional so that a payload without it
+    /// parses; the webhook handler refuses such a delivery as stale.
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +79,11 @@ pub struct Comment {
     pub body: String,
     pub user: User,
     pub node_id: String,
+    /// RFC 3339. When the comment was written, which for the `created`
+    /// action barry acts on is when the event happened. Optional for the
+    /// same reason as [`PullRequestRef::updated_at`].
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug)]
