@@ -52,8 +52,9 @@
 //! The `retry_transient` helper handles transient errors with exponential
 //! backoff:
 //! - Connection errors
-//! - Timeout errors
 //! - 502-504 status codes
+//!
+//! A request that timed out is not retried.
 //!
 //! Retry policy:
 //! - Max 3 attempts
@@ -139,8 +140,11 @@ pub struct LlmResponse {
 /// Error from LLM operations.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
+    /// The URL is stripped on conversion, since this text reaches check runs
+    /// on public repositories. Only this variant is scrubbed: an `Api` body
+    /// is the server's own text and is published as is.
     #[error("http: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
     #[error("api {status}: {body}")]
     Api { status: u16, body: String },
     #[error("unexpected response shape: {0}")]
@@ -151,6 +155,12 @@ pub enum LlmError {
     /// a smaller prompt, not a parser.
     #[error("model returned no content (finish reason {finish}, {output_tokens} output tokens)")]
     Empty { finish: String, output_tokens: u32 },
+}
+
+impl From<reqwest::Error> for LlmError {
+    fn from(e: reqwest::Error) -> Self {
+        LlmError::Http(e.without_url())
+    }
 }
 
 /// Trait implemented by all LLM clients.
@@ -167,7 +177,9 @@ pub trait LlmClient: Send + Sync {
 
 fn is_transient(e: &LlmError) -> bool {
     match e {
-        LlmError::Http(err) => err.is_connect() || err.is_timeout(),
+        // Not a timeout: the request ran for `request_timeout_secs` and the
+        // server dropped it, so a retry costs that long again.
+        LlmError::Http(err) => err.is_connect(),
         LlmError::Api { status, .. } => matches!(*status, 502..=504),
         LlmError::Shape(_) => false,
         LlmError::Empty { .. } => false,

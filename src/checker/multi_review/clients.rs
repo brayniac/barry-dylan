@@ -129,7 +129,11 @@ pub fn build(cfg: &Config) -> anyhow::Result<IdentityClients> {
             .map_err(anyhow::Error::from)
     };
 
-    let llm_semaphore = Arc::new(Semaphore::new(10));
+    tracing::info!(
+        llm_in_flight = cfg.dispatcher.llm_in_flight,
+        "model requests in flight at once, across all profiles"
+    );
+    let llm_semaphore = Arc::new(Semaphore::new(cfg.dispatcher.llm_in_flight));
 
     // Which profiles must exist is [`crate::config::Config::validate`]'s
     // decision, made once, with the rack config in view. By here a profile is
@@ -207,6 +211,79 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         let _ = build(&cfg).unwrap();
+    }
+
+    /// Two identities' calls share `llm_in_flight`, so with 1 the second
+    /// waits for the first instead of queueing inside the server.
+    #[tokio::test]
+    async fn llm_in_flight_bounds_calls_across_identities() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "choices": [ { "message": { "content": "ok" }, "finish_reason": "stop" } ]
+                    }))
+                    .set_delay(std::time::Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+        let profile = |name: &str| {
+            format!(
+                "[llm.{name}]\nprovider = \"openai\"\nendpoint = \"{}\"\nmodel = \"x\"\n",
+                server.uri()
+            )
+        };
+        let toml = format!(
+            r#"
+            [server]
+            listen = "0.0.0.0:0"
+            [github.barry]
+            app_id = 1
+            private_key_path = "/tmp/k"
+            webhook_secret_env = "X"
+            [github.other_barry]
+            app_id = 2
+            private_key_path = "/tmp/k"
+            [github.other_other_barry]
+            app_id = 3
+            private_key_path = "/tmp/k"
+            [storage]
+            sqlite_path = "/tmp/x.db"
+            [dispatcher]
+            llm_in_flight = 1
+            {}{}{}{}"#,
+            profile("barry"),
+            profile("other_barry"),
+            profile("other_other_barry"),
+            profile("judge"),
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let clients = build(&cfg).unwrap();
+        let req = crate::llm::LlmRequest {
+            system: None,
+            messages: vec![crate::llm::LlmMessage {
+                role: crate::llm::Role::User,
+                content: "q".into(),
+            }],
+            max_tokens: 8,
+            temperature: None,
+            response_schema: None,
+        };
+        let started = std::time::Instant::now();
+        let (a, b) = tokio::join!(
+            clients.barry.complete(&req),
+            clients.other_barry.complete(&req)
+        );
+        a.unwrap();
+        b.unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(800),
+            "two 400 ms calls finished in {:?}, so they overlapped",
+            started.elapsed()
+        );
     }
 
     /// Startup no longer rejects this -- `Config::validate` does, and only when

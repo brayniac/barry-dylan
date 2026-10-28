@@ -158,6 +158,13 @@ pub struct DispatcherConfig {
     pub job_timeout_secs: u64,
     #[serde(default = "default_checker_timeout")]
     pub checker_timeout_secs: u64,
+    /// Model requests in flight at once, across every worker and every
+    /// `[llm.*]` profile together. A request's `request_timeout_secs` counts
+    /// from when it is sent, so a request queued inside a model server spends
+    /// its timeout waiting. When every profile uses one local server, set this
+    /// to that server's slot count so the queueing happens here instead.
+    #[serde(default = "default_llm_in_flight")]
+    pub llm_in_flight: usize,
 }
 
 impl Default for DispatcherConfig {
@@ -167,6 +174,7 @@ impl Default for DispatcherConfig {
             worker_count: default_workers(),
             job_timeout_secs: default_job_timeout(),
             checker_timeout_secs: default_checker_timeout(),
+            llm_in_flight: default_llm_in_flight(),
         }
     }
 }
@@ -176,6 +184,9 @@ fn default_debounce() -> u64 {
 }
 fn default_workers() -> usize {
     4
+}
+fn default_llm_in_flight() -> usize {
+    10
 }
 fn default_job_timeout() -> u64 {
     1800
@@ -353,6 +364,11 @@ impl Config {
         if self.dispatcher.worker_count == 0 {
             return Err(ConfigError::Validate(
                 "dispatcher.worker_count must be > 0".into(),
+            ));
+        }
+        if self.dispatcher.llm_in_flight == 0 {
+            return Err(ConfigError::Validate(
+                "dispatcher.llm_in_flight must be > 0".into(),
             ));
         }
         if self.github.barry.webhook_secret_env.is_none() {
@@ -562,6 +578,14 @@ model_name = "qwen3.5-9b"
             model = "x"
         "#
         ))
+    }
+
+    #[test]
+    fn llm_in_flight_defaults_to_ten_and_zero_is_rejected() {
+        let mut cfg = Config::load(minimal_with("").path()).unwrap();
+        assert_eq!(cfg.dispatcher.llm_in_flight, 10);
+        cfg.dispatcher.llm_in_flight = 0;
+        assert!(matches!(cfg.validate(), Err(ConfigError::Validate(_))));
     }
 
     #[test]

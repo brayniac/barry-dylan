@@ -240,6 +240,60 @@ mod tests {
         assert_eq!(r.text, "ok");
     }
 
+    fn one_line_request() -> LlmRequest {
+        LlmRequest {
+            system: None,
+            messages: vec![LlmMessage {
+                role: Role::User,
+                content: "q".into(),
+            }],
+            max_tokens: 32,
+            temperature: None,
+            response_schema: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_that_times_out_is_not_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(5)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let c = OpenAiClient::new(http, server.uri(), None, "m".into());
+        let e = c.complete(&one_line_request()).await.err().unwrap();
+        assert!(
+            matches!(&e, LlmError::Http(err) if err.is_timeout()),
+            "{e:?}"
+        );
+    }
+
+    /// The text of an endpoint error is posted on public check runs.
+    #[tokio::test]
+    async fn an_http_error_does_not_name_the_endpoint() {
+        // The host resolves to 127.0.0.1 and the URL names port 0, which
+        // accepts no connection; with no proxy the request fails inside
+        // reqwest wherever the test runs. `resolve` ignores the port it is
+        // given and uses the URL's.
+        let host = "barry-endpoint.invalid";
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .resolve(host, "127.0.0.1:0".parse().unwrap())
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let c = OpenAiClient::new(http, format!("http://{host}:0/v1"), None, "m".into());
+        let e = c.complete(&one_line_request()).await.err().unwrap();
+        assert!(matches!(e, LlmError::Http(_)), "{e:?}");
+        assert!(!e.to_string().contains(host), "{e}");
+    }
+
     #[tokio::test]
     async fn does_not_retry_4xx() {
         let server = MockServer::start().await;

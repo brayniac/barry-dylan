@@ -189,6 +189,7 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | | `worker_count` | Parallel worker pool size (default: 4) |
 | | `job_timeout_secs` | Per-job timeout (default: 1800) |
 | | `checker_timeout_secs` | Per-checker timeout, multi-review tie-break included (default: 1200) |
+| | `llm_in_flight` | Model requests in flight at once, across workers and `[llm.*]` profiles (default: 10) |
 | `[llm.*]` | `provider` | `"anthropic"` or `"openai"` |
 | | `endpoint` | API base URL |
 | | `api_key_env` | Env var for API key |
