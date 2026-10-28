@@ -257,6 +257,8 @@ The `/metrics` endpoint exposes Prometheus metrics:
 - `barry_review_superseded_total{by="push"}` — a push cancelled the review in flight for the old head
 - `barry_review_skipped_total{reason="in_flight"}` — a job did not start a review because a review of the same head was already in flight
 - `barry_review_stale_total{reason="head_moved"|"closed"}` — an outcome was ready but the PR had moved on, so it was not posted
+- `barry_github_write_retries_total{op}` — a write to GitHub (`op` is `check_run`, `review`, `issue_comment`, `labels`, `reaction` or `minimize`) failed transiently and is being retried; retries continue for up to 5 minutes, and a review or comment that may have reached GitHub is resent only after two lookups, each at least 10 s after the step before, find no copy of it
+- `barry_github_write_failed_total{op,reason="permanent"|"deadline"|"cancelled"}` — a write to GitHub returned an error: one not worth retrying (a 4xx other than 429 or a secondary rate limit), retries ran out at the deadline, or the review was superseded while it was retrying
 - Job, webhook, and queue counters
 
 ## Build & Test

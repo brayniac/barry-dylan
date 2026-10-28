@@ -287,13 +287,18 @@ pub async fn run_job(deps: &JobDeps, job: &LeasedJob) -> anyhow::Result<()> {
                     }
                 };
                 if let Err(e) = post_outcome(&post_gh, job_ref, pr_ref, &outcome, &cancel).await {
-                    if let Some(GhError::RateLimited { reset_in_secs }) =
-                        e.downcast_ref::<GhError>()
-                    {
-                        rate_limit_reset.fetch_max(*reset_in_secs, Ordering::SeqCst);
-                        tracing::warn!(reset_in_secs, "post_outcome rate limited");
-                    } else {
-                        tracing::error!(error = ?e, "post_outcome failed");
+                    match e.downcast_ref::<GhError>() {
+                        Some(GhError::RateLimited { reset_in_secs }) => {
+                            rate_limit_reset.fetch_max(*reset_in_secs, Ordering::SeqCst);
+                            tracing::warn!(reset_in_secs, "post_outcome rate limited");
+                        }
+                        Some(GhError::Cancelled(last)) => {
+                            tracing::info!(
+                                last_error = %last,
+                                "post_outcome cancelled while retrying: PR closed or head moved"
+                            );
+                        }
+                        _ => tracing::error!(error = ?e, "post_outcome failed"),
                     }
                 }
                 let _ = store
@@ -680,6 +685,9 @@ async fn post_outcome(
     if !still_current(gh, job, pr).await {
         return Ok(());
     }
+    // A write retries a transient failure for minutes; a superseded or closed
+    // review stops retrying instead.
+    let gh = &gh.with_cancel(cancel.clone());
     let span = tracing::info_span!(
         "checker.post_outcome",
         checker = o.checker_name,
@@ -875,6 +883,118 @@ mod tests {
         async fn for_installation(&self, _id: i64) -> anyhow::Result<Arc<GitHub>> {
             anyhow::bail!("could not mint an installation token")
         }
+    }
+
+    #[tokio::test]
+    async fn a_review_superseded_while_its_check_run_is_retrying_stops_retrying() {
+        // GitHub answers every check-run 502, so only the cancel can end the
+        // write before its five-minute deadline.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr("h1")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/check-runs"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        let gh = Arc::new(GitHub::new(reqwest::Client::new(), "t".into()).with_base(server.uri()));
+        let pr: PullRequest = serde_json::from_value(rest_pr("h1")).unwrap();
+        let outcome = CheckerOutcome::neutral("barry/title", "s");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let fire = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            fire.cancel();
+        });
+        let res = tokio::time::timeout(
+            Duration::from_secs(2),
+            post_outcome(&gh, &job(), &pr, &outcome, &cancel),
+        )
+        .await
+        .expect("post_outcome kept retrying after the review was superseded");
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_review_superseded_while_rate_limited_is_not_reported_as_rate_limited() {
+        // A RateLimited error makes the dispatcher reschedule the job for the
+        // reset, up to an hour out; a superseded review has nothing to redo.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr("h1")))
+            .mount(&server)
+            .await;
+        let reset = time::OffsetDateTime::now_utc().unix_timestamp() + 3600;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/check-runs"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("Retry-After", "30")
+                    .insert_header("X-RateLimit-Reset", reset.to_string().as_str())
+                    .set_body_string(r#"{"message":"You have exceeded a secondary rate limit."}"#),
+            )
+            .mount(&server)
+            .await;
+        let gh = Arc::new(GitHub::new(reqwest::Client::new(), "t".into()).with_base(server.uri()));
+        let pr: PullRequest = serde_json::from_value(rest_pr("h1")).unwrap();
+        let outcome = CheckerOutcome::neutral("barry/title", "s");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let fire = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            fire.cancel();
+        });
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            post_outcome(&gh, &job(), &pr, &outcome, &cancel),
+        )
+        .await
+        .expect("post_outcome kept waiting after the review was superseded")
+        .unwrap_err();
+        assert!(
+            matches!(err.downcast_ref::<GhError>(), Some(GhError::Cancelled(_))),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_run_github_accepted_with_an_unreadable_body_does_not_stop_the_labels() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(rest_pr("h1")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/check-runs"))
+            .respond_with(ResponseTemplate::new(201).set_body_string("not json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/issues/1/labels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gh = Arc::new(GitHub::new(reqwest::Client::new(), "t".into()).with_base(server.uri()));
+        let pr: PullRequest = serde_json::from_value(rest_pr("h1")).unwrap();
+        let mut outcome = CheckerOutcome::neutral("barry/autolabel", "s");
+        outcome.add_labels = vec!["area/x".into()];
+        let cancel = tokio_util::sync::CancellationToken::new();
+        post_outcome(&gh, &job(), &pr, &outcome, &cancel)
+            .await
+            .unwrap();
     }
 
     async fn pr_lookups(server: &wiremock::MockServer) -> usize {
