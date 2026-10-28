@@ -69,8 +69,9 @@ job_timeout_secs = 1800
 # of it back to post its review (GitHub writes retry for up to 5 minutes), so
 # with 1200 the reviewers have 690 s.
 checker_timeout_secs = 1200
-# Model requests in flight at once, across all workers. Set it to a local
-# server's slot count; the default suits hosted APIs.
+# Model requests in flight at once, across all workers and all [llm.*]
+# profiles together. When every profile uses one local server, set it to that
+# server's slot count.
 llm_in_flight = 10
 
 # Per-identity LLM endpoints. Mix providers freely — Barry can be

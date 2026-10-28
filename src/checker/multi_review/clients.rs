@@ -129,6 +129,10 @@ pub fn build(cfg: &Config) -> anyhow::Result<IdentityClients> {
             .map_err(anyhow::Error::from)
     };
 
+    tracing::info!(
+        llm_in_flight = cfg.dispatcher.llm_in_flight,
+        "model requests in flight at once, across all profiles"
+    );
     let llm_semaphore = Arc::new(Semaphore::new(cfg.dispatcher.llm_in_flight));
 
     // Which profiles must exist is [`crate::config::Config::validate`]'s

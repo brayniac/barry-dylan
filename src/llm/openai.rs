@@ -277,14 +277,18 @@ mod tests {
     /// The text of an endpoint error is posted on public check runs.
     #[tokio::test]
     async fn an_http_error_does_not_name_the_endpoint() {
-        // `.invalid` never resolves (RFC 2606), so the request fails in reqwest.
+        // The host resolves to 127.0.0.1 and the URL names port 0, which
+        // accepts no connection; with no proxy the request fails inside
+        // reqwest wherever the test runs. `resolve` ignores the port it is
+        // given and uses the URL's.
         let host = "barry-endpoint.invalid";
-        let c = OpenAiClient::new(
-            reqwest::Client::new(),
-            format!("http://{host}:8080/v1"),
-            None,
-            "m".into(),
-        );
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .resolve(host, "127.0.0.1:0".parse().unwrap())
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let c = OpenAiClient::new(http, format!("http://{host}:0/v1"), None, "m".into());
         let e = c.complete(&one_line_request()).await.err().unwrap();
         assert!(matches!(e, LlmError::Http(_)), "{e:?}");
         assert!(!e.to_string().contains(host), "{e}");

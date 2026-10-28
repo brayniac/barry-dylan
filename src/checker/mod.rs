@@ -70,8 +70,8 @@
 //! }
 //! ```
 //!
-//! The `retry_transient` helper handles connection errors and 5xx status codes
-//! with exponential backoff.
+//! The `retry_transient` helper handles connection errors and 502-504 with
+//! exponential backoff; a timeout is not retried.
 
 pub mod hygiene;
 pub mod multi_review;

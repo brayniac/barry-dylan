@@ -140,8 +140,9 @@ pub struct LlmResponse {
 /// Error from LLM operations.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    /// The URL is stripped on conversion: this text reaches check runs on
-    /// public repositories, and the endpoint is a private host.
+    /// The URL is stripped on conversion, since this text reaches check runs
+    /// on public repositories. Only this variant is scrubbed: an `Api` body
+    /// is the server's own text and is published as is.
     #[error("http: {0}")]
     Http(reqwest::Error),
     #[error("api {status}: {body}")]

@@ -158,10 +158,11 @@ pub struct DispatcherConfig {
     pub job_timeout_secs: u64,
     #[serde(default = "default_checker_timeout")]
     pub checker_timeout_secs: u64,
-    /// Model requests in flight at once, across every worker and identity.
-    /// A request's `request_timeout_secs` counts from when it is sent, so a
-    /// request queued inside a model server spends its timeout waiting; set
-    /// this to the server's slot count so the queueing happens here instead.
+    /// Model requests in flight at once, across every worker and every
+    /// `[llm.*]` profile together. A request's `request_timeout_secs` counts
+    /// from when it is sent, so a request queued inside a model server spends
+    /// its timeout waiting. When every profile uses one local server, set this
+    /// to that server's slot count so the queueing happens here instead.
     #[serde(default = "default_llm_in_flight")]
     pub llm_in_flight: usize,
 }
