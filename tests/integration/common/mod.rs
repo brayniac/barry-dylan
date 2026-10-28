@@ -174,6 +174,21 @@ pub async fn fixture_with_llm_using(
     cfg: barry_dylan::config::Config,
     factory: Arc<dyn MultiGhFactory>,
 ) -> (Store, Arc<JobDeps>) {
+    fixture_with_llm_reserving(
+        cfg,
+        factory,
+        barry_dylan::checker::multi_review::post_reserve(),
+    )
+    .await
+}
+
+/// [`fixture_with_llm_using`] with the tie-break's post reserve chosen by
+/// the caller, for a test whose checker timeout is seconds long.
+pub async fn fixture_with_llm_reserving(
+    cfg: barry_dylan::config::Config,
+    factory: Arc<dyn MultiGhFactory>,
+    post_reserve: std::time::Duration,
+) -> (Store, Arc<JobDeps>) {
     use barry_dylan::checker::multi_review::clients::IdentityClients;
     use barry_dylan::checker::multi_review::{MultiReviewChecker, persona};
 
@@ -217,6 +232,7 @@ pub async fn fixture_with_llm_using(
         http: reqwest::Client::new(),
         tie_break: cfg.tie_break_configured(),
         checker_timeout: std::time::Duration::from_secs(cfg.dispatcher.checker_timeout_secs),
+        post_reserve,
     }));
 
     let deps = Arc::new(JobDeps {

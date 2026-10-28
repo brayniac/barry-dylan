@@ -366,6 +366,34 @@ mod tests {
         assert_eq!(store.rack_experiment(first.id).await.unwrap(), None);
     }
 
+    #[tokio::test]
+    async fn a_new_event_merged_into_a_waiting_job_clears_its_review_progress() {
+        // `/barry review` is queued as `pull_request.opened`. Folded into a
+        // job that was handed back with its review half done, it must get a
+        // new review, not a resumed one that posts nothing new.
+        let store = Store::in_memory().await.unwrap();
+        let opened = job(1, "pull_request.opened", "d1");
+        store.enqueue(&opened, 0, 0).await.unwrap();
+        let first = store.lease_next(1, 300).await.unwrap().unwrap();
+        store
+            .set_review_progress(first.id, r#"{"head_sha":"sha1"}"#)
+            .await
+            .unwrap();
+        store
+            .reschedule_at(first.id, 1000, "rate limited")
+            .await
+            .unwrap();
+        assert!(store.review_progress(first.id).await.unwrap().is_some());
+
+        store
+            .enqueue(&job(1, "pull_request.opened", "d2"), 2, 2)
+            .await
+            .unwrap();
+        let again = store.lease_next(1000, 300).await.unwrap().unwrap();
+        assert_eq!(again.id, first.id, "merged into the waiting job");
+        assert_eq!(store.review_progress(again.id).await.unwrap(), None);
+    }
+
     fn job(pr: i64, kind: &str, delivery: &str) -> NewJob {
         NewJob {
             installation_id: 1,

@@ -437,6 +437,7 @@ fn build_pipeline_with(
             shutdown,
             tie_break: cfg.tie_break_configured(),
             checker_timeout: std::time::Duration::from_secs(cfg.dispatcher.checker_timeout_secs),
+            post_reserve: crate::checker::multi_review::post_reserve(),
         }));
     p
 }

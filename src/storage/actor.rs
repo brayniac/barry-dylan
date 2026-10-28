@@ -421,7 +421,8 @@ pub(crate) fn run(
                                 r#"UPDATE jobs
                                    SET run_after = MAX(run_after, ?1),
                                        delivery_id = ?2,
-                                       actor = ?7
+                                       actor = ?7,
+                                       review_progress = NULL
                                    WHERE repo_owner = ?3 AND repo_name = ?4 AND pr_number = ?5
                                      AND event_kind = ?6 AND leased_until IS NULL"#,
                             )

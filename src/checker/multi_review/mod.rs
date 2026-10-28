@@ -47,6 +47,9 @@ pub struct MultiReviewChecker {
     /// The tie-break stops short of it so that a slow Other Other Barry
     /// fails the tie-break, not the whole check.
     pub checker_timeout: std::time::Duration,
+    /// Time kept back from the checker timeout for posting the tie-break
+    /// review. [`post_reserve`] in production.
+    pub post_reserve: std::time::Duration,
 }
 
 /// What came of handing a disagreement to Other Other Barry.
@@ -72,33 +75,50 @@ struct Progress {
     tie_break: Option<review::UnifiedReview>,
 }
 
-/// GitHub's client gives up on a request after 30 s; a post may need two.
-const POST_RESERVE: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long posting the tie-break review can take. After the review, the
+/// tie-break re-checks the head (an installation token and a PR lookup, as
+/// Barry), mints Other Other Barry's token, and creates the review, which
+/// retries for up to [`crate::github::client::WriteRetry`]'s deadline, then
+/// makes one last attempt and a lookup for a copy that landed. GitHub's
+/// client gives each request up to 30 s.
+pub fn post_reserve() -> std::time::Duration {
+    const REQUEST: std::time::Duration = std::time::Duration::from_secs(30);
+    crate::github::client::WriteRetry::default().deadline + 3 * REQUEST
+}
 
 /// When the tie-break must stop, from when the checker started.
 #[derive(Debug, Clone, Copy)]
 struct TieBreakDeadlines {
     /// Other Other Barry's review, with the installation lookup and head
-    /// check before it, must be done by this: a tenth of the checker timeout
-    /// before the dispatcher's own timeout, so the check still says why
-    /// there was no consensus.
+    /// check before it, must be done by this: the post reserve or a tenth of
+    /// the checker timeout, whichever is longer, before the dispatcher's own
+    /// timeout, so the review can still be posted and the check still says
+    /// why there was no consensus.
     review: tokio::time::Instant,
-    /// The dispatcher's timeout. The review is posted only if
-    /// [`POST_RESERVE`] is left before it.
+    /// The dispatcher's timeout. The review is posted only if the post
+    /// reserve is left before it.
     checker: tokio::time::Instant,
+    post_reserve: std::time::Duration,
 }
 
 impl TieBreakDeadlines {
-    fn new(start: std::time::Instant, checker_timeout: std::time::Duration) -> Self {
+    fn new(
+        start: std::time::Instant,
+        checker_timeout: std::time::Duration,
+        post_reserve: std::time::Duration,
+    ) -> Self {
         let start = tokio::time::Instant::from_std(start);
+        let checker = start + checker_timeout;
+        let kept_back = post_reserve.max(checker_timeout / 10);
         Self {
-            review: start + checker_timeout - checker_timeout / 10,
-            checker: start + checker_timeout,
+            review: checker.checked_sub(kept_back).unwrap_or(start).max(start),
+            checker,
+            post_reserve,
         }
     }
 
     fn time_to_post(&self, now: tokio::time::Instant) -> bool {
-        now + POST_RESERVE <= self.checker
+        now + self.post_reserve <= self.checker
     }
 }
 
@@ -181,7 +201,7 @@ impl MultiReviewChecker {
     /// counted against `[confer] max_per_pr`.
     ///
     /// Fails with "timed out" when the review is not done by
-    /// `deadlines.review`, or when less than [`POST_RESERVE`] is left to post
+    /// `deadlines.review`, or when less than the post reserve is left to post
     /// it before the checker times out.
     ///
     /// `None` when OOB is not installed on the repo, which leaves the
@@ -437,13 +457,27 @@ impl Checker for MultiReviewChecker {
         // A job handed back by a stopping process resumes from what it had
         // done: its verdict, and which reviews it had posted. Without this a
         // restart during the tie-break would post Barry and Other Barry again.
+        let verdict_kind = |v: &Verdict| match v {
+            Verdict::Agree { .. } => "agree",
+            Verdict::Disagree { .. } => "disagree",
+            Verdict::BarryAlone { .. } => "barry_alone",
+        };
         let mut progress = match self.load_progress(ctx).await {
             Some(p) => {
-                tracing::info!(posted = ?p.posted, "resuming the review this job had begun");
+                tracing::info!(
+                    verdict = verdict_kind(&p.verdict),
+                    posted = ?p.posted,
+                    "resuming the review this job had begun"
+                );
                 p
             }
             None => {
                 let verdict = self.verdict(&orchestrator, ctx).await?;
+                tracing::info!(
+                    verdict = verdict_kind(&verdict),
+                    orchestrator_duration_ms = start.elapsed().as_millis() as u64,
+                    "orchestrator verdict received"
+                );
                 let p = Progress {
                     head_sha: ctx.pr.head.sha.clone(),
                     verdict,
@@ -454,15 +488,6 @@ impl Checker for MultiReviewChecker {
                 p
             }
         };
-        tracing::info!(
-            verdict = match &progress.verdict {
-                Verdict::Agree { .. } => "agree",
-                Verdict::Disagree { .. } => "disagree",
-                Verdict::BarryAlone { .. } => "barry_alone",
-            },
-            orchestrator_duration_ms = start.elapsed().as_millis() as u64,
-            "orchestrator verdict received"
-        );
 
         // Post under each Barry that has something to say.
         match progress.verdict.clone() {
@@ -558,9 +583,24 @@ impl Checker for MultiReviewChecker {
         // the check. Runs inside this future, so the checker timeout and a
         // cancel stop it as they stop the rest of the review.
         let tie_break = match (&verdict, progress.tie_break.clone()) {
-            (Verdict::Disagree { .. }, Some(posted)) => Some(TieBreak::Decided(posted)),
+            (Verdict::Disagree { .. }, Some(posted)) => {
+                // The job may have stopped between saving this and recording
+                // it against the head; unrecorded, a later confer would run
+                // OOB again. record_post is an upsert.
+                let _ = ctx
+                    .store
+                    .record_post(
+                        key,
+                        Identity::OtherOtherBarry,
+                        outcome_str(posted.outcome),
+                        now_ts(),
+                    )
+                    .await;
+                Some(TieBreak::Decided(posted))
+            }
             (Verdict::Disagree { reason, .. }, None) if self.tie_break => {
-                let deadlines = TieBreakDeadlines::new(start, self.checker_timeout);
+                let deadlines =
+                    TieBreakDeadlines::new(start, self.checker_timeout, self.post_reserve);
                 let t = self
                     .break_tie(ctx, key, reason, deadlines, &mut progress)
                     .await;
@@ -702,15 +742,55 @@ mod checker_tests {
     }
 
     #[test]
-    fn the_tie_break_review_ends_a_tenth_of_the_checker_timeout_early() {
+    fn the_tie_break_review_keeps_back_the_post_reserve_or_a_tenth_of_the_timeout() {
         use std::time::Duration;
         let start = std::time::Instant::now();
-        let d = TieBreakDeadlines::new(start, Duration::from_secs(600));
-        let start = tokio::time::Instant::from_std(start);
-        assert_eq!(d.review - start, Duration::from_secs(540));
-        assert_eq!(d.checker - start, Duration::from_secs(600));
-        assert!(d.time_to_post(start + Duration::from_secs(540)));
-        assert!(!d.time_to_post(start + Duration::from_secs(541)));
+        let at = |secs| tokio::time::Instant::from_std(start) + Duration::from_secs(secs);
+        let t = Duration::from_secs(600);
+
+        // The default reserve is longer than a tenth of the default timeout.
+        assert_eq!(post_reserve(), Duration::from_secs(390));
+        let d = TieBreakDeadlines::new(start, t, post_reserve());
+        assert_eq!(d.review, at(210));
+        assert_eq!(d.checker, at(600));
+        assert!(d.time_to_post(at(210)));
+        assert!(!d.time_to_post(at(211)));
+
+        // A short reserve: a tenth of the timeout is kept back instead.
+        let d = TieBreakDeadlines::new(start, t, Duration::from_secs(30));
+        assert_eq!(d.review, at(540));
+        assert!(d.time_to_post(at(570)));
+
+        // A reserve longer than the timeout leaves no time to review.
+        let d = TieBreakDeadlines::new(start, Duration::from_secs(60), post_reserve());
+        assert_eq!(d.review, at(0));
+    }
+
+    /// A record written by the deployed version must still decode after an
+    /// upgrade: one that does not is ignored, and the job then reviews and
+    /// posts again. A change to `Verdict`, `UnifiedReview` or `Identity` that
+    /// breaks this needs a migration, not an edit to the fixture.
+    #[test]
+    fn a_recorded_review_progress_still_decodes() {
+        let p: Progress =
+            serde_json::from_str(include_str!("../../../tests/fixtures/review_progress.json"))
+                .unwrap();
+        assert_eq!(p.head_sha, "sha1");
+        assert_eq!(p.posted, vec![Identity::Barry, Identity::OtherBarry]);
+        match p.verdict {
+            Verdict::Disagree {
+                barry,
+                other_barry,
+                reason,
+            } => {
+                assert_eq!(barry.outcome, review::Outcome::RequestChanges);
+                assert_eq!(barry.findings[0].line, 1);
+                assert_eq!(other_barry.outcome, review::Outcome::Comment);
+                assert_eq!(reason, "they weigh the unwrap differently");
+            }
+            other => panic!("wanted Disagree, got {other:?}"),
+        }
+        assert_eq!(p.tie_break.unwrap().outcome, review::Outcome::Approve);
     }
 
     #[tokio::test]

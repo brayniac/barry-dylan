@@ -535,9 +535,16 @@ async fn a_checker_timeout_during_the_tie_break_keeps_no_consensus() {
     let cfg = config(&server, |t| {
         t.replace("[dispatcher]", "[dispatcher]\nchecker_timeout_secs = 2")
     });
-    let (store, deps) = crate::common::fixture_with_llm_using(cfg, static_gh(&server)).await;
+    // The production reserve is minutes; this checker has two seconds.
+    let (store, deps) = crate::common::fixture_with_llm_reserving(
+        cfg,
+        static_gh(&server),
+        std::time::Duration::from_millis(500),
+    )
+    .await;
     review_pr(&deps, &store).await;
 
+    assert!(oob_llm_calls(&server).await > 0, "the tie-break started");
     assert_eq!(review_bodies(&server).await.len(), 2);
     let (conclusion, summary) = the_llm_review_check(&server).await;
     assert_eq!(conclusion, "neutral");
@@ -827,24 +834,33 @@ async fn a_job_stopped_after_the_tie_break_posted_posts_only_the_check() {
 }
 
 #[tokio::test]
-async fn a_tie_break_without_time_left_to_post_is_not_posted() {
+async fn the_tie_break_review_stops_where_the_post_reserve_begins() {
+    // A 3 s checker with a 2 s post reserve: Other Other Barry has until 1 s.
+    // Kept back by a tenth of the timeout alone, it would run to 2.7 s and
+    // then have no time to post.
     let server = MockServer::start().await;
-    // Answers inside the review deadline (2.7 s of a 3 s checker timeout),
-    // but with less than the time a post may take left before the timeout.
     mount_pr(&server).await;
     mount_llms(
         &server,
         false,
-        oob_says("approve").set_delay(std::time::Duration::from_millis(600)),
+        oob_says("approve").set_delay(std::time::Duration::from_secs(10)),
     )
     .await;
     let cfg = config(&server, |t| {
         t.replace("[dispatcher]", "[dispatcher]\nchecker_timeout_secs = 3")
     });
-    let (store, deps) = crate::common::fixture_with_llm_using(cfg, static_gh(&server)).await;
+    let (store, deps) = crate::common::fixture_with_llm_reserving(
+        cfg,
+        static_gh(&server),
+        std::time::Duration::from_secs(2),
+    )
+    .await;
+    let started = std::time::Instant::now();
     review_pr(&deps, &store).await;
+    let took = started.elapsed();
 
     assert!(oob_llm_calls(&server).await > 0);
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     assert_eq!(review_bodies(&server).await.len(), 2, "no tie-break post");
     let (conclusion, summary) = the_llm_review_check(&server).await;
     assert_eq!(conclusion, "neutral");
@@ -938,4 +954,42 @@ async fn a_job_handed_back_after_a_push_reviews_the_new_head_afresh() {
         .collect();
     assert_eq!(posted.len(), 1, "{posted:?}");
     assert_eq!(posted[0]["commit_id"], "sha2");
+}
+
+#[tokio::test]
+async fn a_job_resumed_after_the_tie_break_posted_records_other_other_barry() {
+    // Stopped between saving the tie-break to the job and recording it
+    // against the head: the job says OOB posted, run_state does not.
+    let server = MockServer::start().await;
+    mount_pr(&server).await;
+    mount_llms(&server, false, oob_says("approve")).await;
+    let (store, deps) =
+        crate::common::fixture_with_llm_using(config(&server, |t| t), static_gh(&server)).await;
+    crate::common::enqueue_opened(&store, "o", "r", 1).await;
+    let job = store.lease_next(0, 300).await.unwrap().unwrap();
+    store
+        .set_review_progress(job.id, include_str!("../fixtures/review_progress.json"))
+        .await
+        .unwrap();
+    run_job(&deps, &job).await.unwrap();
+
+    assert!(
+        review_bodies(&server).await.is_empty(),
+        "everything was posted"
+    );
+    assert!(
+        requests(&server)
+            .await
+            .iter()
+            .all(|r| r.url.path() != "/v1/chat/completions"),
+        "no model is asked"
+    );
+    let st = store.run_state(key()).await.unwrap().unwrap();
+    assert!(st.barry_posted && st.other_barry_posted);
+    assert!(
+        st.other_other_barry_posted,
+        "a later confer must not run OOB"
+    );
+    let (conclusion, summary) = the_llm_review_check(&server).await;
+    assert_eq!(conclusion, "success", "{summary}");
 }
