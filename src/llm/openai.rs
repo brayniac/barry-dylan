@@ -275,17 +275,17 @@ mod tests {
     }
 
     /// The text of an endpoint error is posted on public check runs.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_http_error_does_not_name_the_endpoint() {
         // The host resolves to 127.0.0.1 and the URL names port 0, which
         // accepts no connection; with no proxy the request fails inside
         // reqwest wherever the test runs. `resolve` ignores the port it is
-        // given and uses the URL's.
+        // given and uses the URL's. The clock is paused so the retries of the
+        // refused connection take no real time.
         let host = "barry-endpoint.invalid";
         let http = reqwest::Client::builder()
             .no_proxy()
             .resolve(host, "127.0.0.1:0".parse().unwrap())
-            .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap();
         let c = OpenAiClient::new(http, format!("http://{host}:0/v1"), None, "m".into());

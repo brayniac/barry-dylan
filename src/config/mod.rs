@@ -162,7 +162,9 @@ pub struct DispatcherConfig {
     /// `[llm.*]` profile together. A request's `request_timeout_secs` counts
     /// from when it is sent, so a request queued inside a model server spends
     /// its timeout waiting. When every profile uses one local server, set this
-    /// to that server's slot count so the queueing happens here instead.
+    /// to that server's slot count so the queueing happens here instead. A
+    /// call waiting between retries of a transient error keeps its place, for
+    /// up to 47 s.
     #[serde(default = "default_llm_in_flight")]
     pub llm_in_flight: usize,
 }
