@@ -5,6 +5,10 @@ use crate::github::pr::ChangedFile;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
+/// Half-second checks `stop_server` makes for the server to exit after
+/// SIGTERM before it sends SIGKILL.
+const STOP_POLLS: u32 = 20;
+
 /// Render the bash one guest runs for the reviewers assigned to it.
 ///
 /// The inputs travel inside the payload rather than as pushed files: the
@@ -54,11 +58,12 @@ barry-dylan --version
 llama-server --version 2>&1 | head -1 || true
 
 SERVER_PID=
-# SIGTERM, then SIGKILL after 10 s: a degraded server can take minutes to stop.
+# SIGTERM, then SIGKILL after {stop_secs} s: a degraded server can take minutes
+# to stop.
 stop_server() {{
     if [ -n "$SERVER_PID" ]; then
         kill "$SERVER_PID" 2>/dev/null || true
-        for _ in $(seq 1 20); do
+        for _ in $(seq 1 {stop_polls}); do
             kill -0 "$SERVER_PID" 2>/dev/null || break
             sleep 0.5
         done
@@ -71,6 +76,8 @@ trap stop_server EXIT
 
 "#,
         dir = if cfg.bare { "\"$PWD\"" } else { "/tmp" },
+        stop_polls = STOP_POLLS,
+        stop_secs = STOP_POLLS / 2,
         packages = cfg
             .packages
             .iter()
@@ -1040,7 +1047,7 @@ while :; do sleep 0.1; done"#,
         // The stop window shortened from 10 s to 1 s, so the test that waits it
         // out three times does not hold CI for half a minute.
         let p = payload(&c, &all(&c), &files()).unwrap().replacen(
-            "for _ in $(seq 1 20); do",
+            &format!("for _ in $(seq 1 {STOP_POLLS}); do"),
             "for _ in $(seq 1 2); do",
             1,
         );

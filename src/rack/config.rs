@@ -256,6 +256,11 @@ pub const VERDICT_ARTIFACT: &str = "verdict.json";
 pub const JUDGE_LOG: &str = "llama-judge.log";
 
 impl RackConfig {
+    /// Whether a reviewer is configured for the identity `slug`.
+    pub fn has_reviewer(&self, slug: &str) -> bool {
+        self.reviewers.iter().any(|r| r.identity == slug)
+    }
+
     /// Reject a configuration that cannot do what it says.
     ///
     /// Only `judge` can be wrong this way today. It is a hard error rather than

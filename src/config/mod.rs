@@ -289,10 +289,7 @@ impl Config {
         let oob = "other_other_barry";
         self.confer.tie_break
             && (self.llm.contains_key(oob)
-                || self
-                    .rack
-                    .as_ref()
-                    .is_some_and(|r| r.reviewers.iter().any(|x| x.identity == oob)))
+                || self.rack.as_ref().is_some_and(|r| r.has_reviewer(oob)))
     }
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {

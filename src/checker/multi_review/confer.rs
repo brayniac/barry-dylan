@@ -232,7 +232,7 @@ pub(crate) async fn review_as(
     name: &str,
 ) -> Result<(UnifiedReview, synthesis::TokenCount), ReviewError> {
     let slug = identity.slug();
-    if let Some(rack) = rack.filter(|r| r.reviewers.iter().any(|x| x.identity == slug)) {
+    if let Some(rack) = rack.filter(|r| r.has_reviewer(slug)) {
         let mut cfg = rack.clone();
         cfg.reviewers.retain(|r| r.identity == slug);
         cfg.judge = false;
