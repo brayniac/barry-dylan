@@ -31,7 +31,7 @@ src/
 
 ### Where the Models Run
 
-By default each identity calls its `[llm.*]` endpoint directly. With a `[rack]` section the reviews instead run as a systemslab experiment: an ephemeral GPU VM pulls the model, serves it, produces both reviews, and is destroyed. Barry never speaks to the model. With `bare = true` the job runs on the host itself, for an integrated GPU a guest cannot use, and the model server is started for the job and stopped when it ends. An `other_other_barry` rack reviewer makes the tie-break and `/barry confer` run in rack jobs of their own.
+By default each identity calls its `[llm.*]` endpoint directly. With a `[rack]` section the reviews instead run as a systemslab experiment: an ephemeral GPU VM pulls the model, serves it, produces both reviews, and is destroyed. Barry never speaks to the model. With `bare = true` the job runs on the host itself, for an integrated GPU a guest cannot use, and every reviewer and the judge get a model server started for them alone. An `other_other_barry` rack reviewer makes the tie-break and `/barry confer` run in rack jobs of their own.
 
 `[rack] judge = true` moves the judge in there too, against the model already loaded. That removes the last remote call: **no `[llm.*]` profile is required at all**, no API key lives in `secrets.env` but the webhook secret, and no diff leaves the rack. It needs two reviewers and the default sequential placement — concurrent reviewers run in separate guests, so neither can see the other's review, and the config is rejected rather than silently falling back.
 

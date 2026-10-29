@@ -129,9 +129,12 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
 
     let files = barry_gh.list_pr_files(&owner, &repo, job.pr_number).await?;
     let name = format!("barry confer {owner}/{repo} #{}", job.pr_number);
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
     let (review, tokens) = review_as(
         deps.config.rack.as_ref(),
-        &reqwest::Client::new(),
+        &http,
         clients,
         summon,
         personas,
@@ -217,7 +220,8 @@ impl ReviewError {
 ///
 /// The rack job is not remembered on the dispatcher job, as the main rack
 /// review is: dropped before it ends, it is cancelled, and a resumed job runs
-/// it again. A rack review reports no token counts.
+/// it again. It runs one priority above a main review. A rack review reports
+/// no token counts.
 pub(crate) async fn review_as(
     rack: Option<&crate::rack::RackConfig>,
     http: &reqwest::Client,
@@ -232,6 +236,9 @@ pub(crate) async fn review_as(
         let mut cfg = rack.clone();
         cfg.reviewers.retain(|r| r.identity == slug);
         cfg.judge = false;
+        // One above a main review: a tie-break follows a main review that has
+        // finished, and should not queue behind other pull requests' ones.
+        cfg.priority = cfg.priority.saturating_add(1);
         let mut outcome = crate::rack::review(&cfg, http, files, name)
             .await
             .map_err(ReviewError::Rack)?;
@@ -473,6 +480,8 @@ model_name = "m"
         assert!(body.contains("offline-other_other_barry.toml"), "{body}");
         assert!(!body.contains("offline-barry.toml"), "{body}");
         assert!(!body.contains("judge-offline"), "{body}");
+        // One above a main review's 300.
+        assert!(body.contains("\"priority\":301"), "{body}");
     }
 
     #[test]

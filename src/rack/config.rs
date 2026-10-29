@@ -32,10 +32,10 @@ pub struct RackConfig {
 
     /// Run the review on the host itself, as a `shell` job, instead of in a
     /// guest: for a GPU that cannot be passed into one, such as an integrated
-    /// GPU. The host must have `llama-server` and access to the GPU for the
-    /// systemslab agent's user. The server runs as the transient unit
-    /// `barry-rack-llama`, which each job stops on exit and before it starts
-    /// its own, so a job that was killed cannot leave the GPU held.
+    /// GPU. The host must have `llama-server` and give the systemslab agent's
+    /// user the GPU. Every reviewer and the judge get a server started for
+    /// them alone. It runs in the job's process group, so a cancelled or
+    /// timed-out job takes it down; `job_timeout_secs` bounds the job.
     #[serde(default)]
     pub bare: bool,
 
@@ -89,6 +89,11 @@ pub struct RackConfig {
     /// Cap on a single completion inside the guest.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+
+    /// Per-request timeout for `review-offline` and `judge-offline` against
+    /// the job's server.
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
 
     /// How long to wait for a host before giving up and cancelling.
     ///
@@ -146,6 +151,7 @@ pub struct RackConfig {
     pub job_timeout_secs: u64,
 
     /// Bound on the payload inside the guest, handed to the `anvil-vm` action.
+    /// Unused when `bare`.
     /// Distinct from `job_timeout_secs`, which also covers scheduling: a job
     /// can sit queued behind another for a long time without its payload having
     /// started.
@@ -245,6 +251,25 @@ impl RackConfig {
         if !self.bare && (self.shape.is_empty() || self.image.is_empty()) {
             return Err("[rack] needs shape and image unless bare = true".into());
         }
+        if self.bare && self.placement == Placement::Concurrent {
+            return Err(
+                "[rack] bare = true needs placement = \"sequential\": concurrent jobs would \
+                 need as many bare hosts with the same tags at once"
+                    .into(),
+            );
+        }
+        if self.bare
+            && self
+                .packages
+                .iter()
+                .any(|p| p.split('=').next() == Some("llama-server"))
+        {
+            return Err(
+                "[rack] bare = true runs the host's own llama-server; installing the \
+                 `llama-server` package would replace it (set packages = [] or [\"slipway\"])"
+                    .into(),
+            );
+        }
         for a in &self.server_args {
             if !is_plain_word(a) {
                 return Err(format!(
@@ -286,7 +311,16 @@ impl RackConfig {
                 self.queue_timeout_secs, self.job_timeout_secs
             ));
         }
-        if self.judge && self.reviewers.len() < 2 {
+        // Other Other Barry never runs in the main job (it is the tie-break),
+        // so it does not make a pair to judge.
+        if self.judge
+            && self
+                .reviewers
+                .iter()
+                .filter(|r| r.identity != "other_other_barry")
+                .count()
+                < 2
+        {
             return Err(
                 "[rack] judge = true needs two reviewers; there is nothing to reconcile".into(),
             );
@@ -345,6 +379,10 @@ fn default_context_size() -> u32 {
 
 fn default_max_tokens() -> u32 {
     4096
+}
+
+fn default_request_timeout_secs() -> u64 {
+    600
 }
 
 fn default_priority() -> i32 {
