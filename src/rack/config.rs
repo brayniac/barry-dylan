@@ -21,11 +21,28 @@ pub struct RackConfig {
     pub host_tags: Vec<String>,
 
     /// anvil instance type, e.g. `z2.g.medium`. The `g` class is what gets a
-    /// GPU passed through.
+    /// GPU passed through. Unused when `bare`.
+    #[serde(default)]
     pub shape: String,
 
-    /// Guest image, e.g. `spool/images/debian-13-gpu@golden`.
+    /// Guest image, e.g. `spool/images/debian-13-gpu@golden`. Unused when
+    /// `bare`.
+    #[serde(default)]
     pub image: String,
+
+    /// Run the review on the host itself, as a `shell` job, instead of in a
+    /// guest: for a GPU that cannot be passed into one, such as an integrated
+    /// GPU. The host must have `llama-server` and access to the GPU for the
+    /// systemslab agent's user. The server runs as the transient unit
+    /// `barry-rack-llama`, which each job stops on exit and before it starts
+    /// its own, so a job that was killed cannot leave the GPU held.
+    #[serde(default)]
+    pub bare: bool,
+
+    /// Arguments added to every `llama-server` command line, after the ones a
+    /// review always uses (`-ngl 99 -c <context> --no-webui`).
+    #[serde(default)]
+    pub server_args: Vec<String>,
 
     /// The reviewers to run. Order is the order they run in when sequential.
     pub reviewers: Vec<Reviewer>,
@@ -179,7 +196,9 @@ pub struct Reviewer {
     pub identity: String,
 
     /// slipway reference for the weights, e.g.
-    /// `Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest`.
+    /// `Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest`, or the
+    /// absolute path of a GGUF already on the host, which is served without
+    /// a pull.
     pub model: String,
 
     /// What to call the model over the OpenAI-compatible API. llama-server
@@ -223,6 +242,24 @@ impl RackConfig {
     /// it is to stop paying a remote judge -- and a silent fallback means still
     /// paying one while believing you are not.
     pub fn validate(&self) -> Result<(), String> {
+        if !self.bare && (self.shape.is_empty() || self.image.is_empty()) {
+            return Err("[rack] needs shape and image unless bare = true".into());
+        }
+        for a in &self.server_args {
+            if !is_plain_word(a) {
+                return Err(format!(
+                    "[rack] server_args entry {a:?} is not a plain argument (no spaces, quotes or shell syntax)"
+                ));
+            }
+        }
+        for r in &self.reviewers {
+            if r.is_local() && !is_plain_word(&r.model) {
+                return Err(format!(
+                    "[rack] reviewer {} model {:?} is not a plain path",
+                    r.identity, r.model
+                ));
+            }
+        }
         for p in &self.packages {
             // An apt spec, not a shell fragment: it is interpolated into the
             // guest payload, and the payload is bash.
@@ -258,7 +295,19 @@ impl RackConfig {
     }
 }
 
+/// Safe to interpolate into the bash payload unquoted.
+fn is_plain_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/:=+,@%-".contains(c))
+}
+
 impl Reviewer {
+    /// Whether `model` is a GGUF on the host rather than a slipway reference.
+    pub fn is_local(&self) -> bool {
+        self.model.starts_with('/')
+    }
+
     /// The artifact this reviewer's review is written to and collected as.
     pub fn artifact(&self) -> String {
         format!("review-{}.json", self.identity)

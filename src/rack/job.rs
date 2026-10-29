@@ -36,8 +36,12 @@ pub fn payload(
     // fast for a baked version to mean anything) nor the slipway client. A
     // payload that assumed them failed at `slipway: command not found` after
     // the 2026-09-12 image rebuild, having proved only that apt works.
+    //
+    // A bare job works in its own job directory, which systemslab removes, so
+    // nothing is left in the host's /tmp; a guest is destroyed whole.
     s.push_str(&format!(
         r#"set -euxo pipefail
+T={dir}
 
 sudo apt-get update -qq
 sudo apt-get install -y barry-dylan{packages}
@@ -45,15 +49,31 @@ barry-dylan --version
 llama-server --version 2>&1 | head -1 || true
 
 "#,
+        dir = if cfg.bare { "\"$PWD\"" } else { "/tmp" },
         packages = cfg
             .packages
             .iter()
             .map(|p| format!(" {p}"))
             .collect::<String>(),
     ));
+    if cfg.bare {
+        // On a bare host the server would outlive a job that was cancelled or
+        // killed, holding the GPU from every job after it. As a transient unit
+        // it has a name to stop, here and on the next job's start, and a
+        // lifetime cap for the case where neither runs.
+        s.push_str(
+            r#"stop_server() { sudo systemctl stop barry-rack-llama 2>/dev/null || true; sudo systemctl reset-failed barry-rack-llama 2>/dev/null || true; }
+stop_server
+trap stop_server EXIT
+
+"#,
+        );
+    }
     s.push_str(&format!(
-        "echo '{files_b64}' | base64 -d > /tmp/changed.json\n\n"
+        "echo '{files_b64}' | base64 -d > \"$T/changed.json\"\n\n"
     ));
+
+    let server_args: String = cfg.server_args.iter().map(|a| format!(" {a}")).collect();
 
     for (i, r) in reviewers.iter().enumerate() {
         // Reviewers sharing a model share the server. Two identities on the
@@ -68,35 +88,67 @@ llama-server --version 2>&1 | head -1 || true
         s.push_str(&format!("# ---- {} ----\n", r.identity));
 
         if start_server {
-            s.push_str(&format!(
-                r#"rm -rf /tmp/model
-slipway pull '{model}' /tmp/model
-GGUF=$(find /tmp/model -name '*.gguf' | head -1)
+            if r.is_local() {
+                s.push_str(&format!(
+                    "GGUF={model}\ntest -r \"$GGUF\" || {{ echo \"cannot read $GGUF\"; exit 1; }}\n",
+                    model = r.model,
+                ));
+            } else {
+                s.push_str(&format!(
+                    r#"rm -rf "$T/model"
+slipway pull '{model}' "$T/model"
+GGUF=$(find "$T/model" -name '*.gguf' | head -1)
 test -n "$GGUF" || {{ echo "no gguf materialised from {model}"; exit 1; }}
-
-llama-server -m "$GGUF" --host 127.0.0.1 --port 8080 -ngl 99 -c {context} \
-    --no-webui > /tmp/llama-{identity}.log 2>&1 &
+"#,
+                    model = r.model,
+                ));
+            }
+            let command = format!(
+                "llama-server -m \"$GGUF\" --host 127.0.0.1 --port 8080 -ngl 99 -c {context} --no-webui{server_args}",
+                context = r.context_size(cfg),
+            );
+            if cfg.bare {
+                // Created here, as the agent's user: systemd would otherwise
+                // create it as root, and the agent could not touch it later.
+                s.push_str(&format!(
+                    r#": > "$T/llama-{identity}.log"
+sudo systemd-run --unit=barry-rack-llama --uid="$(id -u)" --gid="$(id -g)" \
+    -p SupplementaryGroups=render -p RuntimeMaxSec={max} -p TimeoutStopSec=10 \
+    -p StandardOutput=file:"$T/llama-{identity}.log" -p StandardError=inherit \
+    {command}
+server_up() {{ systemctl is-active --quiet barry-rack-llama; }}
+"#,
+                    max = cfg.payload_timeout_secs,
+                    identity = r.identity,
+                ));
+            } else {
+                s.push_str(&format!(
+                    r#"{command} > "$T/llama-{identity}.log" 2>&1 &
 SERVER_PID=$!
-
+server_up() {{ kill -0 $SERVER_PID 2>/dev/null; }}
+"#,
+                    identity = r.identity,
+                ));
+            }
+            s.push_str(&format!(
+                r#"
 # Bounded, and it gives up as soon as the server dies rather than waiting out
 # the whole loop to report a timeout that was really a crash.
 for _ in $(seq 1 240); do
     curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 && break
-    kill -0 $SERVER_PID 2>/dev/null || {{ tail -40 /tmp/llama-{identity}.log; exit 1; }}
+    server_up || {{ tail -40 "$T/llama-{identity}.log"; exit 1; }}
     sleep 2
 done
 curl -sf http://127.0.0.1:8080/health >/dev/null \
-    || {{ tail -40 /tmp/llama-{identity}.log; exit 1; }}
+    || {{ tail -40 "$T/llama-{identity}.log"; exit 1; }}
 
 "#,
                 identity = r.identity,
-                model = r.model,
-                context = r.context_size(cfg),
             ));
         }
 
         s.push_str(&format!(
-            r#"cat > /tmp/offline-{identity}.toml <<'OFFLINE'
+            r#"cat > "$T/offline-{identity}.toml" <<'OFFLINE'
 [llm]
 provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
@@ -109,11 +161,11 @@ OFFLINE
 # The server log is an artifact whether or not this reviewer started the
 # server (a reviewer sharing a model shares the server, and its log). Touched
 # so that the upload never fails on a file that was never written.
-touch /tmp/llama-{identity}.log
+touch "$T/llama-{identity}.log"
 barry-dylan review-offline \
-    --config /tmp/offline-{identity}.toml \
-    --files /tmp/changed.json \
-    --out /tmp/{artifact}
+    --config "$T/offline-{identity}.toml" \
+    --files "$T/changed.json" \
+    --out "$T/{artifact}"
 
 "#,
             identity = r.identity,
@@ -140,7 +192,7 @@ barry-dylan review-offline \
             let a = reviewers[0];
             let b = reviewers[1];
             s.push_str(&format!(
-                r#"cat > /tmp/offline-judge.toml <<'OFFLINE'
+                r#"cat > "$T/offline-judge.toml" <<'OFFLINE'
 [llm]
 provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
@@ -150,11 +202,11 @@ max_tokens = {judge_max_tokens}
 OFFLINE
 
 barry-dylan judge-offline \
-    --config /tmp/offline-judge.toml \
-    --a /tmp/{a_artifact} \
-    --b /tmp/{b_artifact} \
-    --out /tmp/{verdict} \
-    || echo '{{"error":"judge-offline failed in the guest"}}' > /tmp/{verdict}
+    --config "$T/offline-judge.toml" \
+    --a "$T/{a_artifact}" \
+    --b "$T/{b_artifact}" \
+    --out "$T/{verdict}" \
+    || echo '{{"error":"judge-offline failed in the guest"}}' > "$T/{verdict}"
 
 "#,
                 model_name = r.model_name,
@@ -171,11 +223,13 @@ barry-dylan judge-offline \
                 r#"# Free the whole card before the next model loads. Two large q4 models at
 # this context do not fit on one 24 GB card together, and a partially offloaded
 # second model would silently review at a fraction of the speed.
-kill $SERVER_PID
-wait $SERVER_PID 2>/dev/null || true
-
 "#,
             );
+            s.push_str(if cfg.bare {
+                "stop_server\n\n"
+            } else {
+                "kill $SERVER_PID\nwait $SERVER_PID 2>/dev/null || true\n\n"
+            });
         }
     }
 
@@ -202,7 +256,12 @@ fn job_value(
     // Only the job that holds every reviewer can judge, which under sequential
     // placement is the only job there is.
     let judging = cfg.judge && reviewers.len() >= 2;
-    let mut steps = vec![json!({
+    // A bare job writes its artifacts straight into the job directory, where
+    // the upload steps look; a guest's are pulled out by the action.
+    let first = if cfg.bare {
+        json!({ "uses": "shell", "with": { "run": payload(cfg, reviewers, files)? } })
+    } else {
+        json!({
         "uses": "anvil-vm",
         "with": {
             "shape": shape,
@@ -219,7 +278,9 @@ fn job_value(
             // see the GPU at all, so this is the only place it can come from.
             "metrics": true,
         }
-    })];
+        })
+    };
+    let mut steps = vec![first];
     for r in reviewers {
         steps.push(json!({
             "uses": "upload-artifact",
@@ -239,10 +300,12 @@ fn job_value(
             "with": { "path": VERDICT_ARTIFACT }
         }));
     }
-    steps.push(json!({
-        "uses": "upload-artifact",
-        "with": { "path": "rezolus.rez" }
-    }));
+    if !cfg.bare {
+        steps.push(json!({
+            "uses": "upload-artifact",
+            "with": { "path": "rezolus.rez" }
+        }));
+    }
 
     Ok(json!({
         "host": { "tags": host_tags },
@@ -403,8 +466,8 @@ model_name = "llama-3.1-8b"
     fn the_judge_reconciles_both_reviewers_artifacts() {
         let c = judging_cfg();
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert!(p.contains("--a /tmp/review-barry.json"), "{p}");
-        assert!(p.contains("--b /tmp/review-other_barry.json"), "{p}");
+        assert!(p.contains("--a \"$T/review-barry.json\""), "{p}");
+        assert!(p.contains("--b \"$T/review-other_barry.json\""), "{p}");
     }
 
     #[test]
@@ -493,7 +556,7 @@ model_name = "llama-3.1-8b"
             .lines()
             .find_map(|l| {
                 l.strip_prefix("echo '")?
-                    .strip_suffix("' | base64 -d > /tmp/changed.json")
+                    .strip_suffix("' | base64 -d > \"$T/changed.json\"")
             })
             .expect("no base64 line");
         let decoded = base64::engine::general_purpose::STANDARD
@@ -510,16 +573,16 @@ model_name = "llama-3.1-8b"
         // one shared file makes that impossible.
         let c = cfg();
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert_eq!(p.matches("base64 -d > /tmp/changed.json").count(), 1);
-        assert_eq!(p.matches("--files /tmp/changed.json").count(), 2);
+        assert_eq!(p.matches("base64 -d > \"$T/changed.json\"").count(), 1);
+        assert_eq!(p.matches("--files \"$T/changed.json\"").count(), 2);
     }
 
     #[test]
     fn each_reviewer_gets_its_own_model_server_and_artifact() {
         let c = cfg();
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert!(p.contains("--out /tmp/review-barry.json"));
-        assert!(p.contains("--out /tmp/review-other_barry.json"));
+        assert!(p.contains("--out \"$T/review-barry.json\""));
+        assert!(p.contains("--out \"$T/review-other_barry.json\""));
         assert!(p.contains(&c.reviewers[0].model));
         assert!(p.contains(&c.reviewers[1].model));
     }
@@ -556,8 +619,8 @@ model_name = "qwen3.5-27b"
         assert_eq!(p.matches("kill $SERVER_PID").count(), 1, "stopped twice");
         // Both reviews still happen, and still into their own artifacts.
         assert_eq!(p.matches("review-offline").count(), 2);
-        assert!(p.contains("--out /tmp/review-barry.json"));
-        assert!(p.contains("--out /tmp/review-other_barry.json"));
+        assert!(p.contains("--out \"$T/review-barry.json\""));
+        assert!(p.contains("--out \"$T/review-other_barry.json\""));
     }
 
     #[test]
@@ -704,8 +767,8 @@ host_tags = ["z1.baremetal"]
         assert!(s.contains("/tmp/llama-barry.log"), "{s}");
         assert!(s.contains("/tmp/llama-other_barry.log"), "{s}");
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert!(p.contains("touch /tmp/llama-barry.log"), "{p}");
-        assert!(p.contains("touch /tmp/llama-other_barry.log"), "{p}");
+        assert!(p.contains("touch \"$T/llama-barry.log\""), "{p}");
+        assert!(p.contains("touch \"$T/llama-other_barry.log\""), "{p}");
     }
 
     #[test]
@@ -739,5 +802,137 @@ reviewers = []
         )
         .unwrap();
         assert!(spec(&c, &files(), "t").is_err());
+    }
+
+    const BARE: &str = r#"
+systemslab = "http://systemslab"
+host_tags = ["host:hv03"]
+bare = true
+judge = true
+packages = []
+server_args = ["-np", "1", "--cache-ram", "0", "--jinja"]
+
+[[reviewers]]
+identity = "barry"
+model = "/var/lib/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+model_name = "qwen3.6-35b-a3b"
+
+[[reviewers]]
+identity = "other_barry"
+model = "/var/lib/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+model_name = "qwen3.6-35b-a3b"
+"#;
+
+    fn bare_cfg() -> RackConfig {
+        toml::from_str(BARE).unwrap()
+    }
+
+    /// `bash -n` on a payload: the payload is generated text, and a quoting
+    /// slip is a job that fails at its first line on the rack.
+    fn parses_as_bash(p: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("payload.sh");
+        std::fs::write(&f, p).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(&f)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{p}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_guest_works_in_tmp_where_its_artifacts_are_pulled_from() {
+        let c = judging_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(p.contains("\nT=/tmp\n"), "{p}");
+        let s = spec(&c, &files(), "x").unwrap();
+        let pulled = s["experiment"]["jobs"]["review"]["steps"][0]["with"]["artifacts"]
+            .as_array()
+            .unwrap();
+        assert!(
+            pulled
+                .iter()
+                .all(|a| a.as_str().unwrap().starts_with("/tmp/")),
+            "{pulled:?}"
+        );
+        parses_as_bash(&p);
+    }
+
+    #[test]
+    fn a_bare_review_is_one_shell_step_on_the_host() {
+        let c = bare_cfg();
+        let s = spec(&c, &files(), "x").unwrap();
+        let job = &s["experiment"]["jobs"]["review"];
+        assert_eq!(job["host"]["tags"], json!(["host:hv03"]));
+        let steps = job["steps"].as_array().unwrap();
+        assert_eq!(steps[0]["uses"], json!("shell"));
+        assert!(steps.iter().all(|st| st["uses"] != json!("anvil-vm")));
+        // No guest, so no guest metrics to collect.
+        assert!(
+            steps
+                .iter()
+                .all(|st| st["with"]["path"] != json!("rezolus.rez")),
+            "{steps:?}"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|st| st["with"]["path"] == json!(VERDICT_ARTIFACT))
+        );
+        parses_as_bash(steps[0]["with"]["run"].as_str().unwrap());
+    }
+
+    #[test]
+    fn a_bare_review_runs_its_server_as_a_unit_it_always_stops() {
+        let c = bare_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(p.contains("\nT=\"$PWD\"\n"), "{p}");
+        // Stopped before the first start, so a server a killed job left behind
+        // is gone before this one needs the GPU, and on every exit.
+        let first_stop = p.find("\nstop_server\n").unwrap();
+        let start = p.find("systemd-run --unit=barry-rack-llama").unwrap();
+        assert!(first_stop < start, "{p}");
+        assert!(p.contains("trap stop_server EXIT"), "{p}");
+        assert!(!p.contains("kill $SERVER_PID"), "{p}");
+        // Shared model, one server, one start.
+        assert_eq!(p.matches("systemd-run").count(), 1);
+        assert!(p.contains("--no-webui -np 1 --cache-ram 0 --jinja"), "{p}");
+        assert!(p.contains("RuntimeMaxSec="), "{p}");
+        let created = p.find(": > \"$T/llama-barry.log\"").unwrap();
+        assert!(created < start, "{p}");
+    }
+
+    #[test]
+    fn a_local_model_is_served_without_a_pull() {
+        let c = bare_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(!p.contains("slipway pull"), "{p}");
+        assert!(
+            p.contains("GGUF=/var/lib/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-Q4_K_M.gguf"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn only_a_bare_config_may_leave_out_shape_and_image() {
+        let mut c = bare_cfg();
+        assert!(c.validate().is_ok());
+        c.bare = false;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn server_args_and_local_paths_must_be_plain_words() {
+        let mut c = bare_cfg();
+        c.server_args = vec!["--jinja; rm -rf /".into()];
+        assert!(c.validate().is_err());
+        let mut c = bare_cfg();
+        c.reviewers[0].model = "/var/lib/models/a b.gguf".into();
+        assert!(c.validate().is_err());
     }
 }
