@@ -1000,7 +1000,6 @@ model_name = "qwen3.6-35b-a3b"
             "barry-dylan",
             r#"[ "$1" = --version ] && { echo barry-dylan 0; exit 0; }
 while [ $# -gt 0 ]; do [ "$1" = --out ] && out=$2; shift; done
-if [ "${0##*/}" = barry-dylan ] && grep -q judge <<<"$out"; then :; fi
 echo '{"outcome":"approve","summary":"s","findings":[]}' > "$out""#,
         );
         stub(
@@ -1020,14 +1019,23 @@ while :; do sleep 0.1; done"#,
             ),
         );
         // A port answers while the process that bound it is alive.
-        stub("curl", r#"[ -e "$PWD/up" ] && kill -0 "$(cat "$PWD/up")" 2>/dev/null"#);
+        stub(
+            "curl",
+            r#"[ -e "$PWD/up" ] && kill -0 "$(cat "$PWD/up")" 2>/dev/null"#,
+        );
         let model = dir.path().join("m.gguf");
         std::fs::write(&model, b"").unwrap();
         let mut c = bare_cfg();
         for r in c.reviewers.iter_mut() {
             r.model = model.display().to_string();
         }
-        let p = payload(&c, &all(&c), &files()).unwrap();
+        // The stop window shortened from 10 s to 1 s, so the test that waits it
+        // out three times does not hold CI for half a minute.
+        let p = payload(&c, &all(&c), &files()).unwrap().replacen(
+            "for _ in $(seq 1 20); do",
+            "for _ in $(seq 1 2); do",
+            1,
+        );
         let script = dir.path().join("payload.sh");
         std::fs::write(&script, p).unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
@@ -1068,9 +1076,9 @@ while :; do sleep 0.1; done"#,
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(dir.path().join(VERDICT_ARTIFACT).exists());
-        // Three servers, each given 10 s to stop before SIGKILL.
+        // Three servers, each given 1 s (in this test) to stop before SIGKILL.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(60),
+            started.elapsed() < std::time::Duration::from_secs(30),
             "{:?}",
             started.elapsed()
         );
