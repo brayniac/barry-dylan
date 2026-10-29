@@ -1,6 +1,6 @@
 //! Building the systemslab experiment that produces the reviews.
 
-use super::config::{Placement, RackConfig, Reviewer, VERDICT_ARTIFACT};
+use super::config::{JUDGE_LOG, Placement, RackConfig, Reviewer, VERDICT_ARTIFACT};
 use crate::github::pr::ChangedFile;
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -18,9 +18,14 @@ use serde_json::{Value, json};
 /// infrastructure — driver, CUDA, llama-server, slipway — and rebuilding it is
 /// a 25-minute, 7.5 GB operation, while barry ships far more often than that.
 ///
-/// With more than one reviewer the models are served in turn: pull, serve,
-/// review, stop, next. Each one gets the whole GPU, which is what makes two 14B
-/// models on a 24 GB card possible at all.
+/// In a guest, with more than one reviewer, the models are served in turn:
+/// pull, serve, review, stop, next, and reviewers sharing a model share its
+/// server. Each one gets the whole GPU, which is what makes two 14B models on a
+/// 24 GB card possible at all.
+///
+/// On a bare host every reviewer, and the judge, gets a server started for it
+/// alone and stopped after it. The server runs in the job's process group, so
+/// the runner's kill on a cancel or timeout takes it down with the job.
 pub fn payload(
     cfg: &RackConfig,
     reviewers: &[&Reviewer],
@@ -36,15 +41,36 @@ pub fn payload(
     // fast for a baked version to mean anything) nor the slipway client. A
     // payload that assumed them failed at `slipway: command not found` after
     // the 2026-09-12 image rebuild, having proved only that apt works.
+    //
+    // A bare job works in its own job directory, which systemslab removes, so
+    // nothing is left in the host's /tmp; a guest is destroyed whole.
     s.push_str(&format!(
         r#"set -euxo pipefail
+T={dir}
 
 sudo apt-get update -qq
 sudo apt-get install -y barry-dylan{packages}
 barry-dylan --version
 llama-server --version 2>&1 | head -1 || true
 
+SERVER_PID=
+# SIGTERM, then SIGKILL after 10 s: a degraded server can take minutes to stop.
+stop_server() {{
+    if [ -n "$SERVER_PID" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$SERVER_PID" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -9 "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=
+    fi
+}}
+trap stop_server EXIT
+
 "#,
+        dir = if cfg.bare { "\"$PWD\"" } else { "/tmp" },
         packages = cfg
             .packages
             .iter()
@@ -52,68 +78,95 @@ llama-server --version 2>&1 | head -1 || true
             .collect::<String>(),
     ));
     s.push_str(&format!(
-        "echo '{files_b64}' | base64 -d > /tmp/changed.json\n\n"
+        "echo '{files_b64}' | base64 -d > \"$T/changed.json\"\n\n"
     ));
 
-    for (i, r) in reviewers.iter().enumerate() {
-        // Reviewers sharing a model share the server. Two identities on the
-        // same weights is a normal configuration -- the diversity is then in
-        // the sampling rather than the model -- and pulling 16 GB twice and
-        // reloading it to serve the identical file would be pure waste.
-        let start_server = i == 0 || reviewers[i - 1].model != r.model;
-        let stop_server = reviewers
-            .get(i + 1)
-            .is_none_or(|next| next.model != r.model);
-
-        s.push_str(&format!("# ---- {} ----\n", r.identity));
-
-        if start_server {
-            s.push_str(&format!(
-                r#"rm -rf /tmp/model
-slipway pull '{model}' /tmp/model
-GGUF=$(find /tmp/model -name '*.gguf' | head -1)
-test -n "$GGUF" || {{ echo "no gguf materialised from {model}"; exit 1; }}
-
+    let server_args: String = cfg.server_args.iter().map(|a| format!(" {a}")).collect();
+    // Serve `r`'s model, logging to `log`, and wait for it to answer. `fail`
+    // ends the script (`exit 1`) or, inside a function, reports to the caller
+    // (`return 1`); every step that can fail names it, since `set -e` does not
+    // apply inside a function called as an `if` condition.
+    let start = |r: &Reviewer, log: &str, fail: &str| -> String {
+        let mut out = String::new();
+        if r.is_local() {
+            out.push_str(&format!(
+                "GGUF={model}\ntest -r \"$GGUF\" || {{ echo \"cannot read $GGUF\"; {fail}; }}\n",
+                model = r.model,
+            ));
+        } else {
+            out.push_str(&format!(
+                r#"rm -rf "$T/model"
+slipway pull '{model}' "$T/model" || {{ echo "the model pull failed"; {fail}; }}
+GGUF=$(find "$T/model" -name '*.gguf' | head -1) || {fail}
+test -n "$GGUF" || {{ echo "no gguf materialised from {model}"; {fail}; }}
+"#,
+                model = r.model,
+            ));
+        }
+        out.push_str(&format!(
+            r#"
+# Something already answering on the port would be reviewed against in place
+# of the server this job starts.
+if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
+    echo "port 8080 is already serving; refusing to review against it"; {fail}
+fi
 llama-server -m "$GGUF" --host 127.0.0.1 --port 8080 -ngl 99 -c {context} \
-    --no-webui > /tmp/llama-{identity}.log 2>&1 &
+    --no-webui{server_args} > "$T/{log}" 2>&1 &
 SERVER_PID=$!
 
 # Bounded, and it gives up as soon as the server dies rather than waiting out
 # the whole loop to report a timeout that was really a crash.
 for _ in $(seq 1 240); do
+    kill -0 "$SERVER_PID" 2>/dev/null || {{ tail -40 "$T/{log}"; {fail}; }}
     curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 && break
-    kill -0 $SERVER_PID 2>/dev/null || {{ tail -40 /tmp/llama-{identity}.log; exit 1; }}
     sleep 2
 done
 curl -sf http://127.0.0.1:8080/health >/dev/null \
-    || {{ tail -40 /tmp/llama-{identity}.log; exit 1; }}
+    || {{ tail -40 "$T/{log}"; {fail}; }}
 
 "#,
-                identity = r.identity,
-                model = r.model,
-                context = r.context_size(cfg),
-            ));
+            context = r.context_size(cfg),
+        ));
+        out
+    };
+    let stop = "stop_server\n\n";
+
+    for (i, r) in reviewers.iter().enumerate() {
+        // In a guest, reviewers sharing a model share the server. Two
+        // identities on the same weights is a normal configuration -- the
+        // diversity is then in the sampling rather than the model -- and
+        // pulling 16 GB twice and reloading it to serve the identical file
+        // would be pure waste. On a bare host every reviewer gets its own.
+        let start_server = cfg.bare || i == 0 || reviewers[i - 1].model != r.model;
+        let stop_server = cfg.bare
+            || reviewers
+                .get(i + 1)
+                .is_none_or(|next| next.model != r.model);
+
+        s.push_str(&format!("# ---- {} ----\n", r.identity));
+        if start_server {
+            s.push_str(&start(r, &r.server_log(), "exit 1"));
         }
 
         s.push_str(&format!(
-            r#"cat > /tmp/offline-{identity}.toml <<'OFFLINE'
+            r#"cat > "$T/offline-{identity}.toml" <<'OFFLINE'
 [llm]
 provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {max_tokens}
 context_size = {context_size}
-{temperature}request_timeout_secs = 600
+{temperature}request_timeout_secs = {request_timeout}
 OFFLINE
 
 # The server log is an artifact whether or not this reviewer started the
 # server (a reviewer sharing a model shares the server, and its log). Touched
 # so that the upload never fails on a file that was never written.
-touch /tmp/llama-{identity}.log
+touch "$T/llama-{identity}.log"
 barry-dylan review-offline \
-    --config /tmp/offline-{identity}.toml \
-    --files /tmp/changed.json \
-    --out /tmp/{artifact}
+    --config "$T/offline-{identity}.toml" \
+    --files "$T/changed.json" \
+    --out "$T/{artifact}"
 
 "#,
             identity = r.identity,
@@ -121,14 +174,16 @@ barry-dylan review-offline \
             max_tokens = cfg.max_tokens,
             context_size = r.context_size(cfg),
             temperature = temperature_line(cfg),
+            request_timeout = cfg.request_timeout_secs,
             artifact = r.artifact(),
         ));
 
         // The judge runs in here, not on delta, when asked to -- after the last
-        // review and *before* the server it uses is stopped. It reconciles two
-        // finished reviews, which is one completion against weights that are
-        // already resident, so it costs the guest seconds and saves delta a
-        // remote model and the credential that comes with it.
+        // review. It reconciles two finished reviews, which is one completion,
+        // so it costs the job seconds and saves delta a remote model and the
+        // credential that comes with it. In a guest it uses the server already
+        // loaded, before that server is stopped; on a bare host it gets a
+        // server of its own, as the reviewers do.
         //
         // A judge that fails must not lose two good reviews, so its failure is
         // written into the artifact rather than raised: `set -e` would fail the
@@ -136,46 +191,58 @@ barry-dylan review-offline \
         // delta sees a verdict it cannot parse and reconciles the reviews
         // itself.
         let last = i + 1 == reviewers.len();
-        if cfg.judge && last && reviewers.len() >= 2 {
+        let judging = cfg.judge && last && reviewers.len() >= 2;
+        // On a bare host the judge's server is started in a function, so a
+        // server that does not come up costs the verdict, not the two reviews.
+        if judging && cfg.bare {
+            s.push_str(stop);
+            s.push_str("# ---- judge ----\njudge_server() {\n");
+            s.push_str(&start(r, JUDGE_LOG, "return 1"));
+            s.push_str(&format!(
+                "}}\nif ! judge_server; then\n    echo '{{\"error\":\"the judge server did not start\"}}' > \"$T/{VERDICT_ARTIFACT}\"\nelse\n"
+            ));
+        }
+        if judging {
             let a = reviewers[0];
             let b = reviewers[1];
             s.push_str(&format!(
-                r#"cat > /tmp/offline-judge.toml <<'OFFLINE'
+                r#"cat > "$T/offline-judge.toml" <<'OFFLINE'
 [llm]
 provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {judge_max_tokens}
-{temperature}request_timeout_secs = 600
+{temperature}request_timeout_secs = {request_timeout}
 OFFLINE
 
 barry-dylan judge-offline \
-    --config /tmp/offline-judge.toml \
-    --a /tmp/{a_artifact} \
-    --b /tmp/{b_artifact} \
-    --out /tmp/{verdict} \
-    || echo '{{"error":"judge-offline failed in the guest"}}' > /tmp/{verdict}
-
+    --config "$T/offline-judge.toml" \
+    --a "$T/{a_artifact}" \
+    --b "$T/{b_artifact}" \
+    --out "$T/{verdict}" \
+    || echo '{{"error":"judge-offline failed in the guest"}}' > "$T/{verdict}"
 "#,
                 model_name = r.model_name,
                 judge_max_tokens = cfg.judge_max_tokens,
                 temperature = temperature_line(cfg),
+                request_timeout = cfg.request_timeout_secs,
                 a_artifact = a.artifact(),
                 b_artifact = b.artifact(),
                 verdict = VERDICT_ARTIFACT,
             ));
+            s.push_str(if cfg.bare { "fi\n\n" } else { "\n" });
         }
 
-        if stop_server {
-            s.push_str(
-                r#"# Free the whole card before the next model loads. Two large q4 models at
+        if stop_server || judging {
+            if !cfg.bare {
+                s.push_str(
+                    r#"# Free the whole card before the next model loads. Two large q4 models at
 # this context do not fit on one 24 GB card together, and a partially offloaded
 # second model would silently review at a fraction of the speed.
-kill $SERVER_PID
-wait $SERVER_PID 2>/dev/null || true
-
 "#,
-            );
+                );
+            }
+            s.push_str(stop);
         }
     }
 
@@ -202,7 +269,12 @@ fn job_value(
     // Only the job that holds every reviewer can judge, which under sequential
     // placement is the only job there is.
     let judging = cfg.judge && reviewers.len() >= 2;
-    let mut steps = vec![json!({
+    // A bare job writes its artifacts straight into the job directory, where
+    // the upload steps look; a guest's are pulled out by the action.
+    let first = if cfg.bare {
+        json!({ "uses": "shell", "with": { "run": payload(cfg, reviewers, files)? } })
+    } else {
+        json!({
         "uses": "anvil-vm",
         "with": {
             "shape": shape,
@@ -219,7 +291,9 @@ fn job_value(
             // see the GPU at all, so this is the only place it can come from.
             "metrics": true,
         }
-    })];
+        })
+    };
+    let mut steps = vec![first];
     for r in reviewers {
         steps.push(json!({
             "uses": "upload-artifact",
@@ -238,11 +312,19 @@ fn job_value(
             "uses": "upload-artifact",
             "with": { "path": VERDICT_ARTIFACT }
         }));
+        if cfg.bare {
+            steps.push(json!({
+                "uses": "upload-artifact",
+                "with": { "path": JUDGE_LOG }
+            }));
+        }
     }
-    steps.push(json!({
-        "uses": "upload-artifact",
-        "with": { "path": "rezolus.rez" }
-    }));
+    if !cfg.bare {
+        steps.push(json!({
+            "uses": "upload-artifact",
+            "with": { "path": "rezolus.rez" }
+        }));
+    }
 
     Ok(json!({
         "host": { "tags": host_tags },
@@ -392,7 +474,7 @@ model_name = "llama-3.1-8b"
         let c = judging_cfg();
         let p = payload(&c, &all(&c), &files()).unwrap();
         let judge = p.find("judge-offline").expect("no judge step");
-        let last_kill = p.rfind("kill $SERVER_PID").expect("no server stop");
+        let last_kill = p.rfind("\nstop_server\n").expect("no server stop");
         assert!(
             judge < last_kill,
             "the judge runs after the last server is stopped"
@@ -403,8 +485,8 @@ model_name = "llama-3.1-8b"
     fn the_judge_reconciles_both_reviewers_artifacts() {
         let c = judging_cfg();
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert!(p.contains("--a /tmp/review-barry.json"), "{p}");
-        assert!(p.contains("--b /tmp/review-other_barry.json"), "{p}");
+        assert!(p.contains("--a \"$T/review-barry.json\""), "{p}");
+        assert!(p.contains("--b \"$T/review-other_barry.json\""), "{p}");
     }
 
     #[test]
@@ -493,7 +575,7 @@ model_name = "llama-3.1-8b"
             .lines()
             .find_map(|l| {
                 l.strip_prefix("echo '")?
-                    .strip_suffix("' | base64 -d > /tmp/changed.json")
+                    .strip_suffix("' | base64 -d > \"$T/changed.json\"")
             })
             .expect("no base64 line");
         let decoded = base64::engine::general_purpose::STANDARD
@@ -510,16 +592,16 @@ model_name = "llama-3.1-8b"
         // one shared file makes that impossible.
         let c = cfg();
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert_eq!(p.matches("base64 -d > /tmp/changed.json").count(), 1);
-        assert_eq!(p.matches("--files /tmp/changed.json").count(), 2);
+        assert_eq!(p.matches("base64 -d > \"$T/changed.json\"").count(), 1);
+        assert_eq!(p.matches("--files \"$T/changed.json\"").count(), 2);
     }
 
     #[test]
     fn each_reviewer_gets_its_own_model_server_and_artifact() {
         let c = cfg();
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert!(p.contains("--out /tmp/review-barry.json"));
-        assert!(p.contains("--out /tmp/review-other_barry.json"));
+        assert!(p.contains("--out \"$T/review-barry.json\""));
+        assert!(p.contains("--out \"$T/review-other_barry.json\""));
         assert!(p.contains(&c.reviewers[0].model));
         assert!(p.contains(&c.reviewers[1].model));
     }
@@ -553,11 +635,11 @@ model_name = "qwen3.5-27b"
 
         assert_eq!(p.matches("slipway pull").count(), 1, "pulled twice");
         assert_eq!(p.matches("llama-server -m").count(), 1, "served twice");
-        assert_eq!(p.matches("kill $SERVER_PID").count(), 1, "stopped twice");
+        assert_eq!(p.matches("\nstop_server\n").count(), 1, "stopped twice");
         // Both reviews still happen, and still into their own artifacts.
         assert_eq!(p.matches("review-offline").count(), 2);
-        assert!(p.contains("--out /tmp/review-barry.json"));
-        assert!(p.contains("--out /tmp/review-other_barry.json"));
+        assert!(p.contains("--out \"$T/review-barry.json\""));
+        assert!(p.contains("--out \"$T/review-other_barry.json\""));
     }
 
     #[test]
@@ -567,7 +649,7 @@ model_name = "qwen3.5-27b"
         // not an error -- just a review that runs at a fraction of the speed.
         let c = cfg();
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert_eq!(p.matches("kill $SERVER_PID").count(), 2);
+        assert_eq!(p.matches("\nstop_server\n").count(), 2);
     }
 
     #[test]
@@ -704,8 +786,8 @@ host_tags = ["z1.baremetal"]
         assert!(s.contains("/tmp/llama-barry.log"), "{s}");
         assert!(s.contains("/tmp/llama-other_barry.log"), "{s}");
         let p = payload(&c, &all(&c), &files()).unwrap();
-        assert!(p.contains("touch /tmp/llama-barry.log"), "{p}");
-        assert!(p.contains("touch /tmp/llama-other_barry.log"), "{p}");
+        assert!(p.contains("touch \"$T/llama-barry.log\""), "{p}");
+        assert!(p.contains("touch \"$T/llama-other_barry.log\""), "{p}");
     }
 
     #[test]
@@ -739,5 +821,280 @@ reviewers = []
         )
         .unwrap();
         assert!(spec(&c, &files(), "t").is_err());
+    }
+
+    const BARE: &str = r#"
+systemslab = "http://systemslab"
+host_tags = ["host:hv03"]
+bare = true
+judge = true
+packages = []
+server_args = ["-np", "1", "--cache-ram", "0", "--jinja"]
+
+[[reviewers]]
+identity = "barry"
+model = "/var/lib/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+model_name = "qwen3.6-35b-a3b"
+
+[[reviewers]]
+identity = "other_barry"
+model = "/var/lib/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+model_name = "qwen3.6-35b-a3b"
+"#;
+
+    fn bare_cfg() -> RackConfig {
+        toml::from_str(BARE).unwrap()
+    }
+
+    /// `bash -n` on a payload: the payload is generated text, and a quoting
+    /// slip is a job that fails at its first line on the rack.
+    fn parses_as_bash(p: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("payload.sh");
+        std::fs::write(&f, p).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(&f)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{p}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_guest_works_in_tmp_where_its_artifacts_are_pulled_from() {
+        let c = judging_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(p.contains("\nT=/tmp\n"), "{p}");
+        let s = spec(&c, &files(), "x").unwrap();
+        let pulled = s["experiment"]["jobs"]["review"]["steps"][0]["with"]["artifacts"]
+            .as_array()
+            .unwrap();
+        assert!(
+            pulled
+                .iter()
+                .all(|a| a.as_str().unwrap().starts_with("/tmp/")),
+            "{pulled:?}"
+        );
+        parses_as_bash(&p);
+    }
+
+    #[test]
+    fn a_bare_review_is_one_shell_step_on_the_host() {
+        let c = bare_cfg();
+        let s = spec(&c, &files(), "x").unwrap();
+        let job = &s["experiment"]["jobs"]["review"];
+        assert_eq!(job["host"]["tags"], json!(["host:hv03"]));
+        let steps = job["steps"].as_array().unwrap();
+        assert_eq!(steps[0]["uses"], json!("shell"));
+        assert!(steps.iter().all(|st| st["uses"] != json!("anvil-vm")));
+        // No guest, so no guest metrics to collect.
+        assert!(
+            steps
+                .iter()
+                .all(|st| st["with"]["path"] != json!("rezolus.rez")),
+            "{steps:?}"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|st| st["with"]["path"] == json!(VERDICT_ARTIFACT))
+        );
+        parses_as_bash(steps[0]["with"]["run"].as_str().unwrap());
+    }
+
+    #[test]
+    fn a_bare_review_gives_every_reviewer_and_the_judge_a_fresh_server() {
+        let c = bare_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(p.contains("\nT=\"$PWD\"\n"), "{p}");
+        // Barry, Other Barry and the judge: three servers, though they share
+        // a model, each stopped before the next starts.
+        assert_eq!(p.matches("llama-server -m").count(), 3, "{p}");
+        assert_eq!(p.matches("\nstop_server\n").count(), 3, "{p}");
+        assert!(p.contains("> \"$T/llama-judge.log\""), "{p}");
+        let judge = p.find("judge-offline").unwrap();
+        let judge_start = p.rfind("llama-server -m").unwrap();
+        assert!(judge_start < judge, "{p}");
+        // Each start refuses a port something else already answers on.
+        assert_eq!(p.matches("refusing to review against it").count(), 3, "{p}");
+        // In the job's process group, stopped on any exit.
+        assert!(p.contains("trap stop_server EXIT"), "{p}");
+        assert!(!p.contains("systemd-run"), "{p}");
+        assert!(p.contains("--no-webui -np 1 --cache-ram 0 --jinja"), "{p}");
+    }
+
+    #[test]
+    fn a_bare_config_may_not_install_the_cuda_llama_server() {
+        let mut c = bare_cfg();
+        c.packages = vec!["slipway".into(), "llama-server=10502-1".into()];
+        assert!(c.validate().unwrap_err().contains("llama-server"));
+        c.packages = vec!["slipway".into()];
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn a_bare_config_runs_its_reviewers_in_one_job() {
+        let mut c = bare_cfg();
+        c.judge = false;
+        c.placement = crate::rack::config::Placement::Concurrent;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn other_other_barry_does_not_make_a_pair_to_judge() {
+        let mut c = bare_cfg();
+        c.reviewers[1].identity = "other_other_barry".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn a_local_model_is_served_without_a_pull() {
+        let c = bare_cfg();
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        assert!(!p.contains("slipway pull"), "{p}");
+        assert!(
+            p.contains("GGUF=/var/lib/models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-Q4_K_M.gguf"),
+            "{p}"
+        );
+    }
+
+    #[test]
+    fn only_a_bare_config_may_leave_out_shape_and_image() {
+        let mut c = bare_cfg();
+        assert!(c.validate().is_ok());
+        c.bare = false;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn server_args_and_local_paths_must_be_plain_words() {
+        let mut c = bare_cfg();
+        c.server_args = vec!["--jinja; rm -rf /".into()];
+        assert!(c.validate().is_err());
+        let mut c = bare_cfg();
+        c.reviewers[0].model = "/var/lib/models/a b.gguf".into();
+        assert!(c.validate().is_err());
+    }
+
+    /// Run the bare payload under bash with stubs for everything outside it.
+    /// The stub server answers health checks while its marker file exists,
+    /// fails to start on start number `fail_on` (0: never), and ignores
+    /// SIGTERM when `deaf` is set. Returns the exit status and the directory.
+    fn run_stubbed(fail_on: u32, deaf: bool) -> (std::process::Output, tempfile::TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let stub = |name: &str, body: &str| {
+            let f = bin.join(name);
+            std::fs::write(&f, format!("#!/bin/bash\n{body}\n")).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        stub("sudo", r#"exec "$@""#);
+        stub("apt-get", "exit 0");
+        stub(
+            "barry-dylan",
+            r#"[ "$1" = --version ] && { echo barry-dylan 0; exit 0; }
+while [ $# -gt 0 ]; do [ "$1" = --out ] && out=$2; shift; done
+echo '{"outcome":"approve","summary":"s","findings":[]}' > "$out""#,
+        );
+        stub(
+            "llama-server",
+            &format!(
+                r#"[ "$1" = --version ] && {{ echo version; exit 0; }}
+n=$(( $(cat "$PWD/starts" 2>/dev/null || echo 0) + 1 )); echo $n > "$PWD/starts"
+[ {fail_on} -eq $n ] && exit 1
+{trap}
+echo $$ > "$PWD/up"
+while :; do sleep 0.1; done"#,
+                trap = if deaf {
+                    r#"trap '' TERM"#
+                } else {
+                    r#"trap 'rm -f "$PWD/up"; exit 0' TERM"#
+                },
+            ),
+        );
+        // A port answers while the process that bound it is alive.
+        stub(
+            "curl",
+            r#"[ -e "$PWD/up" ] && kill -0 "$(cat "$PWD/up")" 2>/dev/null"#,
+        );
+        let model = dir.path().join("m.gguf");
+        std::fs::write(&model, b"").unwrap();
+        let mut c = bare_cfg();
+        for r in c.reviewers.iter_mut() {
+            r.model = model.display().to_string();
+        }
+        // The stop window shortened from 10 s to 1 s, so the test that waits it
+        // out three times does not hold CI for half a minute.
+        let p = payload(&c, &all(&c), &files()).unwrap().replacen(
+            "for _ in $(seq 1 20); do",
+            "for _ in $(seq 1 2); do",
+            1,
+        );
+        let script = dir.path().join("payload.sh");
+        std::fs::write(&script, p).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let out = std::process::Command::new("bash")
+            .arg(&script)
+            .current_dir(dir.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        (out, dir)
+    }
+
+    #[test]
+    fn a_judge_server_that_does_not_start_costs_the_verdict_not_the_reviews() {
+        // Barry's server is start 1, Other Barry's 2, the judge's 3.
+        let (out, dir) = run_stubbed(3, false);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(dir.path().join("review-barry.json").exists());
+        assert!(dir.path().join("review-other_barry.json").exists());
+        let verdict = std::fs::read_to_string(dir.path().join(VERDICT_ARTIFACT)).unwrap();
+        assert!(
+            verdict.contains("the judge server did not start"),
+            "{verdict}"
+        );
+    }
+
+    #[test]
+    fn a_server_that_ignores_sigterm_is_killed_and_the_job_finishes() {
+        let started = std::time::Instant::now();
+        let (out, dir) = run_stubbed(0, true);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(dir.path().join(VERDICT_ARTIFACT).exists());
+        // Three servers, each given 1 s (in this test) to stop before SIGKILL.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_bare_judge_uploads_its_server_log() {
+        let s = spec(&bare_cfg(), &files(), "x").unwrap();
+        let steps = s["experiment"]["jobs"]["review"]["steps"]
+            .as_array()
+            .unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|st| st["with"]["path"] == json!(JUDGE_LOG)),
+            "{steps:?}"
+        );
     }
 }

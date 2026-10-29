@@ -21,11 +21,28 @@ pub struct RackConfig {
     pub host_tags: Vec<String>,
 
     /// anvil instance type, e.g. `z2.g.medium`. The `g` class is what gets a
-    /// GPU passed through.
+    /// GPU passed through. Unused when `bare`.
+    #[serde(default)]
     pub shape: String,
 
-    /// Guest image, e.g. `spool/images/debian-13-gpu@golden`.
+    /// Guest image, e.g. `spool/images/debian-13-gpu@golden`. Unused when
+    /// `bare`.
+    #[serde(default)]
     pub image: String,
+
+    /// Run the review on the host itself, as a `shell` job, instead of in a
+    /// guest: for a GPU that cannot be passed into one, such as an integrated
+    /// GPU. The host must have `llama-server` and give the systemslab agent's
+    /// user the GPU. Every reviewer and the judge get a server started for
+    /// them alone. It runs in the job's process group, so a cancelled or
+    /// timed-out job takes it down; `job_timeout_secs` bounds the job.
+    #[serde(default)]
+    pub bare: bool,
+
+    /// Arguments added to every `llama-server` command line, after the ones a
+    /// review always uses (`-ngl 99 -c <context> --no-webui`).
+    #[serde(default)]
+    pub server_args: Vec<String>,
 
     /// The reviewers to run. Order is the order they run in when sequential.
     pub reviewers: Vec<Reviewer>,
@@ -72,6 +89,11 @@ pub struct RackConfig {
     /// Cap on a single completion inside the guest.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+
+    /// Per-request timeout for `review-offline` and `judge-offline` against
+    /// the job's server.
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
 
     /// How long to wait for a host before giving up and cancelling.
     ///
@@ -129,6 +151,7 @@ pub struct RackConfig {
     pub job_timeout_secs: u64,
 
     /// Bound on the payload inside the guest, handed to the `anvil-vm` action.
+    /// Unused when `bare`.
     /// Distinct from `job_timeout_secs`, which also covers scheduling: a job
     /// can sit queued behind another for a long time without its payload having
     /// started.
@@ -179,7 +202,9 @@ pub struct Reviewer {
     pub identity: String,
 
     /// slipway reference for the weights, e.g.
-    /// `Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest`.
+    /// `Qwen/Qwen2.5-Coder-14B-Instruct@latest/gguf/q4_k_m@latest`, or the
+    /// absolute path of a GGUF already on the host, which is served without
+    /// a pull.
     pub model: String,
 
     /// What to call the model over the OpenAI-compatible API. llama-server
@@ -215,6 +240,10 @@ fn default_packages() -> Vec<String> {
 /// The artifact the in-guest judge writes its verdict to.
 pub const VERDICT_ARTIFACT: &str = "verdict.json";
 
+/// The judge's own server log, on a bare host, where the judge gets a server
+/// of its own.
+pub const JUDGE_LOG: &str = "llama-judge.log";
+
 impl RackConfig {
     /// Reject a configuration that cannot do what it says.
     ///
@@ -223,6 +252,43 @@ impl RackConfig {
     /// it is to stop paying a remote judge -- and a silent fallback means still
     /// paying one while believing you are not.
     pub fn validate(&self) -> Result<(), String> {
+        if !self.bare && (self.shape.is_empty() || self.image.is_empty()) {
+            return Err("[rack] needs shape and image unless bare = true".into());
+        }
+        if self.bare && self.placement == Placement::Concurrent {
+            return Err(
+                "[rack] bare = true needs placement = \"sequential\": concurrent jobs would \
+                 need as many bare hosts with the same tags at once"
+                    .into(),
+            );
+        }
+        if self.bare
+            && self
+                .packages
+                .iter()
+                .any(|p| p.split(['=', '/']).next() == Some("llama-server"))
+        {
+            return Err(
+                "[rack] bare = true runs the host's own llama-server; installing the \
+                 `llama-server` package would replace it (set packages = [] or [\"slipway\"])"
+                    .into(),
+            );
+        }
+        for a in &self.server_args {
+            if !is_plain_word(a) {
+                return Err(format!(
+                    "[rack] server_args entry {a:?} is not a plain argument (no spaces, quotes or shell syntax)"
+                ));
+            }
+        }
+        for r in &self.reviewers {
+            if r.is_local() && !is_plain_word(&r.model) {
+                return Err(format!(
+                    "[rack] reviewer {} model {:?} is not a plain path",
+                    r.identity, r.model
+                ));
+            }
+        }
         for p in &self.packages {
             // An apt spec, not a shell fragment: it is interpolated into the
             // guest payload, and the payload is bash.
@@ -249,7 +315,16 @@ impl RackConfig {
                 self.queue_timeout_secs, self.job_timeout_secs
             ));
         }
-        if self.judge && self.reviewers.len() < 2 {
+        // Other Other Barry never runs in the main job (it is the tie-break),
+        // so it does not make a pair to judge.
+        if self.judge
+            && self
+                .reviewers
+                .iter()
+                .filter(|r| r.identity != "other_other_barry")
+                .count()
+                < 2
+        {
             return Err(
                 "[rack] judge = true needs two reviewers; there is nothing to reconcile".into(),
             );
@@ -258,7 +333,19 @@ impl RackConfig {
     }
 }
 
+/// Safe to interpolate into the bash payload unquoted.
+fn is_plain_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/:=+,@%-".contains(c))
+}
+
 impl Reviewer {
+    /// Whether `model` is a GGUF on the host rather than a slipway reference.
+    pub fn is_local(&self) -> bool {
+        self.model.starts_with('/')
+    }
+
     /// The artifact this reviewer's review is written to and collected as.
     pub fn artifact(&self) -> String {
         format!("review-{}.json", self.identity)
@@ -296,6 +383,10 @@ fn default_context_size() -> u32 {
 
 fn default_max_tokens() -> u32 {
     4096
+}
+
+fn default_request_timeout_secs() -> u64 {
+    600
 }
 
 fn default_priority() -> i32 {

@@ -133,6 +133,21 @@ impl TieBreakDeadlines {
     }
 }
 
+/// The rack job for Barry and Other Barry's review. Other Other Barry reviews
+/// only when they disagree, in a rack job of its own (`confer::review_as`).
+/// Without Other Barry there is nothing to reconcile, so no judge either.
+fn main_review_job(rack: &crate::rack::RackConfig, ob_available: bool) -> crate::rack::RackConfig {
+    let mut cfg = rack.clone();
+    cfg.reviewers
+        .retain(|r| r.identity != Identity::OtherOtherBarry.slug());
+    if !ob_available {
+        cfg.reviewers
+            .retain(|r| r.identity != Identity::OtherBarry.slug());
+        cfg.judge = false;
+    }
+    cfg
+}
+
 impl MultiReviewChecker {
     /// Produce a verdict from reviews run on the rack.
     ///
@@ -156,20 +171,13 @@ impl MultiReviewChecker {
         let barry_slug = Identity::Barry.slug();
         let ob_slug = Identity::OtherBarry.slug();
 
-        let mut cfg = (**rack).clone();
-        if !ob_available {
-            cfg.reviewers.retain(|r| r.identity != ob_slug);
-        }
+        let cfg = main_review_job(rack, ob_available);
         if !cfg.reviewers.iter().any(|r| r.identity == barry_slug) {
             anyhow::bail!("rack is configured but has no `{barry_slug}` reviewer");
         }
 
         self.status_tracker.set_phase(ctx.job_id, "rack review");
         let name = format!("barry review {}/{} #{}", ctx.owner, ctx.repo, ctx.pr.number);
-        if !ob_available {
-            // Nothing to reconcile, so do not pay for a reconciliation.
-            cfg.judge = false;
-        }
         let outcome = crate::rack::review_for_job(
             &cfg,
             &self.http,
@@ -260,8 +268,21 @@ impl MultiReviewChecker {
             }
             tracing::info!("Barry and Other Barry disagree; Other Other Barry breaks the tie");
             self.status_tracker.set_phase(ctx.job_id, "tie-break");
-            let diff = synthesis::render_diff_block(&ctx.files);
-            match confer::run_unified(&self.clients, oob, &self.personas, &diff).await {
+            let name = format!(
+                "barry tie-break {}/{} #{}",
+                ctx.owner, ctx.repo, ctx.pr.number
+            );
+            match confer::review_as(
+                self.rack.as_deref(),
+                &self.http,
+                &self.clients,
+                oob,
+                &self.personas,
+                &ctx.files,
+                &name,
+            )
+            .await
+            {
                 Ok(r) => Some(Ok(r)),
                 Err(e) => {
                     tracing::warn!(error = %e, "tie-break: Other Other Barry's review failed");
@@ -857,6 +878,72 @@ model_name = "n2"
 "#,
         )
         .unwrap()
+    }
+
+    fn cfg_with_oob() -> RackConfig {
+        let mut c = cfg();
+        c.judge = true;
+        let mut oob = c.reviewers[1].clone();
+        oob.identity = "other_other_barry".into();
+        c.reviewers.push(oob);
+        c
+    }
+
+    #[test]
+    fn other_other_barry_never_runs_in_the_main_review_job() {
+        let c = super::main_review_job(&cfg_with_oob(), true);
+        let ids: Vec<&str> = c.reviewers.iter().map(|r| r.identity.as_str()).collect();
+        assert_eq!(ids, vec!["barry", "other_barry"]);
+        assert!(c.judge);
+    }
+
+    #[test]
+    fn without_other_barry_the_main_job_is_barry_alone_and_unjudged() {
+        let c = super::main_review_job(&cfg_with_oob(), false);
+        let ids: Vec<&str> = c.reviewers.iter().map(|r| r.identity.as_str()).collect();
+        assert_eq!(ids, vec!["barry"]);
+        assert!(!c.judge);
+    }
+
+    #[test]
+    fn a_rack_reviewer_for_other_other_barry_enables_the_tie_break() {
+        let base = r#"
+[server]
+listen = "0.0.0.0:0"
+[github.barry]
+app_id = 1
+private_key_path = "/tmp/k"
+webhook_secret_env = "X"
+[github.other_barry]
+app_id = 2
+private_key_path = "/tmp/k"
+[github.other_other_barry]
+app_id = 3
+private_key_path = "/tmp/k"
+[storage]
+sqlite_path = "/tmp/x.db"
+[dispatcher]
+[rack]
+systemslab = "http://s"
+host_tags = ["host:hv03"]
+bare = true
+judge = true
+[[rack.reviewers]]
+identity = "barry"
+model = "/m.gguf"
+model_name = "m"
+[[rack.reviewers]]
+identity = "other_barry"
+model = "/m.gguf"
+model_name = "m"
+"#;
+        let without: crate::config::Config = toml::from_str(base).unwrap();
+        assert!(!without.tie_break_configured());
+        let with: crate::config::Config = toml::from_str(&format!(
+            "{base}[[rack.reviewers]]\nidentity = \"other_other_barry\"\nmodel = \"/m.gguf\"\nmodel_name = \"m\"\n"
+        ))
+        .unwrap();
+        assert!(with.tie_break_configured());
     }
 
     #[test]

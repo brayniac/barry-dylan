@@ -2,7 +2,7 @@
 
 Automated PR review powered by multiple LLM reviewers — single Rust binary, embedded SQLite, webhook-driven.
 
-Barry Dylan deploys three GitHub App identities (Barry, Other Barry, Other Other Barry), each with its own LLM provider and review persona. A hidden judge decides whether the two primary reviewers materially agree. When they do, only Barry posts and his outcome sets the `barry/llm-review` check-run. When they disagree, both post, then Other Other Barry reviews the same head as a tie-break, posts a review marked `(tie-break)`, and his outcome sets the check-run: Approve is `success`, Comment is `neutral`, RequestChanges is `failure`. If the tie-break fails, or Other Other Barry is not installed on the repo, has no `[llm.other_other_barry]` profile, or `[confer] tie_break = false`, the check-run goes neutral with "No consensus". The tie-break keeps back 510 s, or a tenth of `checker_timeout_secs` if that is longer, to post its review (GitHub writes are retried for up to 5 minutes, plus up to seven 30 s requests around them); a review not done by then fails, and the summary says `tie-break failed: timed out`. Measured from when the check started, so with the default 1200 s timeout Barry, Other Barry, the judge and Other Other Barry together have 690 s; raise `checker_timeout_secs` for slower models. It is not posted when the PR's head moved or the PR closed while it ran.
+Barry Dylan deploys three GitHub App identities (Barry, Other Barry, Other Other Barry), each with its own LLM provider and review persona. A hidden judge decides whether the two primary reviewers materially agree. When they do, only Barry posts and his outcome sets the `barry/llm-review` check-run. When they disagree, both post, then Other Other Barry reviews the same head as a tie-break, posts a review marked `(tie-break)`, and his outcome sets the check-run: Approve is `success`, Comment is `neutral`, RequestChanges is `failure`. If the tie-break fails, or Other Other Barry is not installed on the repo, has neither an `[llm.other_other_barry]` profile nor an `other_other_barry` rack reviewer, or `[confer] tie_break = false`, the check-run goes neutral with "No consensus". The tie-break keeps back 510 s, or a tenth of `checker_timeout_secs` if that is longer, to post its review (GitHub writes are retried for up to 5 minutes, plus up to seven 30 s requests around them); a review not done by then fails, and the summary says `tie-break failed: timed out`. Measured from when the check started, so with the default 1200 s timeout Barry, Other Barry, the judge and Other Other Barry together have 690 s; raise `checker_timeout_secs` for slower models. It is not posted when the PR's head moved or the PR closed while it ran.
 
 ## Status
 
@@ -31,7 +31,7 @@ src/
 
 ### Where the Models Run
 
-By default each identity calls its `[llm.*]` endpoint directly. With a `[rack]` section the reviews instead run as a systemslab experiment: an ephemeral GPU VM pulls the model, serves it, produces both reviews, and is destroyed. Barry never speaks to the model.
+By default each identity calls its `[llm.*]` endpoint directly. With a `[rack]` section the reviews instead run as a systemslab experiment: an ephemeral GPU VM pulls the model, serves it, produces both reviews, and is destroyed. Barry never speaks to the model. With `bare = true` the job runs on the host itself, for an integrated GPU a guest cannot use, and every reviewer and the judge get a model server started for them alone. An `other_other_barry` rack reviewer makes the tie-break and `/barry confer` run in rack jobs of their own.
 
 `[rack] judge = true` moves the judge in there too, against the model already loaded. That removes the last remote call: **no `[llm.*]` profile is required at all**, no API key lives in `secrets.env` but the webhook secret, and no diff leaves the rack. It needs two reviewers and the default sequential placement — concurrent reviewers run in separate guests, so neither can see the other's review, and the config is rejected rather than silently falling back.
 
@@ -180,7 +180,10 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | | `structured_output` | Send the schema as `response_format` (default true); false for servers that reject it, such as ferallm |
 | | `thinking` | `false` skips a Qwen-style template's reasoning block (llama-server, ferallm); absent keeps the template default |
 | `[rack]` | `temperature` | Same, for the reviewers and judge in the guest |
+| | `bare` | Run the job on the host itself, for a GPU a guest cannot use; `shape` and `image` are then unused |
+| | `server_args` | Arguments added to every `llama-server` command line |
 | `[[rack.reviewers]]` | `context_size` | Per-reviewer llama-server window, when a model needs a smaller one to fit |
+| | `model` | A slipway reference, or the absolute path of a GGUF on the host, served without a pull |
 | | `commands_from` | Logins who may command barry from comments; absent means nobody |
 | `[relay]` | `smee_url` | smee.io channel to hold open, when GitHub cannot reach Barry |
 | | `require_signature` | Forward GitHub's signature (default `true`) rather than re-signing |
@@ -198,7 +201,7 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | | `request_timeout_secs` | Request timeout |
 | `[confer]` | `allowed` | Roles allowed to run `/barry confer` |
 | | `max_per_pr` | Max additional reviewers per PR |
-| | `tie_break` | Other Other Barry breaks a disagreement and sets the check-run (default: `true`; needs an `[llm.other_other_barry]` profile) |
+| | `tie_break` | Other Other Barry breaks a disagreement and sets the check-run (default: `true`; needs an `[llm.other_other_barry]` profile or an `other_other_barry` rack reviewer) |
 | `[personas.*]` | `prompt_path` | Optional custom prompt file override |
 
 ### Per-Repo Config (`.barry.toml`)
