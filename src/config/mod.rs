@@ -281,13 +281,18 @@ pub enum ConfigError {
 impl Config {
     /// Whether a disagreement is handed to Other Other Barry to break.
     ///
-    /// Needs the switch on and an `[llm.other_other_barry]` profile. A rack
-    /// deployment may have no such profile: the rack produces Barry's and
-    /// Other Barry's reviews, not Other Other Barry's, so without the profile
-    /// there is nothing to run the tie-break against and a disagreement stays
-    /// neutral.
+    /// Needs the switch on and something to run Other Other Barry against: an
+    /// `[llm.other_other_barry]` profile, or an `other_other_barry` reviewer in
+    /// `[rack]`, which then reviews in a rack job of its own. Without either a
+    /// disagreement stays neutral.
     pub fn tie_break_configured(&self) -> bool {
-        self.confer.tie_break && self.llm.contains_key("other_other_barry")
+        let oob = "other_other_barry";
+        self.confer.tie_break
+            && (self.llm.contains_key(oob)
+                || self
+                    .rack
+                    .as_ref()
+                    .is_some_and(|r| r.reviewers.iter().any(|x| x.identity == oob)))
     }
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {

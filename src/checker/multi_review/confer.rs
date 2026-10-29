@@ -128,8 +128,17 @@ pub async fn handle(deps: &JobDeps, barry_gh: &Arc<GitHub>, job: &LeasedJob) -> 
     }
 
     let files = barry_gh.list_pr_files(&owner, &repo, job.pr_number).await?;
-    let diff = synthesis::render_diff_block(&files);
-    let (review, tokens) = run_unified(clients, summon, personas, &diff).await?;
+    let name = format!("barry confer {owner}/{repo} #{}", job.pr_number);
+    let (review, tokens) = review_as(
+        deps.config.rack.as_ref(),
+        &reqwest::Client::new(),
+        clients,
+        summon,
+        personas,
+        &files,
+        &name,
+    )
+    .await?;
     deps.status_tracker
         .add_tokens(job.id, tokens.input, tokens.output);
 
@@ -180,6 +189,10 @@ pub(crate) enum ReviewError {
     Persona(crate::llm::LlmError),
     #[error("synthesis failed: {0}")]
     Synthesis(synthesis::SynthesisError),
+    #[error("rack review failed: {0}")]
+    Rack(crate::rack::RackError),
+    #[error("the rack job returned no review for {0}")]
+    RackMissing(&'static str),
 }
 
 impl ReviewError {
@@ -192,8 +205,44 @@ impl ReviewError {
                 "model request failed"
             }
             ReviewError::Synthesis(_) => "synthesis failed",
+            ReviewError::Rack(_) | ReviewError::RackMissing(_) => "rack review failed",
         }
     }
+}
+
+/// `identity`'s independent review of `files`: in a rack job of its own when
+/// `[rack]` lists a reviewer for it, so the review gets a freshly started
+/// model server, and otherwise against the identity's endpoint
+/// ([`run_unified`]).
+///
+/// The rack job is not remembered on the dispatcher job, as the main rack
+/// review is: dropped before it ends, it is cancelled, and a resumed job runs
+/// it again. A rack review reports no token counts.
+pub(crate) async fn review_as(
+    rack: Option<&crate::rack::RackConfig>,
+    http: &reqwest::Client,
+    clients: &IdentityClients,
+    identity: Identity,
+    personas: &[Persona],
+    files: &[crate::github::pr::ChangedFile],
+    name: &str,
+) -> Result<(UnifiedReview, synthesis::TokenCount), ReviewError> {
+    let slug = identity.slug();
+    if let Some(rack) = rack.filter(|r| r.reviewers.iter().any(|x| x.identity == slug)) {
+        let mut cfg = rack.clone();
+        cfg.reviewers.retain(|r| r.identity == slug);
+        cfg.judge = false;
+        let mut outcome = crate::rack::review(&cfg, http, files, name)
+            .await
+            .map_err(ReviewError::Rack)?;
+        let review = outcome
+            .reviews
+            .remove(slug)
+            .ok_or(ReviewError::RackMissing(slug))?;
+        return Ok((review, synthesis::TokenCount::default()));
+    }
+    let diff = synthesis::render_diff_block(files);
+    run_unified(clients, identity, personas, &diff).await
 }
 
 /// One reviewer's independent review of `diff`: every persona drafts, gated
@@ -309,6 +358,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(peak.peak.load(SeqCst), 2);
+    }
+
+    fn peak_clients() -> IdentityClients {
+        let client: Arc<dyn crate::llm::LlmClient> = Arc::new(PeakClient {
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            peak: std::sync::atomic::AtomicUsize::new(0),
+        });
+        IdentityClients {
+            barry: client.clone(),
+            other_barry: client.clone(),
+            other_other_barry: client.clone(),
+            judge: client,
+            barry_max_tokens: 1000,
+            other_barry_max_tokens: 1000,
+            other_other_barry_max_tokens: 1000,
+            judge_max_tokens: 1000,
+            barry_context_size: None,
+            other_barry_context_size: None,
+            other_other_barry_context_size: None,
+        }
+    }
+
+    fn rack_with_oob(systemslab: &str) -> crate::rack::RackConfig {
+        toml::from_str(&format!(
+            r#"
+systemslab = "{systemslab}"
+host_tags = ["host:hv03"]
+bare = true
+judge = true
+packages = []
+poll_interval_secs = 1
+
+[[reviewers]]
+identity = "barry"
+model = "/m.gguf"
+model_name = "m"
+
+[[reviewers]]
+identity = "other_barry"
+model = "/m.gguf"
+model_name = "m"
+
+[[reviewers]]
+identity = "other_other_barry"
+model = "/m.gguf"
+model_name = "m"
+"#
+        ))
+        .unwrap()
+    }
+
+    /// A tie-break or `/barry confer` with a rack reviewer for the identity is
+    /// one rack job with that reviewer alone, no judge, and never the endpoint.
+    #[tokio::test]
+    async fn a_summoned_rack_reviewer_runs_in_a_job_of_its_own() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/submit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "t1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/experiment/t1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"state": "success", "jobs": [{"state": "complete"}]}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/experiment/t1/artifacts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "a1", "name": "review-other_other_barry.json"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/artifact/a1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    r#"{"outcome":"request_changes","summary":"no","findings":[]}"#,
+                ),
+            )
+            .mount(&server)
+            .await;
+        let rack = rack_with_oob(&server.uri());
+        let files = vec![crate::github::pr::ChangedFile {
+            filename: "a.rs".into(),
+            status: "modified".into(),
+            additions: 1,
+            deletions: 0,
+            changes: 1,
+            patch: Some("@@ -1 +1 @@\n+x".into()),
+        }];
+        let (review, _) = review_as(
+            Some(&rack),
+            &reqwest::Client::new(),
+            &peak_clients(),
+            Identity::OtherOtherBarry,
+            &[],
+            &files,
+            "t",
+        )
+        .await
+        .unwrap();
+        assert_eq!(review.summary, "no");
+
+        let submitted = server.received_requests().await.unwrap();
+        let body = String::from_utf8_lossy(&submitted[0].body).to_string();
+        assert_eq!(body.matches("review-offline").count(), 1, "{body}");
+        assert!(body.contains("offline-other_other_barry.toml"), "{body}");
+        assert!(!body.contains("offline-barry.toml"), "{body}");
+        assert!(!body.contains("judge-offline"), "{body}");
     }
 
     #[test]

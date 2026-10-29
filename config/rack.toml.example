@@ -61,6 +61,17 @@ image = "spool/images/debian-13-gpu@golden"
 # day either is republished. Default: ["slipway", "llama-server"], unpinned.
 packages = ["slipway=0.2.3-1", "llama-server=10502-1"]
 
+# Run on the host itself rather than in a guest: one `shell` step, for a GPU a
+# guest cannot use (an integrated one). `shape` and `image` are then unused, the
+# host needs llama-server and GPU access for the systemslab agent's user, and
+# `packages` should not name a llama-server the host already has a variant of.
+# The server runs as the transient unit `barry-rack-llama`, stopped when the job
+# ends and before the next one starts.
+# bare = true
+#
+# Arguments added to every llama-server command line.
+# server_args = ["-np", "1", "--cache-ram", "0", "--jinja"]
+
 # Reconcile the two reviews inside the guest, against the model already loaded,
 # and return the verdict as an artifact alongside them. Needs two reviewers and
 # the default sequential placement.
@@ -86,6 +97,8 @@ judge = true
 # loaded once, and both reviews run against it. The diversity is then in the
 # sampling rather than the model, which is weaker than two genuinely different
 # models but costs nothing -- the pull is the expensive part of a rack review.
+# `model` is a slipway reference, or the absolute path of a GGUF already on the
+# host (useful with `bare`), which is served without a pull.
 [[reviewers]]
 identity = "barry"
 model = "Qwen/Qwen3.5-9B@latest/gguf/q4_k_m@latest"
