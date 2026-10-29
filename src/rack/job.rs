@@ -1,6 +1,6 @@
 //! Building the systemslab experiment that produces the reviews.
 
-use super::config::{Placement, RackConfig, Reviewer, VERDICT_ARTIFACT};
+use super::config::{JUDGE_LOG, Placement, RackConfig, Reviewer, VERDICT_ARTIFACT};
 use crate::github::pr::ChangedFile;
 use base64::Engine as _;
 use serde_json::{Value, json};
@@ -54,9 +54,15 @@ barry-dylan --version
 llama-server --version 2>&1 | head -1 || true
 
 SERVER_PID=
+# SIGTERM, then SIGKILL after 10 s: a degraded server can take minutes to stop.
 stop_server() {{
     if [ -n "$SERVER_PID" ]; then
         kill "$SERVER_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$SERVER_PID" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -9 "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
         SERVER_PID=
     fi
@@ -76,20 +82,23 @@ trap stop_server EXIT
     ));
 
     let server_args: String = cfg.server_args.iter().map(|a| format!(" {a}")).collect();
-    // Serve `r`'s model, logging to `log`, and wait for it to answer.
-    let start = |r: &Reviewer, log: &str| -> String {
+    // Serve `r`'s model, logging to `log`, and wait for it to answer. `fail`
+    // ends the script (`exit 1`) or, inside a function, reports to the caller
+    // (`return 1`); every step that can fail names it, since `set -e` does not
+    // apply inside a function called as an `if` condition.
+    let start = |r: &Reviewer, log: &str, fail: &str| -> String {
         let mut out = String::new();
         if r.is_local() {
             out.push_str(&format!(
-                "GGUF={model}\ntest -r \"$GGUF\" || {{ echo \"cannot read $GGUF\"; exit 1; }}\n",
+                "GGUF={model}\ntest -r \"$GGUF\" || {{ echo \"cannot read $GGUF\"; {fail}; }}\n",
                 model = r.model,
             ));
         } else {
             out.push_str(&format!(
                 r#"rm -rf "$T/model"
-slipway pull '{model}' "$T/model"
-GGUF=$(find "$T/model" -name '*.gguf' | head -1)
-test -n "$GGUF" || {{ echo "no gguf materialised from {model}"; exit 1; }}
+slipway pull '{model}' "$T/model" || {{ echo "the model pull failed"; {fail}; }}
+GGUF=$(find "$T/model" -name '*.gguf' | head -1) || {fail}
+test -n "$GGUF" || {{ echo "no gguf materialised from {model}"; {fail}; }}
 "#,
                 model = r.model,
             ));
@@ -99,7 +108,7 @@ test -n "$GGUF" || {{ echo "no gguf materialised from {model}"; exit 1; }}
 # Something already answering on the port would be reviewed against in place
 # of the server this job starts.
 if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1; then
-    echo "port 8080 is already serving; refusing to review against it"; exit 1
+    echo "port 8080 is already serving; refusing to review against it"; {fail}
 fi
 llama-server -m "$GGUF" --host 127.0.0.1 --port 8080 -ngl 99 -c {context} \
     --no-webui{server_args} > "$T/{log}" 2>&1 &
@@ -108,12 +117,12 @@ SERVER_PID=$!
 # Bounded, and it gives up as soon as the server dies rather than waiting out
 # the whole loop to report a timeout that was really a crash.
 for _ in $(seq 1 240); do
-    kill -0 "$SERVER_PID" 2>/dev/null || {{ tail -40 "$T/{log}"; exit 1; }}
+    kill -0 "$SERVER_PID" 2>/dev/null || {{ tail -40 "$T/{log}"; {fail}; }}
     curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 && break
     sleep 2
 done
 curl -sf http://127.0.0.1:8080/health >/dev/null \
-    || {{ tail -40 "$T/{log}"; exit 1; }}
+    || {{ tail -40 "$T/{log}"; {fail}; }}
 
 "#,
             context = r.context_size(cfg),
@@ -136,7 +145,7 @@ curl -sf http://127.0.0.1:8080/health >/dev/null \
 
         s.push_str(&format!("# ---- {} ----\n", r.identity));
         if start_server {
-            s.push_str(&start(r, &r.server_log()));
+            s.push_str(&start(r, &r.server_log(), "exit 1"));
         }
 
         s.push_str(&format!(
@@ -183,10 +192,15 @@ barry-dylan review-offline \
         // itself.
         let last = i + 1 == reviewers.len();
         let judging = cfg.judge && last && reviewers.len() >= 2;
+        // On a bare host the judge's server is started in a function, so a
+        // server that does not come up costs the verdict, not the two reviews.
         if judging && cfg.bare {
             s.push_str(stop);
-            s.push_str("# ---- judge ----\n");
-            s.push_str(&start(r, "llama-judge.log"));
+            s.push_str("# ---- judge ----\njudge_server() {\n");
+            s.push_str(&start(r, JUDGE_LOG, "return 1"));
+            s.push_str(&format!(
+                "}}\nif ! judge_server; then\n    echo '{{\"error\":\"the judge server did not start\"}}' > \"$T/{VERDICT_ARTIFACT}\"\nelse\n"
+            ));
         }
         if judging {
             let a = reviewers[0];
@@ -207,7 +221,6 @@ barry-dylan judge-offline \
     --b "$T/{b_artifact}" \
     --out "$T/{verdict}" \
     || echo '{{"error":"judge-offline failed in the guest"}}' > "$T/{verdict}"
-
 "#,
                 model_name = r.model_name,
                 judge_max_tokens = cfg.judge_max_tokens,
@@ -217,6 +230,7 @@ barry-dylan judge-offline \
                 b_artifact = b.artifact(),
                 verdict = VERDICT_ARTIFACT,
             ));
+            s.push_str(if cfg.bare { "fi\n\n" } else { "\n" });
         }
 
         if stop_server || judging {
@@ -298,6 +312,12 @@ fn job_value(
             "uses": "upload-artifact",
             "with": { "path": VERDICT_ARTIFACT }
         }));
+        if cfg.bare {
+            steps.push(json!({
+                "uses": "upload-artifact",
+                "with": { "path": JUDGE_LOG }
+            }));
+        }
     }
     if !cfg.bare {
         steps.push(json!({
@@ -958,5 +978,115 @@ model_name = "qwen3.6-35b-a3b"
         let mut c = bare_cfg();
         c.reviewers[0].model = "/var/lib/models/a b.gguf".into();
         assert!(c.validate().is_err());
+    }
+
+    /// Run the bare payload under bash with stubs for everything outside it.
+    /// The stub server answers health checks while its marker file exists,
+    /// fails to start on start number `fail_on` (0: never), and ignores
+    /// SIGTERM when `deaf` is set. Returns the exit status and the directory.
+    fn run_stubbed(fail_on: u32, deaf: bool) -> (std::process::Output, tempfile::TempDir) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let stub = |name: &str, body: &str| {
+            let f = bin.join(name);
+            std::fs::write(&f, format!("#!/bin/bash\n{body}\n")).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        stub("sudo", r#"exec "$@""#);
+        stub("apt-get", "exit 0");
+        stub(
+            "barry-dylan",
+            r#"[ "$1" = --version ] && { echo barry-dylan 0; exit 0; }
+while [ $# -gt 0 ]; do [ "$1" = --out ] && out=$2; shift; done
+if [ "${0##*/}" = barry-dylan ] && grep -q judge <<<"$out"; then :; fi
+echo '{"outcome":"approve","summary":"s","findings":[]}' > "$out""#,
+        );
+        stub(
+            "llama-server",
+            &format!(
+                r#"[ "$1" = --version ] && {{ echo version; exit 0; }}
+n=$(( $(cat "$PWD/starts" 2>/dev/null || echo 0) + 1 )); echo $n > "$PWD/starts"
+[ {fail_on} -eq $n ] && exit 1
+{trap}
+echo $$ > "$PWD/up"
+while :; do sleep 0.1; done"#,
+                trap = if deaf {
+                    r#"trap '' TERM"#
+                } else {
+                    r#"trap 'rm -f "$PWD/up"; exit 0' TERM"#
+                },
+            ),
+        );
+        // A port answers while the process that bound it is alive.
+        stub("curl", r#"[ -e "$PWD/up" ] && kill -0 "$(cat "$PWD/up")" 2>/dev/null"#);
+        let model = dir.path().join("m.gguf");
+        std::fs::write(&model, b"").unwrap();
+        let mut c = bare_cfg();
+        for r in c.reviewers.iter_mut() {
+            r.model = model.display().to_string();
+        }
+        let p = payload(&c, &all(&c), &files()).unwrap();
+        let script = dir.path().join("payload.sh");
+        std::fs::write(&script, p).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let out = std::process::Command::new("bash")
+            .arg(&script)
+            .current_dir(dir.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        (out, dir)
+    }
+
+    #[test]
+    fn a_judge_server_that_does_not_start_costs_the_verdict_not_the_reviews() {
+        // Barry's server is start 1, Other Barry's 2, the judge's 3.
+        let (out, dir) = run_stubbed(3, false);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(dir.path().join("review-barry.json").exists());
+        assert!(dir.path().join("review-other_barry.json").exists());
+        let verdict = std::fs::read_to_string(dir.path().join(VERDICT_ARTIFACT)).unwrap();
+        assert!(
+            verdict.contains("the judge server did not start"),
+            "{verdict}"
+        );
+    }
+
+    #[test]
+    fn a_server_that_ignores_sigterm_is_killed_and_the_job_finishes() {
+        let started = std::time::Instant::now();
+        let (out, dir) = run_stubbed(0, true);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(dir.path().join(VERDICT_ARTIFACT).exists());
+        // Three servers, each given 10 s to stop before SIGKILL.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_bare_judge_uploads_its_server_log() {
+        let s = spec(&bare_cfg(), &files(), "x").unwrap();
+        let steps = s["experiment"]["jobs"]["review"]["steps"]
+            .as_array()
+            .unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|st| st["with"]["path"] == json!(JUDGE_LOG)),
+            "{steps:?}"
+        );
     }
 }

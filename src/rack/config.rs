@@ -240,6 +240,10 @@ fn default_packages() -> Vec<String> {
 /// The artifact the in-guest judge writes its verdict to.
 pub const VERDICT_ARTIFACT: &str = "verdict.json";
 
+/// The judge's own server log, on a bare host, where the judge gets a server
+/// of its own.
+pub const JUDGE_LOG: &str = "llama-judge.log";
+
 impl RackConfig {
     /// Reject a configuration that cannot do what it says.
     ///
@@ -262,7 +266,7 @@ impl RackConfig {
             && self
                 .packages
                 .iter()
-                .any(|p| p.split('=').next() == Some("llama-server"))
+                .any(|p| p.split(['=', '/']).next() == Some("llama-server"))
         {
             return Err(
                 "[rack] bare = true runs the host's own llama-server; installing the \
