@@ -57,9 +57,9 @@
 //! A request that timed out is not retried.
 //!
 //! Retry policy:
-//! - Max 3 attempts
-//! - Starting delay: 250ms
-//! - Multiplier: 2x
+//! - Up to 7 attempts, waiting 1, 2, 4, 8, 16 and 16 s between them (47 s
+//!   of waiting in all, plus the attempts themselves), which outlasts a local llama-server restarting: it refuses
+//!   connections, then answers 503 while it loads, for about 25 s.
 //!
 //! ```ignore
 //! let result = retry_transient(|| client.complete(&request)).await?;
@@ -186,26 +186,31 @@ fn is_transient(e: &LlmError) -> bool {
     }
 }
 
+/// The waits between attempts in [`retry_transient`], in seconds.
+const RETRY_DELAYS_SECS: [u64; 6] = [1, 2, 4, 8, 16, 16];
+
 /// Retry a closure with exponential backoff on transient errors.
 pub(crate) async fn retry_transient<F, Fut>(mut f: F) -> Result<LlmResponse, LlmError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<LlmResponse, LlmError>>,
 {
-    let mut delay = std::time::Duration::from_millis(250);
-    let max_attempts = 3u32;
-    for attempt in 0..max_attempts {
+    let mut delays = RETRY_DELAYS_SECS.iter();
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
         match f().await {
             Ok(r) => return Ok(r),
-            Err(e) if attempt + 1 < max_attempts && is_transient(&e) => {
-                tracing::warn!(error = ?e, attempt = attempt + 1, "llm transient error; retrying");
-                tokio::time::sleep(delay).await;
-                delay = delay.saturating_mul(2);
-            }
+            Err(e) if is_transient(&e) => match delays.next() {
+                Some(secs) => {
+                    tracing::warn!(error = ?e, attempt, retry_in_secs = secs, "llm transient error; retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(*secs)).await;
+                }
+                None => return Err(e),
+            },
             Err(e) => return Err(e),
         }
     }
-    unreachable!()
 }
 
 #[cfg(test)]
@@ -222,6 +227,49 @@ mod tests {
             let want = matches!(code, 502..=504);
             assert_eq!(is_transient(&e), want, "status {code}");
         }
+    }
+
+    fn unavailable() -> LlmError {
+        LlmError::Api {
+            status: 503,
+            body: "Loading model".into(),
+        }
+    }
+
+    /// A llama-server restart answers 503 for about 25 s; the retries must
+    /// outlast it.
+    #[tokio::test(start_paused = true)]
+    async fn transient_errors_are_retried_for_47_seconds() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let started = tokio::time::Instant::now();
+        let r = retry_transient(|| async {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 6 {
+                Err(unavailable())
+            } else {
+                Ok(LlmResponse {
+                    text: "ok".into(),
+                    input_tokens: None,
+                    output_tokens: None,
+                    finish_reason: None,
+                })
+            }
+        })
+        .await;
+        assert_eq!(r.unwrap().text, "ok");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 7);
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(47));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_seventh_transient_error_is_returned() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let r = retry_transient(|| async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(unavailable())
+        })
+        .await;
+        assert!(matches!(r, Err(LlmError::Api { status: 503, .. })));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 7);
     }
 
     #[test]
