@@ -90,6 +90,17 @@ pub struct RackConfig {
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
 
+    /// `false` asks a Qwen-style chat template to skip its reasoning block,
+    /// as `[llm.*] thinking` does; absent keeps the template's default. Applies
+    /// to the reviewers and the judge.
+    #[serde(default)]
+    pub thinking: Option<bool>,
+
+    /// Whether to ask the job's server for structured output, as
+    /// `[llm.*] structured_output` does; absent keeps that setting's default.
+    #[serde(default)]
+    pub structured_output: Option<bool>,
+
     /// Per-request timeout for `review-offline` and `judge-offline` against
     /// the job's server.
     #[serde(default = "default_request_timeout_secs")]
@@ -245,6 +256,11 @@ pub const VERDICT_ARTIFACT: &str = "verdict.json";
 pub const JUDGE_LOG: &str = "llama-judge.log";
 
 impl RackConfig {
+    /// Whether a reviewer is configured for the identity `slug`.
+    pub fn has_reviewer(&self, slug: &str) -> bool {
+        self.reviewers.iter().any(|r| r.identity == slug)
+    }
+
     /// Reject a configuration that cannot do what it says.
     ///
     /// Only `judge` can be wrong this way today. It is a hard error rather than

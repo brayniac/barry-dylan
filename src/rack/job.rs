@@ -5,6 +5,10 @@ use crate::github::pr::ChangedFile;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
+/// Half-second checks `stop_server` makes for the server to exit after
+/// SIGTERM before it sends SIGKILL.
+const STOP_POLLS: u32 = 20;
+
 /// Render the bash one guest runs for the reviewers assigned to it.
 ///
 /// The inputs travel inside the payload rather than as pushed files: the
@@ -54,11 +58,12 @@ barry-dylan --version
 llama-server --version 2>&1 | head -1 || true
 
 SERVER_PID=
-# SIGTERM, then SIGKILL after 10 s: a degraded server can take minutes to stop.
+# SIGTERM, then SIGKILL after {stop_secs} s: a degraded server can take minutes
+# to stop.
 stop_server() {{
     if [ -n "$SERVER_PID" ]; then
         kill "$SERVER_PID" 2>/dev/null || true
-        for _ in $(seq 1 20); do
+        for _ in $(seq 1 {stop_polls}); do
             kill -0 "$SERVER_PID" 2>/dev/null || break
             sleep 0.5
         done
@@ -71,6 +76,8 @@ trap stop_server EXIT
 
 "#,
         dir = if cfg.bare { "\"$PWD\"" } else { "/tmp" },
+        stop_polls = STOP_POLLS,
+        stop_secs = STOP_POLLS / 2,
         packages = cfg
             .packages
             .iter()
@@ -156,7 +163,7 @@ endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {max_tokens}
 context_size = {context_size}
-{temperature}request_timeout_secs = {request_timeout}
+{options}request_timeout_secs = {request_timeout}
 OFFLINE
 
 # The server log is an artifact whether or not this reviewer started the
@@ -173,7 +180,7 @@ barry-dylan review-offline \
             model_name = r.model_name,
             max_tokens = cfg.max_tokens,
             context_size = r.context_size(cfg),
-            temperature = temperature_line(cfg),
+            options = profile_options(cfg),
             request_timeout = cfg.request_timeout_secs,
             artifact = r.artifact(),
         ));
@@ -212,7 +219,7 @@ provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {judge_max_tokens}
-{temperature}request_timeout_secs = {request_timeout}
+{options}request_timeout_secs = {request_timeout}
 OFFLINE
 
 barry-dylan judge-offline \
@@ -224,7 +231,7 @@ barry-dylan judge-offline \
 "#,
                 model_name = r.model_name,
                 judge_max_tokens = cfg.judge_max_tokens,
-                temperature = temperature_line(cfg),
+                options = profile_options(cfg),
                 request_timeout = cfg.request_timeout_secs,
                 a_artifact = a.artifact(),
                 b_artifact = b.artifact(),
@@ -249,16 +256,24 @@ barry-dylan judge-offline \
     Ok(s)
 }
 
-/// Build one job's steps for the given reviewers.
-/// The `temperature = ` line for a guest-side `[llm]` profile, or nothing:
-/// absent means llama-server uses the model's own recommendation.
-fn temperature_line(cfg: &RackConfig) -> String {
-    match cfg.temperature {
-        Some(t) => format!("temperature = {t}\n"),
-        None => String::new(),
+/// The optional lines of a guest-side `[llm]` profile: `temperature`,
+/// `thinking` and `structured_output`, each only when `[rack]` sets it.
+/// Absent temperature means llama-server uses the model's own recommendation.
+fn profile_options(cfg: &RackConfig) -> String {
+    let mut s = String::new();
+    if let Some(t) = cfg.temperature {
+        s.push_str(&format!("temperature = {t}\n"));
     }
+    if let Some(t) = cfg.thinking {
+        s.push_str(&format!("thinking = {t}\n"));
+    }
+    if let Some(o) = cfg.structured_output {
+        s.push_str(&format!("structured_output = {o}\n"));
+    }
+    s
 }
 
+/// Build one job's steps for the given reviewers.
 fn job_value(
     cfg: &RackConfig,
     reviewers: &[&Reviewer],
@@ -1032,7 +1047,7 @@ while :; do sleep 0.1; done"#,
         // The stop window shortened from 10 s to 1 s, so the test that waits it
         // out three times does not hold CI for half a minute.
         let p = payload(&c, &all(&c), &files()).unwrap().replacen(
-            "for _ in $(seq 1 20); do",
+            &format!("for _ in $(seq 1 {STOP_POLLS}); do"),
             "for _ in $(seq 1 2); do",
             1,
         );
@@ -1096,5 +1111,36 @@ while :; do sleep 0.1; done"#,
                 .any(|st| st["with"]["path"] == json!(JUDGE_LOG)),
             "{steps:?}"
         );
+    }
+
+    #[test]
+    fn thinking_and_structured_output_reach_every_offline_profile() {
+        // Barry, Other Barry and the judge, on a bare host and in a guest.
+        for mut c in [bare_cfg(), judging_cfg()] {
+            c.thinking = Some(false);
+            c.structured_output = Some(true);
+            let p = payload(&c, &all(&c), &files()).unwrap();
+            assert_eq!(p.matches("thinking = false\n").count(), 3, "{p}");
+            assert_eq!(p.matches("structured_output = true\n").count(), 3, "{p}");
+        }
+        let unset = payload(&bare_cfg(), &all(&bare_cfg()), &files()).unwrap();
+        assert!(!unset.contains("thinking ="), "{unset}");
+    }
+
+    /// The profile written into the payload must parse as the offline
+    /// config's `[llm]` table, or `review-offline` fails at its first line.
+    #[test]
+    fn the_offline_profile_with_every_option_parses() {
+        let mut c = bare_cfg();
+        c.thinking = Some(false);
+        c.structured_output = Some(true);
+        c.temperature = Some(0.2);
+        let text = format!(
+            "[llm]\nprovider = \"openai\"\nendpoint = \"http://x/v1\"\nmodel = \"m\"\nmax_tokens = 1\n{}request_timeout_secs = 1\n",
+            profile_options(&c)
+        );
+        let p: crate::offline::config::OfflineConfig = toml::from_str(&text).unwrap();
+        assert_eq!(p.llm.thinking, Some(false));
+        assert_eq!(p.llm.structured_output, Some(true));
     }
 }

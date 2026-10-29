@@ -72,6 +72,12 @@ packages = ["slipway=0.2.3-1", "llama-server=10502-1"]
 # Arguments added to every llama-server command line.
 # server_args = ["-np", "1", "--cache-ram", "0", "--jinja"]
 #
+# As in [llm.*]: `thinking = false` skips a Qwen-style template's reasoning
+# block; `structured_output` asks the server to constrain replies to the
+# request's JSON schema (a review's or the judge's verdict).
+# thinking = false
+# structured_output = true
+#
 # Per-request timeout for review-offline and judge-offline. Default 600.
 # request_timeout_secs = 600
 
