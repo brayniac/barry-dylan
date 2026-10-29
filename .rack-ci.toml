@@ -22,18 +22,13 @@ run = "cargo test --all-targets"
 
 # v* tags only: build the .deb into dist/ for the [release] job to publish.
 #
-# This one matters more than most: the rack guest that runs a review installs
+# This one matters more than most: the rack job that runs a review installs
 # barry-dylan from delta's internal apt repo at run time, so a review runs
 # whatever was last published here -- not whatever is deployed on delta.
 #
-# `x86-build` and NOT `x86`, which is the obvious-looking choice and deadlocks.
-# Both are a Debian CI guest, but `x86` places on delta, and delta is where the
-# [release] job publishes. systemslab places an experiment all-or-nothing, so
-# build-and-publish both asking for `validation` is two jobs wanting one host:
-# it does not fail, it sits `unscheduled` until the timeout reports no result.
-# `x86-build` puts the build on a hypervisor instead, leaving delta for the
-# publish. v0.3.0 sat unscheduled for ten minutes proving the comment in
-# /etc/rack-ci/rack-ci.toml right.
+# `x86`: a guest on delta, which takes a release as one job without waiting
+# for a hypervisor. A cold release build (no compiler cache) peaked at 3.6 GB;
+# the guest has 8 GiB.
 [release]
-target = "x86-build"
+target = "x86"
 run = "bash .rack-release.sh"
