@@ -156,7 +156,7 @@ endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {max_tokens}
 context_size = {context_size}
-{temperature}request_timeout_secs = {request_timeout}
+{options}request_timeout_secs = {request_timeout}
 OFFLINE
 
 # The server log is an artifact whether or not this reviewer started the
@@ -173,7 +173,7 @@ barry-dylan review-offline \
             model_name = r.model_name,
             max_tokens = cfg.max_tokens,
             context_size = r.context_size(cfg),
-            temperature = temperature_line(cfg),
+            options = profile_options(cfg),
             request_timeout = cfg.request_timeout_secs,
             artifact = r.artifact(),
         ));
@@ -212,7 +212,7 @@ provider = "openai"
 endpoint = "http://127.0.0.1:8080/v1"
 model = "{model_name}"
 max_tokens = {judge_max_tokens}
-{temperature}request_timeout_secs = {request_timeout}
+{options}request_timeout_secs = {request_timeout}
 OFFLINE
 
 barry-dylan judge-offline \
@@ -224,7 +224,7 @@ barry-dylan judge-offline \
 "#,
                 model_name = r.model_name,
                 judge_max_tokens = cfg.judge_max_tokens,
-                temperature = temperature_line(cfg),
+                options = profile_options(cfg),
                 request_timeout = cfg.request_timeout_secs,
                 a_artifact = a.artifact(),
                 b_artifact = b.artifact(),
@@ -249,16 +249,24 @@ barry-dylan judge-offline \
     Ok(s)
 }
 
-/// Build one job's steps for the given reviewers.
-/// The `temperature = ` line for a guest-side `[llm]` profile, or nothing:
-/// absent means llama-server uses the model's own recommendation.
-fn temperature_line(cfg: &RackConfig) -> String {
-    match cfg.temperature {
-        Some(t) => format!("temperature = {t}\n"),
-        None => String::new(),
+/// The optional lines of a guest-side `[llm]` profile: `temperature`,
+/// `thinking` and `structured_output`, each only when `[rack]` sets it.
+/// Absent temperature means llama-server uses the model's own recommendation.
+fn profile_options(cfg: &RackConfig) -> String {
+    let mut s = String::new();
+    if let Some(t) = cfg.temperature {
+        s.push_str(&format!("temperature = {t}\n"));
     }
+    if let Some(t) = cfg.thinking {
+        s.push_str(&format!("thinking = {t}\n"));
+    }
+    if let Some(o) = cfg.structured_output {
+        s.push_str(&format!("structured_output = {o}\n"));
+    }
+    s
 }
 
+/// Build one job's steps for the given reviewers.
 fn job_value(
     cfg: &RackConfig,
     reviewers: &[&Reviewer],
@@ -1096,5 +1104,36 @@ while :; do sleep 0.1; done"#,
                 .any(|st| st["with"]["path"] == json!(JUDGE_LOG)),
             "{steps:?}"
         );
+    }
+
+    #[test]
+    fn thinking_and_structured_output_reach_every_offline_profile() {
+        // Barry, Other Barry and the judge, on a bare host and in a guest.
+        for mut c in [bare_cfg(), judging_cfg()] {
+            c.thinking = Some(false);
+            c.structured_output = Some(true);
+            let p = payload(&c, &all(&c), &files()).unwrap();
+            assert_eq!(p.matches("thinking = false\n").count(), 3, "{p}");
+            assert_eq!(p.matches("structured_output = true\n").count(), 3, "{p}");
+        }
+        let unset = payload(&bare_cfg(), &all(&bare_cfg()), &files()).unwrap();
+        assert!(!unset.contains("thinking ="), "{unset}");
+    }
+
+    /// The profile written into the payload must parse as the offline
+    /// config's `[llm]` table, or `review-offline` fails at its first line.
+    #[test]
+    fn the_offline_profile_with_every_option_parses() {
+        let mut c = bare_cfg();
+        c.thinking = Some(false);
+        c.structured_output = Some(true);
+        c.temperature = Some(0.2);
+        let text = format!(
+            "[llm]\nprovider = \"openai\"\nendpoint = \"http://x/v1\"\nmodel = \"m\"\nmax_tokens = 1\n{}request_timeout_secs = 1\n",
+            profile_options(&c)
+        );
+        let p: crate::offline::config::OfflineConfig = toml::from_str(&text).unwrap();
+        assert_eq!(p.llm.thinking, Some(false));
+        assert_eq!(p.llm.structured_output, Some(true));
     }
 }

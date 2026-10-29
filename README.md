@@ -182,6 +182,7 @@ Nothing inbound is needed, which is what makes Barry deployable on a rack behind
 | `[rack]` | `temperature` | Same, for the reviewers and judge in the guest |
 | | `bare` | Run the job on the host itself, for a GPU a guest cannot use; `shape` and `image` are then unused |
 | | `server_args` | Arguments added to every `llama-server` command line |
+| | `thinking`, `structured_output` | As in `[llm.*]`, for the reviewers and judge in the job |
 | `[[rack.reviewers]]` | `context_size` | Per-reviewer llama-server window, when a model needs a smaller one to fit |
 | | `model` | A slipway reference, or the absolute path of a GGUF on the host, served without a pull |
 | | `commands_from` | Logins who may command barry from comments; absent means nobody |

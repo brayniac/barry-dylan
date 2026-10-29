@@ -90,6 +90,17 @@ pub struct RackConfig {
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
 
+    /// `false` asks a Qwen-style chat template to skip its reasoning block,
+    /// as `[llm.*] thinking` does; absent keeps the template's default. Applies
+    /// to the reviewers and the judge.
+    #[serde(default)]
+    pub thinking: Option<bool>,
+
+    /// Whether to ask the job's server for structured output, as
+    /// `[llm.*] structured_output` does; absent keeps that setting's default.
+    #[serde(default)]
+    pub structured_output: Option<bool>,
+
     /// Per-request timeout for `review-offline` and `judge-offline` against
     /// the job's server.
     #[serde(default = "default_request_timeout_secs")]
