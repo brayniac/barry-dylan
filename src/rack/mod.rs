@@ -679,7 +679,7 @@ mod tests {
 systemslab = "{}"
 host_tags = ["gpu"]
 shape = "auto.g"
-image = "spool/images/debian-13-gpu@golden"
+image = "spool/images/debian-13-6.12-gpu-cu12@golden"
 poll_interval_secs = 1
 
 [[reviewers]]

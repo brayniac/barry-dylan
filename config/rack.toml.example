@@ -48,15 +48,16 @@ host_tags = ["z2.baremetal"]
 # takes its whole host.
 shape = "z2.g"
 
-# Guest image. debian-13-gpu carries the NVIDIA driver, CUDA, llama-server and
-# slipway. barry-dylan itself is NOT in the image -- the job installs it from
-# the rack's internal apt repo at run time, so shipping a new barry does not
-# mean rebuilding a 7.5 GB image.
-image = "spool/images/debian-13-gpu@golden"
+# Guest image. debian-13-6.12-gpu-cu12 carries the NVIDIA driver and CUDA; the
+# job installs llama-server and slipway from `packages` below. barry-dylan
+# itself is NOT in the image -- the job installs it from the rack's internal
+# apt repo at run time, so shipping a new barry does not mean rebuilding a
+# 7.5 GB image.
+image = "spool/images/debian-13-6.12-gpu-cu12@golden"
 
 # What the guest installs before reviewing, from the rack's internal apt repo.
 # The image carries the platform (driver, CUDA, rezolus) and a job installs the
-# workload: debian-13-gpu bakes neither llama-server nor the slipway client.
+# workload: debian-13-6.12-gpu-cu12 bakes neither llama-server nor the slipway client.
 # Pin them in a real deployment -- unpinned, a review's toolchain changes the
 # day either is republished. Default: ["slipway", "llama-server"], unpinned.
 packages = ["slipway=0.2.3-1", "llama-server=10502-1"]

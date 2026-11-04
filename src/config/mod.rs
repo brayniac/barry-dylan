@@ -422,7 +422,7 @@ sqlite_path = "/tmp/b.db"
 systemslab = "http://systemslab"
 host_tags = ["z2.baremetal"]
 shape = "z2.g"
-image = "spool/images/debian-13-gpu@golden"
+image = "spool/images/debian-13-6.12-gpu-cu12@golden"
 judge = true
 
 [[rack.reviewers]]
@@ -456,8 +456,8 @@ model_name = "qwen3.5-9b"
         // Caught when the config is read rather than when a pull request
         // arrives: the failure is in the file, not in the pull request.
         let f = write_tmp(&RACK_ONLY.replace(
-            "image = \"spool/images/debian-13-gpu@golden\"",
-            "image = \"spool/images/debian-13-gpu@golden\"\nplacement = \"concurrent\"",
+            "image = \"spool/images/debian-13-6.12-gpu-cu12@golden\"",
+            "image = \"spool/images/debian-13-6.12-gpu-cu12@golden\"\nplacement = \"concurrent\"",
         ));
         let err = Config::load(f.path()).unwrap_err().to_string();
         assert!(err.contains("sequential"), "unexpected error: {err}");
