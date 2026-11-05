@@ -402,7 +402,7 @@ mod tests {
 systemslab = "http://systemslab"
 host_tags = ["z2.baremetal"]
 shape = "z2.g.medium"
-image = "spool/images/debian-13-gpu@golden"
+image = "spool/images/debian-13-6.12-gpu-cu12@golden"
 
 [[reviewers]]
 identity = "barry"

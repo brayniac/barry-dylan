@@ -25,7 +25,7 @@ pub struct RackConfig {
     #[serde(default)]
     pub shape: String,
 
-    /// Guest image, e.g. `spool/images/debian-13-gpu@golden`. Unused when
+    /// Guest image, e.g. `spool/images/debian-13-6.12-gpu-cu12@golden`. Unused when
     /// `bare`.
     #[serde(default)]
     pub image: String,
@@ -70,7 +70,7 @@ pub struct RackConfig {
     ///
     /// These are the rack's "workload in the job" half: the guest image carries
     /// the platform (driver, CUDA, kernel, rezolus) and a job installs what it
-    /// actually runs. `debian-13-gpu` deliberately bakes neither -- llama.cpp
+    /// actually runs. `debian-13-6.12-gpu-cu12` deliberately bakes neither -- llama.cpp
     /// moves far too fast for a version in a 7.5 GB image to mean anything, and
     /// slipway's client has to be able to follow its server.
     ///
@@ -437,7 +437,7 @@ mod tests {
 systemslab = "http://systemslab"
 host_tags = ["z2.baremetal"]
 shape = "z2.g.medium"
-image = "spool/images/debian-13-gpu@golden"
+image = "spool/images/debian-13-6.12-gpu-cu12@golden"
 
 [[reviewers]]
 identity = "barry"
